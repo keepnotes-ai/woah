@@ -56,6 +56,9 @@ type CommandMap = {
   verb: string;
   dobj: ObjRef | null;
   dobjstr: string;
+  dobj_prefix: ObjRef | null;
+  dobj_prefix_str: string;
+  dobj_prefix_rest: string;
   prep: string | null;
   iobj: ObjRef | null;
   iobjstr: string;
@@ -66,6 +69,7 @@ type CommandMap = {
 
 type CommandVerbSummary = {
   name: string;
+  definer?: ObjRef | null;
   direct_callable: boolean;
 };
 
@@ -4622,12 +4626,6 @@ export class WooWorld {
     this.nativeHandlers.set("room_who", (ctx) => this.roomWho(ctx));
     this.nativeHandlers.set("room_take", (ctx, args) => this.roomTake(ctx, assertString(args[0] ?? "")));
     this.nativeHandlers.set("room_drop", (ctx, args) => this.roomDrop(ctx, assertString(args[0] ?? "")));
-    this.nativeHandlers.set("chat_command_plan", (ctx, args) => this.chatCommandPlan(ctx, assertString(args[0] ?? "")));
-    this.nativeHandlers.set("chat_command", async (ctx, args) => {
-      const plan = await this.chatCommandPlan(ctx, assertString(args[0] ?? ""));
-      if (!isCommandPlanOk(plan) || plan.route !== "direct") return plan;
-      return await this.dispatch({ ...ctx, progr: ctx.actor }, assertObj(plan.target), assertString(plan.verb), Array.isArray(plan.args) ? plan.args : []);
-    });
   }
 
   private chatPresent(room: ObjRef): ObjRef[] {
@@ -4910,82 +4908,6 @@ export class WooWorld {
     }
   }
 
-  private async chatCommandPlan(ctx: CallContext, rawText: string): Promise<WooValue> {
-    const text = rawText.trim();
-    if (!text) return await this.huhPlan(ctx, rawText, "empty command");
-
-    const speech = await this.speechPlan(ctx, text);
-    if (speech) return speech;
-
-    const parsed = await this.parseCommandMap(text, ctx, ctx.thisObj);
-    const roomMatch = this.tryResolveVerb(ctx.thisObj, parsed.verb);
-    if (!parsed.argstr && roomMatch?.verb.direct_callable === true) {
-      return this.routePlan("direct", ctx.thisObj, roomMatch.verb.name, [], parsed);
-    }
-    if (parsed.argstr && roomMatch?.verb.direct_callable === true && this.inheritsFrom(ctx.thisObj, roomMatch.definer)) {
-      return this.routePlan("direct", ctx.thisObj, roomMatch.verb.name, [parsed.argstr], parsed);
-    }
-
-    const tokens = tokenizeCommand(parsed.argstr);
-    const prefix = await this.longestObjectPrefix(tokens, ctx, ctx.thisObj);
-    if (prefix) {
-      const resolved = await this.tryResolveVerbForCommand(ctx, prefix.object, parsed.verb);
-      if (!resolved) return await this.huhPlan(ctx, text, `${prefix.object} does not understand "${parsed.verb}".`);
-      const rest = tokenPhrase(tokens.slice(prefix.length));
-      return this.routePlan(resolved.direct_callable ? "direct" : "sequenced", prefix.object, resolved.name, rest ? [rest] : [], parsed, ctx.thisObj);
-    }
-
-    if (roomMatch?.verb.direct_callable === true) {
-      return this.routePlan("direct", ctx.thisObj, roomMatch.verb.name, parsed.argstr ? [parsed.argstr] : [], parsed);
-    }
-
-    if (!text.startsWith("/")) return this.routePlan("direct", ctx.thisObj, "say", [text], parsed);
-    return await this.huhPlan(ctx, text, `I don't see "${parsed.argstr}".`);
-  }
-
-  private async speechPlan(ctx: CallContext, text: string): Promise<WooValue | null> {
-    const room = ctx.thisObj;
-    if (text.startsWith("/me ")) return this.routePlan("direct", room, "emote", [text.slice(4).trim()], await this.parseCommandMap(`emote ${text.slice(4).trim()}`, ctx, room));
-    if (text.startsWith(":") && text.length > 1) return this.routePlan("direct", room, "emote", [text.slice(1).trim()], await this.parseCommandMap(`emote ${text.slice(1).trim()}`, ctx, room));
-    if (text.startsWith("]") && text.length > 1) return this.routePlan("direct", room, "pose", [text.slice(1).trim()], await this.parseCommandMap(`pose ${text.slice(1).trim()}`, ctx, room));
-    if (text.startsWith("|") && text.length > 1) return this.routePlan("direct", room, "quote", [text.slice(1).trim()], await this.parseCommandMap(`quote ${text.slice(1).trim()}`, ctx, room));
-    if (text.startsWith("<") && text.length > 1) return this.routePlan("direct", room, "self", [text.slice(1).trim()], await this.parseCommandMap(`self ${text.slice(1).trim()}`, ctx, room));
-    if (text.startsWith("\"") && text.length > 1) return this.routePlan("direct", room, "say", [text.slice(1).trim()], await this.parseCommandMap(`say ${text.slice(1).trim()}`, ctx, room));
-
-    if (text.startsWith("`") && text.length > 1) {
-      return await this.directedSpeechPlan(ctx, text.slice(1).trim(), "say_to") ?? await this.huhPlan(ctx, text, "Directed speech needs a recipient and text.");
-    }
-
-    const bracket = /^\[([^\]]+)\]\s*:?\s*(.*)$/.exec(text);
-    if (bracket) {
-      const style = bracket[1].trim();
-      const message = bracket[2].trim();
-      if (!style || !message) return await this.huhPlan(ctx, text, "Styled speech needs a style and text.");
-      return this.routePlan("direct", room, "say_as", [style, message], await this.parseCommandMap(`say_as ${message}`, ctx, room));
-    }
-
-    const tokens = tokenizeCommand(text);
-    const verb = tokens[0]?.value.toLowerCase();
-    const argstr = tokens.length > 0 ? text.slice(tokens[0].end).trim() : "";
-    if (verb === "say") return argstr ? this.routePlan("direct", room, "say", [argstr], await this.parseCommandMap(text, ctx, room)) : await this.huhPlan(ctx, text, "Say what?");
-    if (verb === "emote" || verb === "pose") return argstr ? this.routePlan("direct", room, verb, [argstr], await this.parseCommandMap(text, ctx, room)) : await this.huhPlan(ctx, text, `${verb} needs text.`);
-    if (verb === "tell" || verb === "whisper" || verb === "page" || text.startsWith("/tell ")) {
-      const rest = text.startsWith("/tell ") ? text.slice(6).trim() : argstr;
-      return await this.directedSpeechPlan(ctx, rest, "tell") ?? await this.huhPlan(ctx, text, "Tell needs a recipient and text.");
-    }
-    if ((verb === "who" || verb === "look") && !argstr) return this.routePlan("direct", room, verb, [], await this.parseCommandMap(text, ctx, room));
-    return null;
-  }
-
-  private async directedSpeechPlan(ctx: CallContext, rest: string, verb: "say_to" | "tell"): Promise<WooValue | null> {
-    const tokens = tokenizeCommand(rest);
-    const prefix = await this.longestObjectPrefix(tokens, ctx, ctx.thisObj);
-    if (!prefix) return null;
-    const message = tokenPhrase(tokens.slice(prefix.length));
-    if (!message) return null;
-    return this.routePlan("direct", ctx.thisObj, verb, [prefix.object, message], await this.parseCommandMap(`${verb} ${rest}`, ctx, ctx.thisObj));
-  }
-
   private tryResolveVerb(target: ObjRef, verb: string): ResolvedVerb | null {
     try {
       return this.resolveVerb(target, verb);
@@ -5004,29 +4926,7 @@ export class WooWorld {
       }
     }
     const resolved = this.tryResolveVerb(target, verb);
-    return resolved ? { name: resolved.verb.name, direct_callable: resolved.verb.direct_callable === true } : null;
-  }
-
-  private routePlan(route: "direct" | "sequenced", target: ObjRef, verb: string, args: WooValue[], cmd: CommandMap, space: ObjRef | null = null): WooValue {
-    return {
-      ok: true,
-      route,
-      space: route === "sequenced" ? space ?? target : null,
-      target,
-      verb,
-      args,
-      cmd: cmd as unknown as WooValue
-    };
-  }
-
-  private async huhPlan(ctx: CallContext, text: string, reason: string): Promise<WooValue> {
-    try {
-      await this.dispatch(ctx, ctx.thisObj, "huh", [text, reason]);
-    } catch (err) {
-      if (!isErrorValue(err) || err.code !== "E_VERBNF") throw err;
-      ctx.observe({ type: "huh", actor: ctx.actor, text, reason, ts: Date.now() });
-    }
-    return { ok: false, route: "huh", target: ctx.thisObj, verb: "huh", args: [text, reason], error: reason, text };
+    return resolved ? { name: resolved.verb.name, definer: resolved.definer, direct_callable: resolved.verb.direct_callable === true } : null;
   }
 
   private async parseCommandMap(text: string, ctx: CallContext, location: ObjRef | null, actor: ObjRef = ctx.actor): Promise<CommandMap> {
@@ -5044,10 +4944,16 @@ export class WooWorld {
     const iobjstr = tokenPhrase(iobjTokens);
     const dobjMatch = dobjstr ? await this.matchObjectForActorAsync(dobjstr, ctx, location, actor) : null;
     const iobjMatch = iobjstr ? await this.matchObjectForActorAsync(iobjstr, ctx, location, actor) : null;
+    const prefix = await this.longestObjectPrefix(restTokens, ctx, location, actor);
+    const prefixTokens = prefix ? restTokens.slice(0, prefix.length) : [];
+    const prefixRestTokens = prefix ? restTokens.slice(prefix.length) : [];
     return {
       verb: verbToken.value,
       dobj: dobjMatch?.status === "ok" ? dobjMatch.value : null,
       dobjstr,
+      dobj_prefix: prefix?.object ?? null,
+      dobj_prefix_str: tokenPhrase(prefixTokens),
+      dobj_prefix_rest: tokenPhrase(prefixRestTokens),
       prep: prepMatch?.prep ?? null,
       iobj: iobjMatch?.status === "ok" ? iobjMatch.value : null,
       iobjstr,
@@ -5057,10 +4963,10 @@ export class WooWorld {
     };
   }
 
-  private async longestObjectPrefix(tokens: ParsedToken[], ctx: CallContext, location: ObjRef | null): Promise<{ object: ObjRef; end: number; length: number } | null> {
+  private async longestObjectPrefix(tokens: ParsedToken[], ctx: CallContext, location: ObjRef | null, actor: ObjRef = ctx.actor): Promise<{ object: ObjRef; end: number; length: number } | null> {
     for (let length = tokens.length; length >= 1; length--) {
       const phrase = tokenPhrase(tokens.slice(0, length));
-      const match = await this.matchObjectForActorAsync(phrase, ctx, location);
+      const match = await this.matchObjectForActorAsync(phrase, ctx, location, actor);
       if (match.status === "ok") return { object: match.value, end: tokens[length - 1].end, length };
     }
     return null;
@@ -5333,17 +5239,6 @@ export function normalizeError(err: unknown): ErrorValue {
   if (err instanceof SyntaxError) return wooError("E_INVARG", err.message);
   if (err instanceof Error) return wooError("E_INTERNAL", err.message);
   return wooError("E_INTERNAL", "unknown error", String(err));
-}
-
-function isCommandPlanOk(value: WooValue): value is Record<string, WooValue> & { route: "direct"; target: ObjRef; verb: string; args: WooValue[] } {
-  return value !== null &&
-    typeof value === "object" &&
-    !Array.isArray(value) &&
-    value.ok === true &&
-    value.route === "direct" &&
-    typeof value.target === "string" &&
-    typeof value.verb === "string" &&
-    Array.isArray(value.args);
 }
 
 function tokenizeCommand(text: string): ParsedToken[] {

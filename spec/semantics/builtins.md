@@ -19,8 +19,8 @@ Builtins are functions, not verbs. They are registered with stable indices for t
 
 ### 19.2 String
 
-`strsub(s, from, to)`, `index(s, sub)`, `rindex`, `match(s, pattern)`, `pcre`,  
-`tolower`, `toupper`, `trim`, `split(s, sep)`, `join(list, sep)`,  
+`str_slice(s, from, to?)` / `strsub(s, from, to)`, `str_index(s, sub)` / `index(s, sub)`, `rindex`, `match(s, pattern)`, `pcre`,  
+`str_lower(s)` / `tolower`, `toupper`, `str_trim(s)` / `trim`, `str_starts(s, prefix)`, `str_char(codepoint)`, `split(s, sep)`, `join(list, sep)`,  
 `encode_json(v)`, `decode_json(s)`.
 
 ### 19.3 List / map
@@ -77,6 +77,13 @@ cycles with `E_RECMOVE`.
 
 `location(obj)` returns the object's current container (`obj.location`) or
 `null`. It is a behavior-readable core field, not a property lookup.
+
+`dispatch(obj, verb, args?, start_at?)` invokes the normal verb-dispatch path
+from source code, using the current task permissions. Catalog code that wants to
+route a command as the calling actor should first call
+`set_task_perms(caller_perms())`. `dispatch` is a mechanism, not a command
+policy: parser conventions such as chat prefixes or room commands live in
+catalog source.
 
 `has_flag(obj, name)` returns whether an object metadata flag is true. It is for
 ordinary behavior checks such as wizard bypasses; it is not a substitute for the

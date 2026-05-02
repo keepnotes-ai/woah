@@ -786,7 +786,8 @@ describe("local catalogs", () => {
     const world = createWorld();
     const first = world.auth("guest:chat-command-first");
     const second = world.auth("guest:chat-command-second");
-    expect(world.ownVerb("$conversational", "command_plan")?.kind).toBe("native");
+    expect(world.ownVerb("$conversational", "command_plan")?.kind).toBe("bytecode");
+    expect(world.ownVerb("$conversational", "command")?.kind).toBe("bytecode");
     expect(world.ownVerb("$match", "parse_command")?.kind).toBe("native");
     await world.directCall("enter-first", first.actor, "the_chatroom", "enter", []);
     await world.directCall("enter-second", second.actor, "the_chatroom", "enter", []);

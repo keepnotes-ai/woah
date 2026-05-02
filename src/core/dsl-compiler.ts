@@ -134,8 +134,9 @@ const FRAME_GLOBALS = new Map<string, string>([
 
 const BUILTINS = new Set([
   "length", "keys", "values", "has", "typeof", "to_string", "tostr", "min", "max", "floor", "ceil", "round", "abs",
+  "str_trim", "str_lower", "str_starts", "str_index", "str_slice", "str_char",
   "now", "create", "move", "moveto", "chparent", "has_flag", "isa", "random", "contents", "location", "task_perms", "caller_perms",
-  "set_task_perms", "set_presence", "observe_to_space", "tell",
+  "set_task_perms", "set_presence", "observe_to_space", "tell", "dispatch",
   "builder_create_object", "builder_chparent", "builder_recycle", "builder_set_property", "builder_inspect", "builder_search",
   "programmer_inspect", "programmer_resolve_verb", "programmer_list_verb", "programmer_search", "programmer_install_verb",
   "programmer_set_verb_info", "programmer_set_property_info", "programmer_trace",
@@ -284,7 +285,7 @@ class Lexer {
   private ref(kind: "objref" | "coreref"): void {
     const start = this.mark();
     let value = this.advance();
-    while (!this.atEnd() && /[A-Za-z0-9_.:-]/.test(this.peek())) value += this.advance();
+    while (!this.atEnd() && /[A-Za-z0-9_.-]/.test(this.peek())) value += this.advance();
     if (value.length === 1) throw this.error(`invalid ${kind}`, start);
     this.push(kind, value, start, value);
   }

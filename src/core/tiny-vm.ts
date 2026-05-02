@@ -113,7 +113,8 @@ const BUILTIN_NAMES = [
   "builder_create_object", "builder_chparent", "builder_recycle", "builder_set_property", "builder_inspect", "builder_search",
   "programmer_inspect", "programmer_resolve_verb", "programmer_list_verb", "programmer_search", "programmer_install_verb",
   "programmer_set_verb_info", "programmer_set_property_info", "programmer_trace",
-  "editor_invoke", "editor_what", "editor_view", "editor_replace", "editor_insert", "editor_delete", "editor_dry_run", "editor_save", "editor_pause", "editor_abort"
+  "editor_invoke", "editor_what", "editor_view", "editor_replace", "editor_insert", "editor_delete", "editor_dry_run", "editor_save", "editor_pause", "editor_abort",
+  "str_trim", "str_lower", "str_starts", "str_index", "str_slice", "str_char", "dispatch"
 ];
 
 export async function runTinyVm(ctx: CallContext, bytecode: TinyBytecode, args: WooValue[]): Promise<WooValue> {
@@ -772,6 +773,34 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
         return typeName(builtinArgs[0]);
       case "to_string":
         return typeof builtinArgs[0] === "string" ? builtinArgs[0] : JSON.stringify(builtinArgs[0]);
+      case "str_trim":
+        return assertString(builtinArgs[0] ?? "").trim();
+      case "str_lower":
+        return assertString(builtinArgs[0] ?? "").toLowerCase();
+      case "str_starts":
+        if (builtinArgs.length !== 2) throw wooError("E_INVARG", "str_starts expects text and prefix");
+        return assertString(builtinArgs[0] ?? "").startsWith(assertString(builtinArgs[1] ?? ""));
+      case "str_index": {
+        if (builtinArgs.length !== 2) throw wooError("E_INVARG", "str_index expects text and needle");
+        const index = assertString(builtinArgs[0] ?? "").indexOf(assertString(builtinArgs[1] ?? ""));
+        return index < 0 ? 0 : index + 1;
+      }
+      case "str_slice": {
+        if (builtinArgs.length < 2 || builtinArgs.length > 3) throw wooError("E_INVARG", "str_slice expects text, start, and optional end");
+        const text = assertString(builtinArgs[0] ?? "");
+        const start = Math.max(1, Math.floor(numeric(builtinArgs[1], "str_slice start")));
+        const end = builtinArgs.length >= 3 && builtinArgs[2] !== null
+          ? Math.max(0, Math.floor(numeric(builtinArgs[2], "str_slice end")))
+          : text.length;
+        if (end < start) return "";
+        return text.slice(start - 1, end);
+      }
+      case "str_char": {
+        if (builtinArgs.length !== 1) throw wooError("E_INVARG", "str_char expects a code point");
+        const code = numeric(builtinArgs[0], "str_char code point");
+        if (!Number.isInteger(code) || code < 0 || code > 0x10FFFF) throw wooError("E_RANGE", "invalid code point", code);
+        return String.fromCodePoint(code);
+      }
       case "min":
         return Math.min(...builtinArgs.map((value) => numeric(value, "min argument")));
       case "max":
@@ -887,6 +916,18 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
         if (builtinArgs.length < 2) throw wooError("E_INVARG", "tell expects actor and text");
         frame.ctx.world.tellPlayer(frame.ctx, assertObj(builtinArgs[0]), builtinArgs.slice(1));
         return null;
+      }
+      case "dispatch": {
+        if (builtinArgs.length < 2 || builtinArgs.length > 4) throw wooError("E_INVARG", "dispatch expects target, verb, optional args, and optional start_at");
+        const callArgs = builtinArgs.length >= 3 && builtinArgs[2] !== null ? assertList(builtinArgs[2]) : [];
+        const startAt = builtinArgs.length >= 4 && builtinArgs[3] !== null ? assertObj(builtinArgs[3]) : undefined;
+        return await frame.ctx.world.dispatch(
+          { ...frame.ctx, caller: frame.ctx.thisObj, callerPerms: frame.ctx.progr },
+          assertObj(builtinArgs[0]),
+          assertString(builtinArgs[1]),
+          callArgs,
+          startAt
+        );
       }
       case "builder_create_object":
         if (builtinArgs.length < 1 || builtinArgs.length > 2) throw wooError("E_INVARG", "builder_create_object expects parent and optional opts");

@@ -215,6 +215,11 @@ Same client speaks against `$chatroom` and against `$taskspace` — the verb set
 
 Free-text input goes through the `$match`-shaped parser per [match.md §MA4](../../spec/semantics/match.md#ma4-command-parsing). `:command_plan` explicitly **lowers** the parsed `cmd` map into the right argument shape per verb — the parsed map is not the right call signature for `:say`, `:tell`, etc., so the dispatcher unpacks it:
 
+The command policy is catalog-owned source. Core provides the tokenizer,
+object/verb matching, and generic dispatch builtin; the chat catalog decides
+that `:foo` means emote, `/tell` means private speech, and bare text means
+`:say`.
+
 The parser is location-scoped rather than tied to where the actor object lives.
 If the actor is in a room hosted elsewhere, `here`, room contents, and actor
 inventory still resolve from the room and object model. If a visible object

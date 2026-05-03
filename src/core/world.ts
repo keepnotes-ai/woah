@@ -28,7 +28,7 @@ import { isVmReadSignal, isVmSuspendSignal, runSerializedTinyVmTask, runSerializ
 import { installCatalogManifest, updateCatalogManifest, type CatalogManifest, type CatalogMigrationManifest } from "./catalog-installer";
 import { normalizeVerbPerms } from "./verb-perms";
 import { compileVerb } from "./authoring";
-import { hashSource } from "./source-hash";
+import { hashSource, randomHex, constantTimeEqual } from "./source-hash";
 
 export type NativeHandler = (ctx: CallContext, args: WooValue[]) => WooValue | Promise<WooValue>;
 const GUEST_SESSION_GRACE_MS = 60_000;
@@ -823,9 +823,75 @@ export class WooWorld {
       }
       return session;
     }
+    if (token.startsWith("apikey:")) {
+      return this.authApiKey(token.slice("apikey:".length));
+    }
     const tokenClass = this.tokenClassFor(token);
     const actor = this.allocateGuest();
     return this.createSessionForActor(actor, tokenClass);
+  }
+
+  private authApiKey(payload: string): Session {
+    const colon = payload.indexOf(":");
+    if (colon < 0) throw wooError("E_NOSESSION", "apikey token must be apikey:<id>:<secret>");
+    const id = payload.slice(0, colon);
+    const secret = payload.slice(colon + 1);
+    if (!id || !secret) throw wooError("E_NOSESSION", "apikey token must be apikey:<id>:<secret>");
+    const keys = this.propOrNull("$system", "api_keys");
+    const record = keys && typeof keys === "object" && !Array.isArray(keys)
+      ? (keys as Record<string, WooValue>)[id]
+      : null;
+    if (!record || typeof record !== "object" || Array.isArray(record)) throw wooError("E_NOSESSION", "apikey not found or revoked");
+    const r = record as Record<string, WooValue>;
+    const salt = String(r.salt ?? "");
+    const expected = String(r.hash ?? "");
+    const actor = String(r.actor ?? "");
+    if (!salt || !expected || !actor) throw wooError("E_NOSESSION", "apikey record is malformed");
+    if (!this.objects.has(actor)) throw wooError("E_NOSESSION", "apikey target actor no longer exists");
+    const presented = hashSource(`${salt}:${secret}`);
+    if (!constantTimeEqual(presented, expected)) throw wooError("E_NOSESSION", "apikey secret rejected");
+    return this.createSessionForActor(actor, "apikey");
+  }
+
+  createApiKey(actor: ObjRef, target: ObjRef, label: string | null): { id: string; secret: string; actor: ObjRef; label: string | null; created_at: number } {
+    if (!this.canBypassPerms(actor)) throw wooError("E_PERM", "wizard authority required to create api keys", { actor });
+    if (!this.objects.has(target)) throw wooError("E_OBJNF", `target actor not found: ${target}`, target);
+    const id = randomHex(16);
+    const secret = randomHex(32);
+    const salt = randomHex(16);
+    const hash = hashSource(`${salt}:${secret}`);
+    const created_at = Date.now();
+    const raw = this.propOrNull("$system", "api_keys");
+    const map = raw && typeof raw === "object" && !Array.isArray(raw) ? { ...(raw as Record<string, WooValue>) } : {};
+    map[id] = { hash, salt, actor: target, label: label ?? null, created_at } as WooValue;
+    this.setProp("$system", "api_keys", map as WooValue);
+    this.recordWizardAction(actor, "create_api_key", { actor: target, key_id: id, label: label ?? null });
+    return { id, secret, actor: target, label, created_at };
+  }
+
+  revokeApiKey(actor: ObjRef, id: string): boolean {
+    if (!this.canBypassPerms(actor)) throw wooError("E_PERM", "wizard authority required to revoke api keys", { actor });
+    const raw = this.propOrNull("$system", "api_keys");
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+    const map = { ...(raw as Record<string, WooValue>) };
+    if (!(id in map)) return false;
+    delete map[id];
+    this.setProp("$system", "api_keys", map as WooValue);
+    this.recordWizardAction(actor, "revoke_api_key", { key_id: id });
+    return true;
+  }
+
+  listApiKeys(actor: ObjRef): Array<{ id: string; actor: ObjRef; label: string | null; created_at: number }> {
+    if (!this.canBypassPerms(actor)) throw wooError("E_PERM", "wizard authority required to list api keys", { actor });
+    const raw = this.propOrNull("$system", "api_keys");
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+    const out: Array<{ id: string; actor: ObjRef; label: string | null; created_at: number }> = [];
+    for (const [id, rec] of Object.entries(raw as Record<string, WooValue>)) {
+      if (!rec || typeof rec !== "object" || Array.isArray(rec)) continue;
+      const r = rec as Record<string, WooValue>;
+      out.push({ id, actor: String(r.actor ?? ""), label: typeof r.label === "string" ? r.label : null, created_at: Number(r.created_at ?? 0) });
+    }
+    return out;
   }
 
   createSessionForActor(actor: ObjRef, tokenClass: Session["tokenClass"] = "bearer"): Session {
@@ -4751,6 +4817,20 @@ export class WooWorld {
       const session = this.createSessionForActor(target, "bearer");
       this.recordWizardAction(ctx.actor, "mint_session_for", { actor: target, session: session.id });
       return { id: session.id, actor: session.actor, expires_at: session.expiresAt, token_class: session.tokenClass } as unknown as WooValue;
+    });
+    this.nativeHandlers.set("create_api_key", (ctx, args) => {
+      const target = assertObj(args[0]);
+      const label = typeof args[1] === "string" ? args[1] : null;
+      const result = this.createApiKey(ctx.actor, target, label);
+      return result as unknown as WooValue;
+    });
+    this.nativeHandlers.set("revoke_api_key", (ctx, args) => {
+      const id = String(args[0] ?? "");
+      if (!id) throw wooError("E_INVARG", "revoke_api_key requires an id");
+      return this.revokeApiKey(ctx.actor, id);
+    });
+    this.nativeHandlers.set("list_api_keys", (ctx) => {
+      return this.listApiKeys(ctx.actor) as unknown as WooValue;
     });
     this.nativeHandlers.set("feature_can_be_attached_by", (ctx, args) => {
       const actor = assertObj(args[0] ?? ctx.actor);

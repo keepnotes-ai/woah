@@ -58,8 +58,8 @@ export async function handleRestProtocolRequest(request: RestProtocolRequest, ho
     if (request.method === "POST" && request.pathname === "/api/auth") {
       const body = await request.readJson();
       const token = String(body.token ?? "");
-      if (!token.startsWith("guest:") && !token.startsWith("session:") && !token.startsWith("wizard:")) {
-        throw wooError("E_INVARG", "REST accepts guest:, session:, and wizard: tokens");
+      if (!token.startsWith("guest:") && !token.startsWith("session:") && !token.startsWith("wizard:") && !token.startsWith("apikey:")) {
+        throw wooError("E_INVARG", "REST accepts guest:, session:, wizard:, and apikey: tokens");
       }
       const session = await host.authenticateToken(token);
       await host.onAuthenticated?.(session);

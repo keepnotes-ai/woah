@@ -4,7 +4,7 @@ type AppState = {
   socket?: WebSocket;
   actor?: string;
   session?: string;
-  tab: "chat" | "dubspace" | "pinboard" | "taskspace" | "ide";
+  tab: "chat" | "dubspace" | "pinboard" | "kanban" | "taskspace" | "ide";
   world?: any;
   audioOn: boolean;
   clockOffset: number;
@@ -822,6 +822,7 @@ function render() {
         ${navButton("chat", "Chat")}
         ${navButton("dubspace", "Dubspace")}
         ${navButton("pinboard", "Pinboard")}
+        ${navButton("kanban", "Kanban")}
         ${navButton("taskspace", "Taskspace")}
         ${navButton("ide", "IDE")}
         <a class="github-link" href="https://github.com/hughpyle/woo" target="_blank" rel="noopener noreferrer" aria-label="woo on GitHub" title="woo on GitHub">
@@ -831,6 +832,7 @@ function render() {
       <main class="main">
         ${state.tab === "dubspace" ? renderDubspace() : ""}
         ${state.tab === "pinboard" ? renderPinboard() : ""}
+        ${state.tab === "kanban" ? renderKanban() : ""}
         ${state.tab === "taskspace" ? renderTaskspace() : ""}
         ${state.tab === "chat" ? renderChat() : ""}
         ${state.tab === "ide" ? renderIde() : ""}
@@ -841,6 +843,7 @@ function render() {
 
   bindCommon();
   if (state.tab === "dubspace") bindDubspace();
+  if (state.tab === "kanban") bindKanban();
   if (state.tab === "taskspace") bindTaskspace();
   if (state.tab === "pinboard") bindPinboard();
   if (state.tab === "chat") bindChat();
@@ -2676,6 +2679,183 @@ function pinboardPalette(palette: any): string[] {
   return items.length > 0 ? items : ["yellow", "blue", "green", "pink", "white"];
 }
 
+function renderKanban() {
+  const taskspace = state.world?.taskspace;
+  const tasks = taskspace?.tasks ?? {};
+  const roots = Array.isArray(taskspace?.root_tasks) ? taskspace.root_tasks : [];
+  const orderedIds = orderedTaskIds(roots, tasks);
+  const allTasks = orderedIds.map((id) => tasks[id]).filter(Boolean);
+  const statusCounts = countTasksByStatus(allTasks);
+  const activeStatuses = activeTaskStatuses();
+  const visibleStatuses = taskStatuses.filter((status) => activeStatuses.has(status));
+  const visibleCount = allTasks.filter((task) => taskMatchesStatus(task, activeStatuses)).length;
+  const total = allTasks.length;
+  if (!taskspace) {
+    return `
+      <section class="toolbar"><h1>Kanban</h1></section>
+      <section class="panel"><p class="empty-state">No taskspace catalog instance is installed.</p></section>
+    `;
+  }
+  return `
+    <section class="toolbar task-toolbar">
+      <h1>Kanban</h1>
+      <div class="task-summary">
+        <span>${visibleCount}/${total} tasks</span>
+        ${taskStatuses.map((status) => renderStatusFilter(status, statusCounts[status] ?? 0)).join("")}
+      </div>
+    </section>
+    <section class="kanban-layout">
+      <form class="panel kanban-create" data-kanban-create>
+        <input data-kanban-title placeholder="Task title" />
+        <input data-kanban-description placeholder="Description" />
+        <button>Create</button>
+      </form>
+      <div class="kanban-board" style="--kanban-columns:${Math.max(visibleStatuses.length, 1)}">
+        ${visibleStatuses.map((status) => renderKanbanColumn(status, orderedIds.filter((id) => taskStatus(tasks[id]) === status), tasks)).join("") || `<div class="kanban-empty">No columns selected.</div>`}
+      </div>
+    </section>
+  `;
+}
+
+function renderKanbanColumn(status: string, ids: string[], tasks: any) {
+  return `
+    <section class="kanban-column" data-kanban-drop="${escapeHtml(status)}">
+      <header>
+        <h2>${escapeHtml(statusLabel(status))}</h2>
+        <span>${ids.length}</span>
+      </header>
+      <div class="kanban-card-list">
+        ${ids.map((id) => renderKanbanCard(tasks[id])).join("") || `<div class="kanban-empty">Drop tasks here.</div>`}
+      </div>
+    </section>
+  `;
+}
+
+function renderKanbanCard(task: any) {
+  const id = String(task?.id ?? "");
+  const props = task?.props ?? {};
+  const status = taskStatus(task);
+  const reqStats = requirementStats(props.requirements);
+  const subtasks = Array.isArray(props.subtasks) ? props.subtasks : [];
+  const selected = state.selectedTask === id;
+  const previous = previousTaskStatus(status);
+  const next = nextTaskStatus(status);
+  return `
+    <article class="kanban-card kanban-card-neutral ${selected ? "selected" : ""}" data-kanban-task="${escapeHtml(id)}" draggable="true">
+      <div class="kanban-card-head">
+        <h3>${escapeHtml(String(props.title ?? id))}</h3>
+        <span class="status-pill ${statusClass(status)}">${escapeHtml(statusLabel(status))}</span>
+      </div>
+      <p>${escapeHtml(String(props.description ?? ""))}</p>
+      <div class="kanban-card-meta">
+        <span>${escapeHtml(props.assignee ? actorLabel(String(props.assignee)) : "unassigned")}</span>
+        <span>${reqStats.checked}/${reqStats.total} req</span>
+        <span>${subtasks.length} sub</span>
+      </div>
+      <div class="kanban-card-actions">
+        <button data-kanban-action="claim" data-kanban-id="${escapeHtml(id)}">Claim</button>
+        <button data-kanban-action="release" data-kanban-id="${escapeHtml(id)}">Release</button>
+        <button data-kanban-details="${escapeHtml(id)}">Details</button>
+        ${previous ? `<button data-kanban-status="${escapeHtml(previous)}" data-kanban-id="${escapeHtml(id)}" aria-label="Move to ${escapeHtml(statusLabel(previous))}">&lt;</button>` : ""}
+        ${next ? `<button data-kanban-status="${escapeHtml(next)}" data-kanban-id="${escapeHtml(id)}" aria-label="Move to ${escapeHtml(statusLabel(next))}">&gt;</button>` : ""}
+      </div>
+    </article>
+  `;
+}
+
+function orderedTaskIds(roots: string[], tasks: any): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const visit = (id: string) => {
+    if (!id || seen.has(id) || !tasks[id]) return;
+    seen.add(id);
+    out.push(id);
+    const subtasks = Array.isArray(tasks[id]?.props?.subtasks) ? tasks[id].props.subtasks : [];
+    for (const child of subtasks) visit(String(child));
+  };
+  for (const id of roots) visit(String(id));
+  for (const id of Object.keys(tasks).sort((a, b) => String(tasks[a]?.props?.title ?? a).localeCompare(String(tasks[b]?.props?.title ?? b)))) visit(id);
+  return out;
+}
+
+function previousTaskStatus(status: string): string | undefined {
+  const index = taskStatuses.indexOf(status as typeof taskStatuses[number]);
+  return index > 0 ? taskStatuses[index - 1] : undefined;
+}
+
+function nextTaskStatus(status: string): string | undefined {
+  const index = taskStatuses.indexOf(status as typeof taskStatuses[number]);
+  return index >= 0 && index < taskStatuses.length - 1 ? taskStatuses[index + 1] : undefined;
+}
+
+function bindKanban() {
+  bindStatusFilters();
+  document.querySelector<HTMLFormElement>("[data-kanban-create]")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const titleInput = document.querySelector<HTMLInputElement>("[data-kanban-title]");
+    const descriptionInput = document.querySelector<HTMLInputElement>("[data-kanban-description]");
+    const title = titleInput?.value.trim() || "Untitled";
+    const description = descriptionInput?.value.trim() || "";
+    const space = taskspaceSpace();
+    if (space) pendingTaskSelections.add(call(space, space, "create_task", [title, description]));
+    if (titleInput) titleInput.value = "";
+    if (descriptionInput) descriptionInput.value = "";
+  });
+  document.querySelectorAll<HTMLElement>("[data-kanban-task]").forEach((card) => {
+    card.addEventListener("click", (event) => {
+      if ((event.target as HTMLElement | null)?.closest("button")) return;
+      state.selectedTask = card.dataset.kanbanTask ?? "";
+      render();
+    });
+    card.addEventListener("dragstart", (event) => {
+      event.dataTransfer?.setData("text/plain", card.dataset.kanbanTask ?? "");
+      event.dataTransfer?.setData("application/x-woo-task", card.dataset.kanbanTask ?? "");
+      event.dataTransfer!.effectAllowed = "move";
+    });
+  });
+  document.querySelectorAll<HTMLElement>("[data-kanban-drop]").forEach((column) => {
+    column.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      column.classList.add("drag-over");
+    });
+    column.addEventListener("dragleave", () => column.classList.remove("drag-over"));
+    column.addEventListener("drop", (event) => {
+      event.preventDefault();
+      column.classList.remove("drag-over");
+      const id = event.dataTransfer?.getData("application/x-woo-task") || event.dataTransfer?.getData("text/plain") || "";
+      const status = column.dataset.kanbanDrop ?? "";
+      kanbanSetStatus(id, status);
+    });
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-kanban-status]").forEach((button) => {
+    button.addEventListener("click", () => kanbanSetStatus(button.dataset.kanbanId ?? "", button.dataset.kanbanStatus ?? ""));
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-kanban-action]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const action = button.dataset.kanbanAction ?? "";
+      const id = button.dataset.kanbanId ?? "";
+      const space = taskspaceSpace();
+      if (space && id && (action === "claim" || action === "release")) call(space, id, action, []);
+    });
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-kanban-details]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedTask = button.dataset.kanbanDetails ?? "";
+      state.tab = "taskspace";
+      render();
+    });
+  });
+}
+
+function kanbanSetStatus(id: string, status: string) {
+  const space = taskspaceSpace();
+  if (!space || !id || !taskStatuses.includes(status as typeof taskStatuses[number])) return;
+  const current = state.world?.taskspace?.tasks?.[id];
+  if (current && taskStatus(current) === status) return;
+  state.selectedTask = id;
+  call(space, id, "set_status", [status]);
+}
+
 function renderTaskspace() {
   const taskspace = state.world?.taskspace;
   const tasks = taskspace?.tasks ?? {};
@@ -2883,14 +3063,7 @@ function firstMatchingTask(ids: string[], tasks: any, active: Set<string>): stri
 }
 
 function bindTaskspace() {
-  document.querySelectorAll<HTMLButtonElement>("[data-task-status]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const status = button.dataset.taskStatus!;
-      state.taskStatusFilter[status] = state.taskStatusFilter[status] === false;
-      syncTaskSelection();
-      render();
-    });
-  });
+  bindStatusFilters();
   document.querySelector<HTMLButtonElement>("[data-create-task]")?.addEventListener("click", () => {
     const titleInput = document.querySelector<HTMLInputElement>("[data-new-title]");
     const descriptionInput = document.querySelector<HTMLInputElement>("[data-new-description]");
@@ -2963,6 +3136,17 @@ function bindTaskspace() {
     const space = taskspaceSpace();
     if (space) call(space, id, "add_artifact", [{ kind: ref.startsWith("http") ? "url" : "external", ref }]);
     if (input) input.value = "";
+  });
+}
+
+function bindStatusFilters() {
+  document.querySelectorAll<HTMLButtonElement>("[data-task-status]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const status = button.dataset.taskStatus!;
+      state.taskStatusFilter[status] = state.taskStatusFilter[status] === false;
+      syncTaskSelection();
+      render();
+    });
   });
 }
 

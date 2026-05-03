@@ -43,6 +43,7 @@ const LOCAL_CATALOG_CHAT_EXIT_PRIVILEGE_REPAIR_MIGRATION = "2026-05-02-chat-exit
 const LOCAL_CATALOG_CHAT_EXIT_ALIAS_REPAIR_MIGRATION = "2026-05-02-chat-exit-alias-repair";
 const LOCAL_CATALOG_CHAT_STALE_CLASS_VERBS_REPAIR_MIGRATION = "2026-05-02-chat-stale-class-verbs-repair";
 const LOCAL_CATALOG_CHAT_LOOK_SKIP_PRESENCE_MIGRATION = "2026-05-02-chat-look-skip-presence";
+const LOCAL_CATALOG_CHAT_COMMAND_PLAN_SOURCE_REPAIR_MIGRATION = "2026-05-03-chat-command-plan-source-repair";
 const LOCAL_CATALOG_TASKSPACE_LIST_TASKS_GUARD_MIGRATION = "2026-05-02-taskspace-list-tasks-guard";
 const LOCAL_CATALOG_PROG_EDITOR_ROOM_MIGRATION = "2026-05-02-prog-editor-room";
 const LOCAL_CATALOG_PROG_EDITOR_NOWHERE_MIGRATION = "2026-05-02-prog-editor-nowhere";
@@ -82,6 +83,7 @@ const LOCAL_CATALOG_MIGRATION_INDEX: Array<{ id: string; only?: string }> = [
   { id: LOCAL_CATALOG_CHAT_EXIT_ALIAS_REPAIR_MIGRATION, only: "chat" },
   { id: LOCAL_CATALOG_CHAT_STALE_CLASS_VERBS_REPAIR_MIGRATION, only: "chat" },
   { id: LOCAL_CATALOG_CHAT_LOOK_SKIP_PRESENCE_MIGRATION, only: "chat" },
+  { id: LOCAL_CATALOG_CHAT_COMMAND_PLAN_SOURCE_REPAIR_MIGRATION, only: "chat" },
   { id: LOCAL_CATALOG_TASKSPACE_LIST_TASKS_GUARD_MIGRATION, only: "taskspace" },
   { id: LOCAL_CATALOG_PROG_EDITOR_ROOM_MIGRATION, only: "prog" },
   { id: LOCAL_CATALOG_PROG_EDITOR_NOWHERE_MIGRATION, only: "prog" }
@@ -112,7 +114,7 @@ export function installLocalCatalogs(world: WooWorld, names: readonly string[] =
   runLocalCatalogMigrations(world, repairNames);
 }
 
-export function installLocalCatalog(world: WooWorld, name: string): void {
+export function installLocalCatalog(world: WooWorld, name: string, options: { adoptExisting?: boolean } = {}): void {
   if (!isLocalCatalogName(name)) throw new Error(`unknown local catalog: ${name}`);
   // Boot auto-install is part of deterministic world construction, not a user
   // catalog operation. Runtime installs still go through $catalog_registry.
@@ -125,7 +127,7 @@ export function installLocalCatalog(world: WooWorld, name: string): void {
     ref_requested: "@local",
     ref_resolved_sha: "unversioned"
   };
-  installCatalogManifest(world, manifest, { tap: "@local", alias: name, actor: "$wiz", provenance });
+  installCatalogManifest(world, manifest, { tap: "@local", alias: name, actor: "$wiz", provenance, adoptExisting: options.adoptExisting === true });
 }
 
 export function localCatalogStatuses(world: WooWorld, names: readonly string[] = DEFAULT_LOCAL_CATALOGS): LocalCatalogStatus[] {
@@ -150,10 +152,12 @@ export function localCatalogStatuses(world: WooWorld, names: readonly string[] =
 }
 
 export function runHostScopedLocalCatalogLifecycle(world: WooWorld): void {
-  const names = hostScopedLocalCatalogNames(world);
-  for (const name of names) {
-    repairHostScopedLocalCatalog(world, name);
-  }
+  // Host-scoped schema repair (verb sources, property defs, seed-hook
+  // reconciliation) is currently disabled because repairCatalogManifest's
+  // post-pass populateSeedExitAliasMaps treats the exits map as authoritative
+  // and conflicts with whatever the host slice has — and reconcileSeedObject's
+  // property reset previously wiped runtime state. Schema repair lives on the
+  // gateway only; host-scoped DOs run only the idempotent data migrations.
   runHostScopedDataMigrations(world);
 }
 
@@ -190,6 +194,7 @@ function runLocalCatalogMigrations(world: WooWorld, names: readonly string[]): v
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_CHAT_EXIT_ALIAS_REPAIR_MIGRATION, { allowImplementationHints: true, reconcileSeedHooks: true, only: "chat" });
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_CHAT_STALE_CLASS_VERBS_REPAIR_MIGRATION, { allowImplementationHints: true, reconcileClassVerbs: true, only: "chat" });
   runChatLookSkipPresenceMigration(world, names);
+  runLocalCatalogMigration(world, names, LOCAL_CATALOG_CHAT_COMMAND_PLAN_SOURCE_REPAIR_MIGRATION, { allowImplementationHints: true, only: "chat" });
   runTaskspaceListTasksGuardMigration(world, names);
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_PROG_EDITOR_ROOM_MIGRATION, { reconcileSeedHooks: true, only: "prog" });
   runLocalCatalogMigration(world, names, LOCAL_CATALOG_PROG_EDITOR_NOWHERE_MIGRATION, { reconcileSeedHooks: true, only: "prog" });
@@ -206,7 +211,10 @@ function localMigrationCatalogNames(world: WooWorld, requested: readonly string[
 
 function installMissingLocalCatalogDependencies(world: WooWorld, names: readonly string[]): void {
   for (const name of names) {
-    if (!localCatalogInstalled(world, name)) installLocalCatalog(world, name);
+    // Compatibility repair for worlds that already contain a bundled catalog's
+    // objects but lost or predate its registry record. Runtime/user installs
+    // still reject object collisions; only local boot dependency repair adopts.
+    if (!localCatalogInstalled(world, name)) installLocalCatalog(world, name, { adoptExisting: true });
   }
 }
 

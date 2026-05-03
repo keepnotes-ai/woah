@@ -777,31 +777,29 @@ describe("local catalogs", () => {
     }
   });
 
-  it("runHostScopedLocalCatalogLifecycle repairs host-owned catalog source even when the gateway ledger is already applied", () => {
+  it("runHostScopedLocalCatalogLifecycle leaves host-owned source untouched while still running data migrations", () => {
+    // Schema repair on host slices is currently disabled (see comment on
+    // runHostScopedLocalCatalogLifecycle): repairCatalogManifest's
+    // populateSeedExitAliasMaps post-pass conflicts with host-slice exits
+    // state, and reconcileSeedObject previously wiped runtime properties.
+    // For now, host slices keep whatever source the gateway shipped them and
+    // only the idempotent data migrations run. This test pins that behavior
+    // so re-enabling schema repair is a deliberate change with new coverage.
     const gateway = createWorld();
     const listNotes = worldVerb(gateway, "$pinboard", "list_notes");
     const installed = installVerb(gateway, "$pinboard", "list_notes", `verb :list_notes() rxd {
   return this.notes;
 }`, listNotes.version);
     expect(installed.ok).toBe(true);
-    const migrations = gateway.getProp("$system", "applied_migrations") as string[];
-    for (const id of ["2026-05-02-pinboard-v02-repair", "2026-05-02-pinboard-v02-data-repair"]) {
-      if (!migrations.includes(id)) migrations.push(id);
-    }
-    gateway.setProp("$system", "applied_migrations", migrations);
 
     const scoped = nonEmptyHostScopedWorld(gateway.exportWorld(), "the_pinboard");
     expect(scoped).not.toBeNull();
     const host = createWorldFromSerialized(scoped!, { persist: false });
-    const hadChatroomSeed = host.objects.has("the_chatroom");
-    const hadVerbEditorSeed = host.objects.has("the_verb_editor");
     expect(worldVerb(host, "$pinboard", "list_notes").source).toContain("return this.notes");
 
     runHostScopedLocalCatalogLifecycle(host);
 
-    expect(worldVerb(host, "$pinboard", "list_notes").source).toContain("contents(this)");
-    expect(host.objects.has("the_chatroom")).toBe(hadChatroomSeed);
-    expect(host.objects.has("the_verb_editor")).toBe(hadVerbEditorSeed);
+    expect(worldVerb(host, "$pinboard", "list_notes").source).toContain("return this.notes");
   });
 
   it("seeds the_cockatoo in the chatroom with random-pick squawk", async () => {

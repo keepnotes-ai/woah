@@ -3,6 +3,13 @@
 The v0.2 model lifts notes to first-class movable objects (`$pin < $note`)
 and reduces the board to a $space-shaped directory with per-pin layout.
 
+## Classes
+
+| Class | Parent | Description |
+|---|---|---|
+| `$pin` | `$note` | Pinboard note. `$note` subclass with an optional `.color`; remembers its color across moves. |
+| `$pinboard` | `$space` | Spatial bulletin board. Holds `$note` descendants in `.contents` and tracks per-pin layout (x/y/w/h/z) keyed by pin object id. |
+
 ## Why redesign
 
 LambdaMOO's bulletin-board pattern (notes as first-class `$thing`s, board

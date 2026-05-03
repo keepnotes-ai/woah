@@ -3,6 +3,19 @@
 A tiny collaborative dub mix space: a shared, persistent control surface for
 live sound gestures.
 
+## Classes
+
+| Class | Parent | Description |
+|---|---|---|
+| `$control` | `$root` | Base class for addressable controls in a sound surface. |
+| `$loop_slot` | `$control` | Control for a loaded loop slot (loop id, playing state, gain). |
+| `$channel` | `$control` | Control for mixer-channel state (gain). |
+| `$filter` | `$control` | Control for filter state (cutoff). |
+| `$delay` | `$control` | Control for delay-effect state (send, time, feedback, wet). |
+| `$drum_loop` | `$control` | Control for an eight-step percussion loop (transport, tempo, pattern). |
+| `$scene` | `$root` | Saved control snapshot for scene recall. |
+| `$dubspace` | `$space` | Shared dub-mix space. Composes `$space` sequencing with sound-control verbs. |
+
 ## Goal
 
 Show that Woo can host a mutable, multi-user world whose primary interface is

@@ -4,6 +4,12 @@ Generic notes — portable text-bearing things, modeled after LambdaMOO's
 `$note` (#9). The base shape is text plus permissions; subclasses add
 behavior (pinboard pins, recipe notes, voting notes, decision logs).
 
+## Classes
+
+| Class | Parent | Description |
+|---|---|---|
+| `$note` | `$portable` | Movable text artifact. Text is a list of strings, one per line; writability gated by owner, the writers list, or wizard. |
+
 ## Goal
 
 A first-class movable artifact with editable text. Notes can be created,

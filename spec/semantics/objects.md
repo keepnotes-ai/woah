@@ -97,7 +97,8 @@ The classes that declare `instances_self_host = true` in the baseline object gra
 
 - `$room` (and subclasses) — every room has its own log, subscribers, and fixtures, scaling independently of other rooms.
 - `$player` (and subclasses including `$wiz`, `$guest`) — every player owns a host for sessions, attached connections, and inventory.
-- Anchor spaces declared by demo catalogs: `$dubspace`, `$taskspace`. The `$catalog_registry` and similar operational singletons.
+- Anchor spaces declared by catalogs that own coordination clusters — for example `$dubspace` and `$taskspace` from the bundled demo catalogs ([catalogs.md §CT15](../discovery/catalogs.md#ct15-bundled-catalogs-in-this-repo)). Any catalog whose top-level space owns its anchored objects sets `instances_self_host = true` on the class.
+- The `$catalog_registry` and similar operational singletons.
 
 Authority to instantiate self-hosting classes is narrower than ordinary `create()`. Because each instance reserves a real host resource, the `assertCanCreateObject` check requires wizard authority (or an explicit programmer capability grant); ordinary programmer-creates-own-fertile-parent authority is not sufficient. See [permissions.md §11.4](permissions.md#114-progr-and-actor) and [reference/cloudflare.md §R1.1](../reference/cloudflare.md#r11-routing).
 
@@ -150,7 +151,7 @@ Within source code on a host, the bare form `~nnn` resolves to the local host. C
 
 ### 5.3.1 Dynamic corenames
 
-Most corenames are *static*: `$wiz`, `$root`, `$dubspace` are defined at boot and resolve to a fixed ULID via `$system.<name>` lookup. The resolver looks up the corename in a flat map and returns the same answer regardless of context.
+Most corenames are *static*: `$wiz`, `$root`, and any catalog-installed singleton (e.g., `$dubspace` if the demo is installed) are defined at boot and resolve to a fixed ULID via `$system.<name>` lookup. The resolver looks up the corename in a flat map and returns the same answer regardless of context.
 
 A small reserved set of corenames are *dynamic*: their resolution depends on the calling context.
 

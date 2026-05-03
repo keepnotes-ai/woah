@@ -4,7 +4,13 @@ The help catalog provides LambdaMOO-shaped in-world help without adding a web UI
 
 ## Classes
 
-`$generic_help_db < $thing` stores a `topics` map and a bounded `missed_topics` list. Its public verbs are:
+| Class | Parent | Description |
+|---|---|---|
+| `$generic_help_db` | `$thing` | Generic help database. Stores topic values, resolves exact and abbreviated topic names, renders compact output, records misses. |
+
+### `$generic_help_db` API
+
+`$generic_help_db` stores a `topics` map and a bounded `missed_topics` list. Its public verbs are:
 
 - `:find_topics(topic?)` returns exact or abbreviated topic matches.
 - `:get_topic(topic?, remaining_dbs?)` returns rendered help output.

@@ -4,6 +4,15 @@ The programmer experience is an in-world authoring surface for agents and
 people. It keeps LambdaCore's `$builder` / `$programmer` authority split while
 making both surfaces ordinary player classes.
 
+## Classes
+
+| Class | Parent | Description |
+|---|---|---|
+| `$builder` | `$player` | Builder player class. Object/data tools: create, chparent, recycle, set_property, inspect, search. |
+| `$programmer` | `$builder` | Programmer player class. Source-aware tools: resolve_verb, install_verb, edit_verb, source listing, traces. |
+| `$generic_editor` | `$space` | Room-like editor base. Owns per-actor edit sessions and source-buffer lifecycle verbs. |
+| `$verb_editor` | `$generic_editor` | Verb-source editor room. Saves through the same source-level install path used by MCP tools. |
+
 ## Goal
 
 Let an actor with the right capability shape the live object graph through MCP:

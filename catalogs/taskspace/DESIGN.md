@@ -4,6 +4,13 @@ Taskspace is the smallest useful async coordination app: a shared space where
 people and agents coordinate work through hierarchical projects/tasks,
 requirements, statuses, messages, and references to artifacts.
 
+## Classes
+
+| Class | Parent | Description |
+|---|---|---|
+| `$taskspace` | `$space` | Coordination space for hierarchical work. Extends `$space` with root task ordering and task-creation behavior. |
+| `$task` | `$root` | Work item. Stores title, description, status, assignee, requirements, artifacts, messages, parent linkage, and ordered subtasks. |
+
 ## Goal
 
 Show that Woo can host a durable, asynchronous coordination world with a UI that

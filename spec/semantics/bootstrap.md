@@ -5,7 +5,7 @@ status: implemented
 
 # Bootstrap
 
-> Part of the [woo specification](../../SPEC.md). Layer: **semantics**; demo apps (`chat`, `taskspace`, `dubspace`) are **bundled local catalogs**.
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Sections §B3, §B4, §B6 (and parts of §B5) document **bundled local catalogs**; their roles — foundational utilities vs demo applications — are in [catalogs.md §CT15](../discovery/catalogs.md#ct15-bundled-catalogs-in-this-repo).
 
 The seed object graph a world boots from. Lists every object that must exist before the first call lands: universal classes (anything that has objects needs them), catalog registry scaffolding for catalog-capable worlds, and the local-catalog objects used by the bundled demos.
 
@@ -229,6 +229,8 @@ available.
 
 ## B3. Local catalog: Dubspace classes
 
+> **Non-normative.** The `dubspace` catalog is a **demo application**, not a foundational catalog (see [catalogs.md §CT15](../discovery/catalogs.md#ct15-bundled-catalogs-in-this-repo)). Its classes are documented here for reader convenience only; the canonical source is `catalogs/dubspace/manifest.json` and [`catalogs/dubspace/DESIGN.md`](../../catalogs/dubspace/DESIGN.md). A world without the demo will not have these classes.
+
 | Corename | Parent | Anchor | Description |
 |---|---|---|---|
 | `$dubspace` | `$space` | n/a (own host) | Base class for shared dub-mix spaces. It composes `$space` sequencing with sound-control verbs for loop slots, mixer channels, filters, delay, and scene recall. |
@@ -300,6 +302,8 @@ hints until the VM can express them directly.
 
 ## B4. Local catalog: Taskspace classes
 
+> **Non-normative.** The `taskspace` catalog is a **demo application** (see [catalogs.md §CT15](../discovery/catalogs.md#ct15-bundled-catalogs-in-this-repo)). Documented here for reader convenience; canonical source is `catalogs/taskspace/manifest.json` and [`catalogs/taskspace/DESIGN.md`](../../catalogs/taskspace/DESIGN.md). A world without the demo will not have `$taskspace` or `$task`.
+
 | Corename | Parent | Anchor | Description |
 |---|---|---|---|
 | `$taskspace` | `$space` | n/a (own host) | Base class for spaces that coordinate hierarchical work. It extends `$space` with root task ordering and task-creation behavior for asynchronous human and agent collaboration. |
@@ -350,6 +354,8 @@ builtin; no task-specific native runtime handler is required.
 ---
 
 ## B5. Local catalog: Chat classes and scaffolding
+
+> The `chat` catalog is a **foundational utility** ([catalogs.md §CT15](../discovery/catalogs.md#ct15-bundled-catalogs-in-this-repo)): `$conversational` (feature object), `$match` (text-to-action scaffold), and `$room`/`$exit` (room geography) are reused by other catalogs. `$chatroom` is a runnable demo that ships in the same catalog. Canonical source: `catalogs/chat/manifest.json` and [`catalogs/chat/DESIGN.md`](../../catalogs/chat/DESIGN.md). The classes below are documented for convenience; behavior is whatever the manifest installs.
 
 | Corename | Parent | Anchor | Description |
 |---|---|---|---|
@@ -452,6 +458,8 @@ the_taskspace:add_feature($conversational);
 ---
 
 ## B6. Demo instances
+
+> **Non-normative.** Listed here are seed instances created by the bundled **demo application** catalogs (see [catalogs.md §CT15](../discovery/catalogs.md#ct15-bundled-catalogs-in-this-repo)). A world that installs none of those demos will not have any of these instances. `$nowhere` is the exception — it is a universal seed object covered in §B2.15 and re-listed here only for the demo-comparison context.
 
 | Corename | Class | Anchor | Description |
 |---|---|---|---|

@@ -225,7 +225,7 @@ universal core primitive.
 
 ## C10. Minimal Dubspace
 
-The tiny Dubspace demo can be built from:
+The tiny Dubspace demo (one of the bundled **demo applications**, [catalogs.md §CT15](../discovery/catalogs.md#ct15-bundled-catalogs-in-this-repo)) is built from:
 
 - `$space`
 - `$actor`
@@ -235,6 +235,8 @@ The tiny Dubspace demo can be built from:
 - `$filter`
 - `$delay`
 - `$scene`
+
+The class names below are specific to this demo; the contract — a `$space` subclass with anchored control objects exchanging sequenced messages — applies to any coordination-cluster catalog, not just dubspace.
 
 Basic flow:
 

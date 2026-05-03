@@ -2,6 +2,20 @@
 
 A canonical MOO surface — rooms, presence, talk, emote, tell — built as a feature-object composition rather than a `$space` subclass. Sits alongside dubspace/taskspace/IDE; can also embed inside them.
 
+## Classes
+
+| Class | Parent | Description |
+|---|---|---|
+| `$match` | `$thing` | Chat-shaped text-to-action scaffold. |
+| `$failed_match` | `$thing` | Sentinel returned when no visible object matches. |
+| `$ambiguous_match` | `$thing` | Sentinel returned when multiple visible objects match. |
+| `$room` | `$space` | LambdaCore-shaped room base. Holds contents, present actors, exit lookup, and announce/tell fanout. |
+| `$exit` | `$thing` | First-class room exit. Carries aliases and movement messages; invokes the moveto path. |
+| `$chatroom` | `$room` | Standalone chat-room class. Conversational behavior comes from `$conversational`. |
+| `$portable` | `$thing` | Carryable room object. Moves between room contents and actor inventory without changing host placement. |
+| `$furniture` | `$thing` | Fixed room furnishing. Appears in look output but is not carryable. |
+| `$cockatoo` | `$thing` | Talkative bird. Squawks random phrases, can be taught new ones, gagged when too noisy. |
+
 ## Goal
 
 Show that woo's MOO-shaped composition works in practice: chat behavior is a *feature*, not an inheritance, so any `$space` (a `$chatroom`, a `$taskspace`, a `$dubspace`) can opt into it by attaching `$conversational` to its `features` list.

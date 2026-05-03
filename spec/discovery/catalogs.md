@@ -19,7 +19,7 @@ The distribution model is **GitHub-tap-then-install**, modeled on package manage
 
 - A team publishing their `$timer` and `$reminder` classes for other teams to use.
 - A community library (`$markdown_renderer`, `$reaction_set`) that hundreds of worlds want.
-- The example demos shipped in this repo (`dubspace`, `taskspace`, `chat`) — themselves installable catalogs.
+- Foundational utilities and example applications shipped in this repo (see §CT15) — themselves installable catalogs, on the same path as any third-party catalog.
 - Versioned base classes that evolve (`v1`, `v2`).
 
 Catalogs are the answer.
@@ -669,3 +669,23 @@ This practice composes with the deployment lifecycle: catalog updates are *not* 
 - **Auto-generated migrations from manifest diffs.** Tooling for "compute the migration steps between v1.0 and v2.0 manifests" is useful but secondary; publishers write migrations by hand for now.
 
 The principle: **migrations are the publisher's responsibility, recovery is the operator's, and the runtime provides the sequencing and audit substrate.** This matches the rest of woo's discipline — the runtime guarantees minimal primitives; user/publisher code does the domain-specific work.
+
+---
+
+## CT15. Bundled catalogs in this repo
+
+The catalogs under `catalogs/` ship with this repository for two distinct purposes. None is privileged by the runtime — each installs through the same `@local:<name>` path that any third-party catalog uses — but their roles for an operator are different:
+
+| Catalog | Role | Ship for general deployment? | Notes |
+|---|---|---|---|
+| `help` | **Foundational utility** | Yes | In-world help-database framework (`$help_db`). Other catalogs append entries; chat depends on it. |
+| `chat` | **Foundational utility** | Yes | Provides `$conversational` (feature object), `$match` (text-to-action scaffold), and `$room`/`$exit` (room geography), all reusable. Also ships `$chatroom` as a runnable demo room. |
+| `note` | **Foundational utility** | Optional | Generic portable text-bearing thing. Subclassed by pinboard pins; useful as a standalone primitive. |
+| `prog` | **Foundational utility** | Optional | Builder/programmer authority tooling for in-world authoring. Required only for worlds that allow runtime programming. |
+| `dubspace` | **Demo application** | No | Shared dub-mix sound space. Illustrates `$space` composition with control surfaces; not a foundation for other catalogs. |
+| `taskspace` | **Demo application** | No | Hierarchical task coordination. Illustrates anchored object trees; not a foundation. |
+| `pinboard` | **Demo application** | No | Spatial bulletin board. Depends on `note`; illustrates movable objects in a `$space`. |
+
+**Foundational utilities** are reusable building blocks: a typical operator-deployed world will install all four. **Demo applications** are illustrative and runnable but are not part of the core feature set — operators ship them only to host the demo.
+
+The list above is **not exhaustive** of catalogs woo can run. Any GitHub-tap catalog can be installed alongside or instead of the bundled set; the runtime treats them identically. Specs that mention `$dubspace`, `$taskspace`, `$chatroom`, or other bundled-catalog classes by name use them as concrete examples — the contracts they illustrate apply to any catalog of the same shape.

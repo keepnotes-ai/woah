@@ -95,11 +95,11 @@ The "enclosing space" is resolved by the runtime at dispatch time: the nearest a
 | `look()`, `who()`, `say(text)` | `$conversational` | direct |
 | `describe()` | `$root_object` | direct |
 | `wait(timeout_ms?, limit?)` | `$actor` (§M4) | direct |
-| `enter(target)`, `go(exit)`, `take(item)`, `drop(item)` | `$chatroom` | direct |
-| `set_control`, `save_scene`, `recall_scene` | `$dubspace` | direct |
-| `create_task`, `claim`, `set_status`, `add_subtask` | `$taskspace` / `$task` | **sequenced** |
+| `enter(target)`, `go(exit)`, `take(item)`, `drop(item)` | `$chatroom` *(demo)* | direct |
+| `set_control`, `save_scene`, `recall_scene` | `$dubspace` *(demo)* | direct |
+| `create_task`, `claim`, `set_status`, `add_subtask` | `$taskspace` / `$task` *(demo)* | **sequenced** |
 
-The gateway does not construct any of these; it reads the verb tables.
+The first four rows are foundational classes; the remaining rows illustrate verbs from the bundled **demo applications** ([catalogs.md §CT15](../discovery/catalogs.md#ct15-bundled-catalogs-in-this-repo)) — installed catalogs contribute their own verbs in the same shape. The gateway does not construct any of these; it reads the verb tables.
 
 ### M2.3 Result shape
 

@@ -1,6 +1,11 @@
+---
+date: 2026-04-30
+status: implemented
+---
+
 # Woo Core Model
 
-> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **v1-core**.
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**.
 
 Woo-core is the smallest model needed for persistent, programmable, multi-user
 worlds. It is inspired by LambdaMOO's object system, but it does not assume a
@@ -326,4 +331,4 @@ Five canonical patterns. New verbs should match one; if a verb resists classific
 | **Direct live interaction** | `obj:verb()` (observations live-only by route) | no | chat `:say`, `:tell`, `:emote`, presence `:enter`/`:leave`, typing indicators, hover. The interaction is real-time-only; replay would not reproduce it. |
 | **Logged social interaction** | `$space:call(message)` or an explicit log-append wrapper | yes | moderated/auditable chat, compliance-mandated message archives. The author opts into durability. |
 
-Most v1-core verbs land in the first two patterns. Live-only interaction and authoring need explicit design choices about delivery and audit; logged social is opt-in only.
+Most baseline verbs land in the first two patterns. Live-only interaction and authoring need explicit design choices about delivery and audit; logged social is opt-in only.

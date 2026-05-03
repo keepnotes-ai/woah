@@ -1,13 +1,18 @@
-# Tiny VM Profile
+---
+date: 2026-04-30
+status: implemented
+---
 
-> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **first-light** (T0 carries forward into v1-core as a subset of the full VM).
+# Tiny VM
+
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**.
 
 The tiny demo should run real Woo behavior in a VM. It should not wait for the
 entire future VM: host RPC, suspension, browser-host execution, exception
-machinery, and full source-language compilation are not required for first
-light.
+machinery, and full source-language compilation are not required for the tiny
+runtime subset.
 
-This document defines the first VM profile: **T0**.
+This document defines the first VM subset: **T0**.
 
 ## T0 Goal
 
@@ -73,7 +78,7 @@ type TinyFrame = {
 };
 ```
 
-T0 has one frame at a time. There is no call stack in the first profile.
+T0 has one frame at a time. There is no call stack in this subset.
 
 ## T0 Bytecode
 
@@ -87,7 +92,7 @@ type TinyBytecode = {
 };
 ```
 
-The physical encoding can be compact later. For first light, a structured JSON
+The physical encoding can be compact later. For T0, a structured JSON
 opcode representation is acceptable.
 
 ## T0 Opcodes
@@ -125,7 +130,7 @@ opcode representation is acceptable.
 | `SET_PROP` | `obj name value ->` | Write local persistent property. |
 
 In T0, `GET_PROP` and `SET_PROP` are local to the current behavior savepoint.
-Cross-host property access is outside the tiny profile.
+Cross-host property access is outside the tiny subset.
 
 ### Observations
 
@@ -186,7 +191,7 @@ Generic `object:echo(event)`:
 3. Return true.
 
 Dubspace can seed domain-specific verbs using the same generic VM mechanisms.
-Those verbs belong to the demo library, not to the T0 VM profile.
+Those verbs belong to the demo library, not to the T0 VM subset.
 
 ## Upgrade Path
 
@@ -383,7 +388,7 @@ if (status == "done") {
 return status;
 ```
 
-Bytecode (simplified; assumes a `filter_unchecked` and `length` available via `BUILTIN`, which T0 does not have — for first-light, the check is unrolled inline or pre-computed by the caller). For a first-light implementation that does not yet have builtins, the `done_premature` check can be omitted from the bytecode and emitted by a wrapper outside the VM:
+Bytecode (simplified; assumes a `filter_unchecked` and `length` available via `BUILTIN`, which T0 does not have — for T0, the check is unrolled inline or pre-computed by the caller). For an implementation that does not yet have builtins, the `done_premature` check can be omitted from the bytecode and emitted by a wrapper outside the VM:
 
 ```json
 {

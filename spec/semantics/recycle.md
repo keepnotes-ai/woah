@@ -1,6 +1,11 @@
+---
+date: 2026-04-29
+status: implemented
+---
+
 # Recycle
 
-> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **v1-core**.
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**.
 
 The normative semantics for destroying an object via the `recycle(obj)` builtin. LambdaMOO's `recycle()` had subtle load-bearing behavior — child tasks killed, parent bookkeeping cleared, ULID retired — that needs to be specified explicitly so implementations don't diverge.
 

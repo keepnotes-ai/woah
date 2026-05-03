@@ -1,6 +1,11 @@
+---
+date: 2026-04-29
+status: implemented
+---
+
 # Values
 
-> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **v1-core**.
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**.
 
 The canonical contract for runtime values: types, equality, serialization, and the rules that wire frames and persistent storage must agree on.
 

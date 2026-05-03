@@ -1,6 +1,11 @@
+---
+date: 2026-04-29
+status: partial
+---
+
 # Teams
 
-> Part of the [woo specification](../../SPEC.md). Layer: **identity**. Profile: **v1-ops**.
+> Part of the [woo specification](../../SPEC.md). Layer: **identity**.
 
 The contract for multi-actor coordination at the account/organization level: shared ownership, team-scoped quotas, role-based access. Builds on [auth.md](auth.md) and [identity.md](../semantics/identity.md).
 

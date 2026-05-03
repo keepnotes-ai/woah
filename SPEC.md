@@ -1,18 +1,31 @@
 # woo — specification
 
-Programmable persistent objects, single-parent inheritance, modernized types, structured event messaging. A globally distributed successor to LambdaMOO. v1 runs on a single machine or a single vendor's edge (Cloudflare); cross-operator federation is reserved for v2.
+Programmable persistent objects, single-parent inheritance, modernized types, structured event messaging. A globally distributed successor to LambdaMOO. Cross-operator federation is reserved for v2.
 
-> Status: working draft. Section numbers in headers are stable references for conversation.
+> Status: varies.  Some parts are implemented.  Others are draft.
+> If the spec says "implemented", it becomes the reference for behavior.
+> When developing, keep the spec aligned with the actual implementation.
+> Section numbers in headers are stable references for conversation.
 
 ---
 
 ## 1. Vision
 
-**woo** is a multi-user, persistent, programmable world. Every object is independently addressable and stateful. Users (human or agent) connect over websockets, inhabit a player object, and interact by emitting events and invoking verbs on other objects. Objects can be edited and reprogrammed at runtime by sufficiently privileged users; all code is sandboxed in a custom bytecode VM with tick metering and per-task memory caps.
+**woo** is a multi-user, persistent, programmable world. It is a modern successor to LambdaMOO: it preserves the expressive object/verb/room/player model while reconsidering the architecture, interfaces, safety model, and social expectations for a contemporary networked environment. Every object is independently addressable and stateful. Users (human or agent) connect over websockets, inhabit a player object, and interact by emitting events and invoking verbs on other objects. Objects can be edited and reprogrammed at runtime by sufficiently privileged users; all code is sandboxed in a custom bytecode VM with tick metering and per-task memory caps.
 
-The system is **globally distributed** — every object is its own actor, hosted at the edge, with no single process or node carrying the whole world. v1 runs within one vendor's namespace. Cross-operator federation (the broader sense of "decentralized") is designed but deferred to v2.
+The system is **globally distributed** in the production profile. Every object is its own actor, hosted at the edge, with no single process or node carrying the whole world. v1 runs within one vendor's namespace per deployment. Cross-operator federation (the broader sense of "decentralized") is designed but deferred to v2.
+
+## 1.1 Deployment modes
+
+Woo has three runtime modes:
+
+- **In-memory (development/testing only).** Fast boot, no persistence guarantees, and no required cross-environment promotion workflow.
+- **Local SQLite (testing and small self-contained deployments).** Durable process-local storage, simpler operations, and single-environment lifecycle.
+- **Cloudflare (production).** Distributed host-per-object deployment with full identity flows, and the only mode that requires a dev/staging/prod pipeline and inter-environment promotion.
 
 The system is **infrastructure, not UI**. The chat-text interface is one renderer. The wire protocol is structured events. Browser-hosted "transient" objects participate in the same execution model as server-hosted persistent ones.
+
+The specification should be clear enough that independent implementations can be tested against it. Early implementation sketches are evidence and reference material, not substitutes for the normative spec.
 
 ---
 
@@ -34,22 +47,9 @@ The system is **infrastructure, not UI**. The chat-text interface is one rendere
 
 ---
 
-## Profiles
-
-Spec scope is organized into four progressive profiles. See [profiles.md](spec/profiles.md) for the per-doc map.
-
-| Profile | Scope | Status |
-|---|---|---|
-| **first-light** | Runnable dubspace + taskspace demos, minimal IDE, local dev runtime; T0 fixtures plus v0.5 VM/persistence slices | reference impl in `src/` (v0.5 local; not a v1-core claim) |
-| **v1-core** | Full semantics + protocol + Cloudflare reference; durable, multi-actor, recoverable | spec ready; impl partial |
-| **v1-ops** | Worktrees, migrations, backups, deployments, observability, debugging, teams, credentialed auth, catalogs, conformance | spec ready |
-| **v2-federation** | Cross-world calls (mTLS), peer trust, federated identity | reserved; designs in `spec/deferred/` |
-
-Each profile is a superset of the one above.
-
 ## Layers
 
-The spec is split into layers, mostly orthogonal to profiles. Implementation references in semantics and protocol layers are explicit pointers to reference; you can read semantics + protocol without committing to Cloudflare.
+The spec is split into layers. Implementation references in semantics and protocol layers are explicit pointers to reference profiles; you can read semantics + protocol for all runtimes without committing to Cloudflare.
 
 | Path | Layer | Contents |
 |---|---|---|
@@ -59,17 +59,20 @@ The spec is split into layers, mostly orthogonal to profiles. Implementation ref
 | [spec/deferred/](spec/deferred/) | **deferred** | Not in v1. Federation, capabilities, audio. |
 
 ### Semantics
+
+Language and runtime foundations: object/verb/value semantics and execution behavior independent of host implementation.
+
 - [core.md](spec/semantics/core.md) — woo-core: objects, messages, spaces, actors, observations
 - [values.md](spec/semantics/values.md) — value contract, equality, canonical serialization (V1–V11)
 - [objects.md](spec/semantics/objects.md) — object model, identity, verb dispatch, properties (§4, §5, §9, §10)
 - [sequenced-log.md](spec/semantics/sequenced-log.md) — `$sequenced_log` primitive: atomic seq allocation, durable append-only log (SL1–SL10)
 - [space.md](spec/semantics/space.md) — `$space` (a `$sequenced_log` subclass): call lifecycle, failure rules, snapshots (S1–S10)
 - [identity.md](spec/semantics/identity.md) — actor, session, auth lifecycle (I1–I8)
-- [bootstrap.md](spec/semantics/bootstrap.md) — seed object graph: universal classes plus first-light local-catalog bootstrapping (B1–B9)
+- [bootstrap.md](spec/semantics/bootstrap.md) — seed object graph: universal classes plus bundled local-catalog bootstrapping (B1–B9)
 - [introspection.md](spec/semantics/introspection.md) — `:describe()` convention and discovery surface (N1–N6)
 - [language.md](spec/semantics/language.md) — types, DSL syntax (§6, §7)
 - [vm.md](spec/semantics/vm.md) — bytecode, opcodes, scheduling, metering (§8)
-- [tiny-vm.md](spec/semantics/tiny-vm.md) — T0 VM profile for the first demo, with concrete fixtures
+- [tiny-vm.md](spec/semantics/tiny-vm.md) — T0 VM subset for early fixtures
 - [permissions.md](spec/semantics/permissions.md) — perms, wizard, trust, quotas (§11)
 - [events.md](spec/semantics/events.md) — emit, schemas (§12, §13)
 - [tasks.md](spec/semantics/tasks.md) — lifecycle, suspend, fork, read (§16)
@@ -81,6 +84,9 @@ The spec is split into layers, mostly orthogonal to profiles. Implementation ref
 - [failures.md](spec/semantics/failures.md) — consolidated failure model (F1–F11)
 
 ### Protocol
+
+Host-facing interfaces for runtime execution, transport, and client bootstrap across local and edge hosts.
+
 - [hosts.md](spec/protocol/hosts.md) — three host classes, task migration, trust boundaries (§3)
 - [wire.md](spec/protocol/wire.md) — JSON WebSocket message format (§17)
 - [rest.md](spec/protocol/rest.md) — HTTP+SSE REST API; six endpoints; `$me` (R1–R11)
@@ -88,11 +94,17 @@ The spec is split into layers, mostly orthogonal to profiles. Implementation ref
 - [browser-host.md](spec/protocol/browser-host.md) — transient host bootstrap (§18)
 
 ### Reference (Cloudflare)
+
+Concrete Cloudflare mappings for a v1 deployment target: storage, routing, quotas, and production constraints.
+
 - [cloudflare.md](spec/reference/cloudflare.md) — host-class mapping, routing, hibernation (R1–R4)
 - [persistence.md](spec/reference/persistence.md) — per-object SQLite schema, caching (§14, §15)
 - [quotas.md](spec/reference/quotas.md) — QuotaAccountant DO (R5)
 
 ### Operations
+
+Operationally visible procedures for lifecycle management: deploys, migrations, backups, and governance.
+
 - [worktrees.md](spec/operations/worktrees.md) — staging changes, sandboxes, atomic promote (W1–W13)
 - [migrations.md](spec/operations/migrations.md) — bytecode upgrades, schema changes, data migrations (M1–M9)
 - [backups.md](spec/operations/backups.md) — world export format, restore, disaster recovery (B1–B8)
@@ -101,22 +113,37 @@ The spec is split into layers, mostly orthogonal to profiles. Implementation ref
 - [workflows.md](spec/operations/workflows.md) — state machines on `$space`s; role gating; transition rules (WF1–WF10)
 
 ### Identity
+
+Trust and actor-governance contracts for authentication, teams, capabilities, and access boundaries.
+
 - [auth.md](spec/identity/auth.md) — credentialed auth, account vs actor, multi-character, recovery, service accounts (A1–A11)
 - [teams.md](spec/identity/teams.md) — team membership, role-based gating, team quotas, service accounts (TM1–TM10)
 - [provisioning.md](spec/identity/provisioning.md) — actor creation, class assignment, capability granting, directory sync (AP1–AP7) — **placeholder**
 
 ### Discovery
+
+Catalog authoring, installation, and migration behavior across worlds.
+
 - [catalogs.md](spec/discovery/catalogs.md) — GitHub-tap-then-install model; sequenced installs through `$catalog_registry`; per-catalog tool manifests; authority and ownership; migration contract (CT1–CT14)
 
 ### Tooling
+
+Diagnostics and verification surfaces for runtime behavior, testing, and operator workflows.
+
 - [debugging.md](spec/tooling/debugging.md) — stepping, breakpoints, replay debugging in a sandbox (D1–D10)
 - [conformance.md](spec/tooling/conformance.md) — behavioral test corpus (CF1–CF9)
 
 ### Authoring
+
+Tools and in-world interfaces for making Woo programmable by people and agents.
+
 - [minimal-ide.md](spec/authoring/minimal-ide.md) — first Web IDE and authoring primitives (A1–A11)
 - [editor-rooms.md](spec/authoring/editor-rooms.md) — LambdaCore-style editor rooms for collaborative in-world authoring (E1–E8)
 
 ### Deferred
+
+Designs intentionally deferred from v1 that reserve compatibility for later operator capabilities.
+
 - [federation.md](spec/deferred/federation.md) — full cross-world interop design (§24)
 - [federation-early.md](spec/deferred/federation-early.md) — earliest-buildable v2 subset: mTLS peers, cross-world calls gated by verb annotation (FE1–FE11)
 
@@ -124,8 +151,8 @@ The spec is split into layers, mostly orthogonal to profiles. Implementation ref
 
 See [LATER.md](LATER.md) for the informal todo list — open items, sketches, gaps, decisions still pending. Not commitments.
 
-For what is *currently built* (as opposed to what the spec is building toward), see the implementation snapshots in [`notes/`](notes/). The current cut is documented in [notes/impl-v0.5-rich-vm-persistence-compiler.md](notes/impl-v0.5-rich-vm-persistence-compiler.md); the older [notes/impl-v0-first-light.md](notes/impl-v0-first-light.md) is historical. Current debt and spec/impl drift is in [TECH_DEBT_AUDIT.md](TECH_DEBT_AUDIT.md).
+For what is *currently built* (as opposed to what the spec is building toward), see the implementation snapshots in [`notes/`](notes/). The current cut is documented in [notes/impl-v0.5-rich-vm-persistence-compiler.md](notes/impl-v0.5-rich-vm-persistence-compiler.md); older snapshots are historical.
 
 Loose docs alongside the spec layers and bundled catalogs:
-- [spec/vision.md](spec/vision.md), [spec/README.md](spec/README.md) — author's working docs.
-- [catalogs/chat/DESIGN.md](catalogs/chat/DESIGN.md), [catalogs/dubspace/DESIGN.md](catalogs/dubspace/DESIGN.md), [catalogs/help/DESIGN.md](catalogs/help/DESIGN.md), [catalogs/pinboard/DESIGN.md](catalogs/pinboard/DESIGN.md), [catalogs/taskspace/DESIGN.md](catalogs/taskspace/DESIGN.md) — catalog-owned design docs (what each bundled catalog provides; first-light profile).
+- [spec/README.md](spec/README.md) — author's working docs.
+- [catalogs/chat/DESIGN.md](catalogs/chat/DESIGN.md), [catalogs/dubspace/DESIGN.md](catalogs/dubspace/DESIGN.md), [catalogs/help/DESIGN.md](catalogs/help/DESIGN.md), [catalogs/pinboard/DESIGN.md](catalogs/pinboard/DESIGN.md), [catalogs/taskspace/DESIGN.md](catalogs/taskspace/DESIGN.md) — catalog-owned design docs for bundled catalogs.

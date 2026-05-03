@@ -1,6 +1,11 @@
+---
+date: 2026-05-02
+status: partial
+---
+
 # Observability
 
-> Part of the [woo specification](../../SPEC.md). Layer: **operations**. Profile: **v1-ops**.
+> Part of the [woo specification](../../SPEC.md). Layer: **operations**.
 
 The contract for what an operator can see about a running woo deployment: logs, metrics, traces, audit. The operational counterpart to the user-facing `:on_$error` observation: those tell users *their* call failed; this tells operators *the platform* is or isn't healthy.
 
@@ -141,13 +146,13 @@ Logs and traces capture call payloads. If those payloads contain user data, the 
 - Allow operators to drop specific fields from trace storage.
 - Encrypt audit logs at rest.
 
-This is a configuration policy, not a runtime mandate; first-light implementations may ship with conservative defaults (redact all string property values longer than 64 bytes in traces; only object refs and schema-tagged fields go through verbatim).
+This is a configuration policy, not a runtime mandate; implementations may ship with conservative defaults (redact all string property values longer than 64 bytes in traces; only object refs and schema-tagged fields go through verbatim).
 
 ---
 
 ## O9. What's deferred
 
-- **Distributed tracing across worlds.** When federation v1 lands, traces should propagate; not first-light.
+- **Distributed tracing across worlds.** When federation v1 lands, traces should propagate; deferred.
 - **Profiling** (per-verb tick distributions, hot-path identification). Different feature; richer than per-call traces.
-- **Anomaly detection / ML-based alerts.** Pattern-based alerts as above are first-light; learned baselines are v2.
+- **Anomaly detection / ML-based alerts.** Pattern-based alerts as above are sufficient for the current contract; learned baselines are v2.
 - **Operator runbooks keyed off specific failure modes** (failures.md §F11). These layer on top of observability; not part of the spec.

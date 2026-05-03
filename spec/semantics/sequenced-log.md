@@ -1,6 +1,11 @@
+---
+date: 2026-04-30
+status: implemented
+---
+
 # Sequenced Logs
 
-> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **v1-core**.
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**.
 
 `$sequenced_log` is the smaller primitive that `$space` is built on. It is the *only* part of the coordination story the runtime privileges: an anchored, append-only message log with atomically-allocated sequence numbers. Subscribers, presence, observation routing, and dispatch are user-level concerns layered on top by subclasses.
 

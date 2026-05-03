@@ -1,6 +1,11 @@
+---
+date: 2026-05-01
+status: implemented
+---
+
 # Failures
 
-> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **v1-core**.
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**.
 
 The consolidated failure model. Most of these rules appear in their primary contexts — host invariants, space lifecycle, task scheduling, persistence atomicity, wire protocol. This document aggregates them, fills the gaps between, and is the single page operators and implementers consult when something goes wrong.
 
@@ -164,4 +169,4 @@ These non-failures still produce observable signals; treating them as failures w
 
 - **A failure-injection test harness** that exercises every row in §F2 against the live runtime. Belongs to the conformance suite work in [tooling/conformance.md](../tooling/conformance.md), still TBD.
 - **Operator runbooks** keyed off specific failure modes. Belongs to [operations/observability.md](../operations/observability.md), still TBD.
-- **Automatic rollback after run-of-failures.** A circuit-breaker pattern that disables a misbehaving verb after N consecutive failures. Useful but not first-light; the deterministic-replay model already prevents catastrophic divergence.
+- **Automatic rollback after run-of-failures.** A circuit-breaker pattern that disables a misbehaving verb after N consecutive failures. Useful but deferred; the deterministic-replay model already prevents catastrophic divergence.

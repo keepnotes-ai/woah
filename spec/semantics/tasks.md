@@ -1,6 +1,11 @@
+---
+date: 2026-04-30
+status: implemented
+---
+
 # Task lifecycle
 
-> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **v1-core**.
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**.
 
 Covers the task state machine, suspend across host eviction (the load-bearing test for the architecture), cross-host RPC continuations, fork, and read.
 

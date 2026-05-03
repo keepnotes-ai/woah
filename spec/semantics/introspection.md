@@ -1,6 +1,11 @@
+---
+date: 2026-05-02
+status: implemented
+---
+
 # Introspection
 
-> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **v1-core**.
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**.
 
 The minimum agent/developer-facing API for "what is this object, and what can I do with it?" — the contract that lets agents discover affordances without hardcoded knowledge of a world's verbs.
 
@@ -127,11 +132,11 @@ This loop requires no out-of-band knowledge about the world. It works on dubspac
 
 ---
 
-## N6. What's not first-light
+## N6. What's deferred
 
-- **Verb argument schemas.** `verb_info` returns `arg_spec` (the MOO-style `(dobj prep iobj)` triple) but not full typed signatures (`{title: str, description: str}`). Adding typed signatures is a value-model question for the post-first-light authoring spec.
+- **Verb argument schemas.** `verb_info` returns `arg_spec` (the MOO-style `(dobj prep iobj)` triple) but not full typed signatures (`{title: str, description: str}`). Adding typed signatures is a value-model question for the authoring spec.
 - **Permission preview.** "What can I do here as me?" requires evaluating perm checks ahead of time. Agents currently learn by trying and seeing `E_PERM`. A `can_call(actor, obj, verb)` builtin is a candidate for v2.
 - **Wizard-only schemas.** Some objects expose different shapes to different actors. Currently schemas are flat; per-actor visibility is deferred.
 - **Type-rich property values.** `property_info` returns `type_hint` as a hint, not a contract. Stronger typing comes with the value-model evolution.
 
-These are the natural extensions when authoring tooling appears. The first-light contract above is enough for an agent to operate any well-formed woo world without prior knowledge.
+These are the natural extensions when authoring tooling appears. The contract above is enough for an agent to operate any well-formed woo world without prior knowledge.

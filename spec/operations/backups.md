@@ -1,14 +1,26 @@
+---
+date: 2026-04-29
+status: partial
+---
+
 # Backups
 
-> Part of the [woo specification](../../SPEC.md). Layer: **operations**. Profile: **v1-ops**.
+> Part of the [woo specification](../../SPEC.md). Layer: **operations**.
 
 How a woo world is exported, archived, and restored. The contract for moving a world between environments and recovering from disaster.
+
+This workflow is primarily for the Cloudflare production profile with required
+dev/staging/prod progression. In-memory and local SQLite modes use the same
+archive format for portability, but typically target one deployment and skip
+multi-environment choreography by default.
+
+This document covers the same cross-environment lifecycle used by the Cloudflare production profile. In in-memory and local SQLite modes, export/restore are still valid backup primitives, but there is typically one durable deployment target and no mandatory dev/staging/prod progression.
 
 ---
 
 ## B1. The backup problem
 
-Per-DO durability is real but not a backup. A DO's storage survives crashes, restarts, and platform incidents within the same deployment. It does not survive:
+Persistence is real but not a backup. A deployment's storage survives crashes, restarts, and platform incidents within that target. It does not survive:
 
 - A bad deploy that corrupts data via wrong code.
 - Operator error (recycle the wrong object, force-bypass a perm check, run the wrong migration).
@@ -18,7 +30,7 @@ Per-DO durability is real but not a backup. A DO's storage survives crashes, res
 Backups are the operational answer. They produce:
 
 - A complete, restorable snapshot of the world's state, code, and history.
-- An archive that can be moved between environments (dev → staging → prod).
+- An archive that can be moved between environments (dev → staging → prod), as used by Cloudflare production deployments.
 - A baseline for disaster recovery within stated RPO/RTO.
 
 ---
@@ -133,7 +145,10 @@ Backups are also how worlds move between environments:
 
 The restore flow above handles this transparently. Cross-environment restores typically use `replace_existing: true` (wiping the target) and `up_to_seq` to align with a known-good source state.
 
-This composes with worktrees: a developer working on a feature in dev can take a snapshot of prod, restore it into a fresh sandbox, develop against representative data, then promote their patch series back through dev → staging → prod.
+This composes with worktrees: a Cloudflare production workflow is: a developer
+working on a feature in dev can take a snapshot of prod, restore it into a fresh
+sandbox, develop against representative data, then promote their patch series back
+through dev → staging → prod.
 
 ---
 

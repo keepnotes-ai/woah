@@ -1,6 +1,11 @@
+---
+date: 2026-04-30
+status: draft
+---
+
 # Federation
 
-> Part of the [woo specification](../../SPEC.md). Layer: **deferred**. Profile: **v2-federation**.
+> Part of the [woo specification](../../SPEC.md). Layer: **deferred**.
 
 Cross-world interoperation. A "world" is a single deployment with its own object graph, base classes, and policy. Federation is **deferred to v2**; this document specifies the design, reserved syntax, and trust model so that v1 leaves the right hooks in place.
 
@@ -10,7 +15,7 @@ Cross-world interoperation. A "world" is a single deployment with its own object
 
 ### 24.1 Scope
 
-A world is a self-contained instance: one Cloudflare Worker namespace, its own `Directory` DO, its own bootstrap object graph, its own user accounts. v1 ships single-world only. Federation is the v2 work of letting independent worlds reference, message, and call each other.
+A world is a self-contained instance: one deployment target with its own object graph, `Directory`, bootstrap object graph, and user accounts. The production reference deployment is a Cloudflare Worker namespace with a `Directory` DO. v1 ships single-world only. Federation is the v2 work of letting independent worlds reference, message, and call each other.
 
 The design here is what v1 must not preclude. Where v1 has a behavior at all, it should default to "this is the local world; federation pieces are reserved-but-noop."
 

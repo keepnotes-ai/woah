@@ -1,6 +1,11 @@
+---
+date: 2026-05-01
+status: implemented
+---
+
 # Type system and DSL
 
-> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **v1-core**.
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**.
 
 Covers the runtime type system and the surface syntax of the verb language. The bytecode it lowers to is in [vm.md §8](vm.md).
 

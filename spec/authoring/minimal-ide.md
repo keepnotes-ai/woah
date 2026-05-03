@@ -1,6 +1,11 @@
+---
+date: 2026-05-02
+status: draft
+---
+
 # Minimal IDE
 
-> Part of the Woo authoring specification. Working draft. Profile: **first-light**.
+> Part of the Woo authoring specification. Working draft.
 
 The minimal IDE is a Web UI for developing woocode against live Woo objects. It
 is not a full builder, package manager, or collaborative editor. Its purpose is
@@ -253,10 +258,10 @@ default authoring experience.
 
 ---
 
-## A7. T0 Source Profile
+## A7. T0 Source Subset
 
 The first IDE should not expose JSON bytecode as the primary authoring format.
-It needs a tiny source profile that lowers to T0 bytecode.
+It needs a tiny source subset that lowers to T0 bytecode.
 
 T0 source supports:
 
@@ -284,7 +289,7 @@ T0 source does not support:
 
 T0 source verb bodies cannot call other verbs. Multi-step behaviors compose at
 the client layer as multiple `$space:call` messages, or wait for the full VM
-profile with `CALL_VERB`.
+with `CALL_VERB`.
 
 Example:
 

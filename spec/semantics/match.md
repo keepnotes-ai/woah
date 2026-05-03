@@ -1,6 +1,11 @@
+---
+date: 2026-05-02
+status: implemented
+---
+
 # Match
 
-> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **v1-core** (optional bootstrap; required for chat-shaped surfaces).
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**.
 
 LambdaMOO's `parse_command` did three things at once: tokenize text, resolve direct/indirect objects, and dispatch a verb with parser globals (`dobj`, `iobj`, `prepstr`, `argstr`, etc.). woo's runtime does **none** of these — verb invocations are structured messages, not parsed text. This is correct for dubspace (UI controls) and taskspace (REST/agent calls), but a chat-shaped surface (rooms with conversational text) needs the equivalent.
 

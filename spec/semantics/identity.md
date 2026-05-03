@@ -1,10 +1,15 @@
+---
+date: 2026-05-01
+status: implemented
+---
+
 # Identity, sessions, and actors
 
-> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **v1-core** (guest auth only; credentialed auth lives in `identity/auth.md`, profile **v1-ops**).
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**.
 
 The contract for who is connected, what an actor is, and how a session binds a client to an actor.
 
-First-light scope: enough to support guest connections to a space; enough to specify reconnect, two-tab, and disconnect behavior. **Out of scope** for this version: account creation with credentials, multi-character users, recovery flows, federated identity. Those become part of the post-demo authoring surface — see [LATER.md](../../LATER.md).
+Baseline scope: enough to support guest connections to a space; enough to specify reconnect, two-tab, and disconnect behavior. **Out of scope** here: account creation with credentials, multi-character users, recovery flows, federated identity. Those live in the credentialed identity and deferred federation specs.
 
 ---
 
@@ -54,20 +59,20 @@ It does **not** carry a list of attached sockets — those live in the in-memory
 
 ---
 
-## I3. Auth (first-light: guest)
+## I3. Auth (guest baseline)
 
-First-light auth is intentionally minimal:
+Guest auth is intentionally minimal:
 
 ```
 client → server: { op: "auth", token: string }
 server → client: { op: "session", actor: ObjRef }
 ```
 
-The token is a string; the server interprets it. First-light vocabulary:
+The token is a string; the server interprets it. Guest-baseline vocabulary:
 
 - **`guest:<random>`** — server creates a fresh `$player` (or pulls one from a pre-seeded guest pool), binds it to a new session, and returns the actor's objref. Guest actors persist for the session and the guest grace period after the last connection detaches (defaults in §I6.2).
 - **`session:<session_id>`** — if the session is alive in the server's session table, auth resumes it. If expired, the server replies with `op: "error"` code `E_NOSESSION`; the client must establish a new session.
-- **`bearer:<...>`** — reserved for credentialed auth, post-first-light.
+- **`bearer:<...>`** — reserved for credentialed auth.
 
 The token vocabulary is server policy; the wire format is `string`. The contract is "the server tells the client what token to present next" — typically by surfacing a `session:<id>` token in the initial `op: "session"` frame's payload (when this is added) or via a side channel.
 
@@ -118,7 +123,7 @@ Grace defaults are token-class dependent:
 |---|---|---|
 | `guest:` | 60 seconds | 5 minutes while unattached; active connections keep the session alive |
 | `session:` (renewing) | inherits from underlying token class | unchanged on resume |
-| `bearer:` / `apikey:` (v1-ops) | 5 minutes | 24 hours rolling while attached |
+| `bearer:` / `apikey:` (credentialed) | 5 minutes | 24 hours rolling while attached |
 
 Operators may override per world via `$server_options.session_*`.
 
@@ -163,9 +168,9 @@ The disfunc runs with `progr = this.owner` (typically `$wiz`), so it has authori
 
 ---
 
-## I7. Permissions for first-light
+## I7. Baseline permissions
 
-For first-light demos, the default policy is "any authenticated guest with presence in the space can call." Concretely:
+For bundled demos, the default policy is "any authenticated guest with presence in the space can call." Concretely:
 
 - `$space:call` accepts any actor whose objref is recorded in the space's presence set.
 - A presence record is created on session establishment if the actor is to participate.
@@ -191,7 +196,7 @@ verb #task:set_status(status) {
 
 This uses the existing [permissions.md §11.4](permissions.md#114-effective-permission) `progr` discipline — no new machinery. The pattern is "verb-body checks property-stored ownership against `progr`," and it generalizes to "only the assignee can…", "only members can…", "only the owner can…" without per-verb perm bits or capability tokens.
 
-The first-light open policy and this per-claimer pattern between them cover the demo cases. Richer policies (role hierarchies, capability delegation, time-bound permissions) build on the same `progr` mechanism and are post-first-light.
+The baseline open policy and this per-claimer pattern between them cover the demo cases. Richer policies (role hierarchies, capability delegation, time-bound permissions) build on the same `progr` mechanism and live in credentialed/operational identity.
 
 **The pattern is the generic role mechanism.** A "role" in woo is just an actor-typed property on an object; enforcement is just a verb-body check that `progr` matches that property. It scales to N roles by adding more properties and more checks: `task.reviewer` gates `task:review`, `project.approvers` (a list) gates `project:promote`, `project.requestor` (set once, audit-only) is read but never enforced. The runtime prescribes no role taxonomy — pick whatever roles fit the work, and put the gating in the verbs.
 
@@ -203,7 +208,7 @@ The first-light open policy and this per-claimer pattern between them cover the 
 - Multi-character users (one human, multiple actors, switchable per session).
 - Recovery flows (lost token, lost session, account migration).
 - Identity federation (cross-world actor refs; reserved at [federation.md §24.2](../deferred/federation.md#242-the-trust-model)).
-- Per-verb perm gating beyond presence (hooks exist; policy isn't first-light).
+- Per-verb perm gating beyond presence (hooks exist; policy is deferred).
 - Audit / wizard view of session-actor history.
 
 All deferred to LATER.

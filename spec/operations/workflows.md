@@ -1,6 +1,11 @@
+---
+date: 2026-04-29
+status: partial
+---
+
 # Workflows
 
-> Part of the [woo specification](../../SPEC.md). Layer: **operations**. Profile: **v1-ops**.
+> Part of the [woo specification](../../SPEC.md). Layer: **operations**.
 
 The pattern for state-machine-shaped coordination on a `$space`. Tasks (or any work-bearing object) progress through named states; the space gates transitions on roles and entrance conditions. Generalizes beyond taskspace: review pipelines, approval chains, deployment gates, content moderation.
 
@@ -170,21 +175,21 @@ Same pattern, different domains:
 
 - **Verb-edit review pipelines** in worktrees: `draft → submitted → approved | rejected → merged`.
 - **Approval chains** for quota grants: `requested → reviewed → granted | denied`.
-- **Deployment gates**: `staging → canary → prod`.
+- **Deployment gates**: `staging → canary → prod` (example pattern used by the Cloudflare production profile).
 - **Content moderation**: `posted → flagged → reviewed → published | hidden`.
 
 Each is a `$workflow_space` subclass with a domain-specific workflow value. The runtime stays uniform; per-domain logic is in the workflow value plus domain-specific verbs.
 
 ---
 
-## WF9. What's not in v1-ops workflows
+## WF9. What's not in workflow primitives
 
 - **Computed branches.** Workflows are state-name based; "if X then go to Y else Z" requires a custom verb that computes the target state and calls `:transition`. Pattern works; not a built-in.
 - **Time-based transitions.** "After 24h, auto-cancel" is achievable via forked tasks that call `:transition` after `suspend`. Not built-in.
 - **Sub-workflows / nested state machines.** One workflow per item; composition via separate items linked by reference.
 - **Workflow versioning.** A workflow value lives on a class; changing the workflow affects future transitions. Existing in-flight items may have their `status` not match a state in the new workflow; `:transition` rejects until repair. Migration is a deliberate operator action — typically a worktree that updates the workflow value paired with a `migrate_property` to map old states to new.
 
-These are deferred refinements. The v1-ops pattern — named workflows with role gates and entrance conditions — is enough for the design-review-implementation example and most real coordination cases.
+These are deferred refinements. The current pattern — named workflows with role gates and entrance conditions — is enough for the design-review-implementation example and most real coordination cases.
 
 ---
 

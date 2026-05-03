@@ -1,8 +1,13 @@
+---
+date: 2026-04-30
+status: implemented
+---
+
 # Wire protocol
 
-> Part of the [woo specification](../../SPEC.md). Layer: **protocol**. Profile: **v1-core**.
+> Part of the [woo specification](../../SPEC.md). Layer: **protocol**.
 
-The JSON message format on the WebSocket between client and player host. First-light scope: enough frames to drive a sequenced message dispatch loop, direct live interactions, durable task input, and their observations.
+The JSON message format on the WebSocket between client and player host. Baseline scope: enough frames to drive a sequenced message dispatch loop, direct live interactions, durable task input, and their observations.
 
 Browser bootstrap details (transient host installation, host-to-host RPC) are in [browser-host.md](browser-host.md). Cross-world federation frames are in [../deferred/federation.md §24](../deferred/federation.md#24-federation).
 
@@ -43,7 +48,7 @@ WebSockets between client and player host. JSON frames. UTF-8. Values are encode
 { op: "ping" }
 ```
 
-That is the entire first-light plus durable-task client→server surface.
+That is the entire baseline plus durable-task client→server surface.
 
 Reserved for transient hosts (see [browser-host.md](browser-host.md)):
 
@@ -94,7 +99,7 @@ Reserved for transient hosts (see [browser-host.md](browser-host.md)):
 { op: "pong" }
 ```
 
-That is the entire first-light plus durable-task server→client surface.
+That is the entire baseline plus durable-task server→client surface.
 
 Reserved for transient hosts:
 
@@ -125,7 +130,7 @@ When an actor is connected, the player host sends `applied` frames for every seq
 - For the originator, `id` matches the `op: "call"` they sent. They use this to pair the reply with their pending call, run any reconcile logic (§17.6), and discard the optimistic prediction.
 - For other observers, `id` is absent. They consume the applied frame as a state-update event.
 
-There is no separate subscribe/unsubscribe frame in first-light. Membership in a space (which determines whether the host pushes its `applied` stream to a given client) is a server-side decision driven by the actor's relationship to the space — typically presence-based (the actor is in the space) or explicit ownership.
+There is no separate subscribe/unsubscribe frame in the baseline wire. Membership in a space (which determines whether the host pushes its `applied` stream to a given client) is a server-side decision driven by the actor's relationship to the space — typically presence-based (the actor is in the space) or explicit ownership.
 
 If a client's connection is interrupted and reconnects, gap recovery follows the pattern in [../semantics/events.md §12.8](../semantics/events.md#128-sequenced-calls-with-gap-recovery): the client tracks the highest `seq` per space it has applied, calls `space:replay(from, limit)` to backfill, then resumes the live stream.
 
@@ -162,11 +167,11 @@ Optimistic prediction must be paired with sequenced calls and gap recovery — o
 
 Cross-world calls use a separate wire variant — HTTPS POST origin-to-origin, not WebSocket — specified in [../deferred/federation.md §24](../deferred/federation.md#24-federation). v1 implements neither an inbound peer endpoint nor an outbound peer client; the `origin` and `signature` reservations on the message and applied envelopes are documented in federation.md so the wire is forward-compatible.
 
-### 17.8 Frames not in first-light
+### 17.8 Frames not in the baseline wire
 
-The following frames may exist in later iterations but are deliberately not part of the first-light wire:
+The following frames may exist in later iterations but are deliberately not part of the baseline wire:
 
-- `op: "subscribe"` / `"unsubscribe"` — explicit subscription management. First-light derives subscription from actor-space presence; explicit subscribe is only needed when actors observe many spaces selectively.
+- `op: "subscribe"` / `"unsubscribe"` — explicit subscription management. The baseline wire derives subscription from actor-space presence; explicit subscribe is only needed when actors observe many spaces selectively.
 - `op: "snapshot"` / `"history"` / `"sync"` — continuity mechanisms for fast reconnect. Replay via `space:replay` (§17.4) covers gap recovery without dedicated frames.
 
-These are noted here so first-light implementations don't accidentally re-derive them and so future-light implementations have a clean place to add them back.
+These are noted here so implementations don't accidentally re-derive them and so later wire revisions have a clean place to add them back.

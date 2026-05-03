@@ -1,16 +1,21 @@
-# Federation: early profile
+---
+date: 2026-04-29
+status: draft
+---
 
-> Part of the [woo specification](../../SPEC.md). Layer: **deferred**. Profile: **v2-federation**.
+# Federation: early design
+
+> Part of the [woo specification](../../SPEC.md). Layer: **deferred**.
 
 The earliest-buildable subset of cross-world federation. The full v2 design is in [federation.md](federation.md); this document specifies the minimum cross-world surface that activates first.
 
-**This is not part of v1.** v1 worlds are single-operator; cross-operator capability begins here. The doc lives in `spec/deferred/` to make that explicit. Earlier drafts of this material were placed under `spec/discovery/` and labeled "v1"; that placement was a profile-bleed and has been corrected.
+**This is not part of v1.** v1 worlds are single-operator; cross-operator capability begins here. The doc lives in `spec/deferred/` to make that explicit. Earlier drafts of this material were placed under `spec/discovery/` and labeled "v1"; that placement leaked deferred design into active discovery scope and has been corrected.
 
 ---
 
 ## FE1. Scope
 
-| Concern | Status in early profile | Reference |
+| Concern | Status in early design | Reference |
 |---|---|---|
 | Cross-world objref qualifier (`#42@world.example`) | active | federation.md §24.3 |
 | Per-world peer trust list (mTLS-pinned) | active | this doc |
@@ -32,7 +37,7 @@ The earliest-buildable subset of cross-world federation. The full v2 design is i
 
 A peer authenticates the calling world via **mutual TLS (mTLS)**. The receiving world is configured with a set of trusted client certificates (one per peer); incoming HTTPS requests must present a client cert matching one of them.
 
-This is the load-bearing fix relative to plain TLS. Standard HTTPS server-cert authenticates the *receiver* to the caller, not vice versa. Without mTLS or request signing, a peer cannot verify which world is calling — so the early-profile draft that said "TLS-confirmed origin" without specifying mTLS was not implementable as written.
+This is the load-bearing fix relative to plain TLS. Standard HTTPS server-cert authenticates the *receiver* to the caller, not vice versa. Without mTLS or request signing, a peer cannot verify which world is calling — so the early design draft that said "TLS-confirmed origin" without specifying mTLS was not implementable as written.
 
 **Operator setup (per peer pair):**
 
@@ -50,7 +55,7 @@ mTLS revocation is operational: peers replace each other's cert entries when nee
 
 ## FE3. Verb annotation: cross-world callability
 
-A cross-world `:call` can run any verb on the peer object. Without explicit gating, any mutating verb is reachable from peers — which contradicts the read-mostly intent of the early profile. The fix:
+A cross-world `:call` can run any verb on the peer object. Without explicit gating, any mutating verb is reachable from peers — which contradicts the read-mostly intent of the early design. The fix:
 
 **Verbs declare cross-world callability via metadata.** A verb's metadata gains a `cross_world_callable: bool` field (default `false`). The runtime rejects cross-world dispatch to verbs where this is `false` with `E_FED_DENIED`.
 
@@ -136,7 +141,7 @@ This narrows the trust surface from "the operator's TLS material" to "this speci
 - The TLS keys are held by infrastructure operators, not application administrators.
 - The actor's identity beyond "from this peer" matters.
 
-Signatures are optional in the early profile; the `signature` field is null when not used. Peers configure whether they require signatures via per-peer policy in `$peer_registry`.
+Signatures are optional in the early design; the `signature` field is null when not used. Peers configure whether they require signatures via per-peer policy in `$peer_registry`.
 
 ---
 
@@ -173,7 +178,7 @@ Threats and mitigations:
 
 ---
 
-## FE10. Limits of the early profile
+## FE10. Limits of the early design
 
 - **No cross-world atomic operations.** Each call is a discrete RPC; no transaction across worlds.
 - **No cross-world events.**
@@ -181,17 +186,17 @@ Threats and mitigations:
 - **No federated catalogs.** A world can pull catalogs from a peer's catalog endpoint, but each is its own import.
 - **No federated tasks.** Long-running tasks stay in their world; no cross-world fork/suspend.
 
-These are all full-v2 features. The early profile is the read-mostly cross-world surface with concrete trust.
+These are all full-v2 features. The early design is the read-mostly cross-world surface with concrete trust.
 
 ---
 
 ## FE11. Migration to full federation
 
-When v2 federation lands ([federation.md §24](federation.md#24-federation)), early-profile deployments upgrade by:
+When v2 federation lands ([federation.md §24](federation.md#24-federation)), early-design deployments upgrade by:
 
 1. Adding cross-world events (with vector-clock or causal-token machinery).
 2. Allowing direct cross-world property writes (with stricter trust gating).
 3. Enabling federated identity (via the trust-source story, when defined).
 4. Optionally relaxing the verb annotation requirement once a richer permission model exists.
 
-Early-profile peers continue to work; v2 peers can opt into the richer surface.
+Early-design peers continue to work; v2 peers can opt into the richer surface.

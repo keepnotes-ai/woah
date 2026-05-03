@@ -1,8 +1,13 @@
+---
+date: 2026-05-03
+status: implemented
+---
+
 # Bootstrap
 
-> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **v1-core** (universal classes); demo apps (`chat`, `taskspace`, `dubspace`) are **first-light local catalogs**.
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**; demo apps (`chat`, `taskspace`, `dubspace`) are **bundled local catalogs**.
 
-The seed object graph a world boots from. Lists every object that must exist before the first call lands: universal classes (anything that has objects needs them), catalog registry scaffolding for v1-ops worlds, and the first-light local-catalog objects used by the bundled demos.
+The seed object graph a world boots from. Lists every object that must exist before the first call lands: universal classes (anything that has objects needs them), catalog registry scaffolding for catalog-capable worlds, and the local-catalog objects used by the bundled demos.
 
 This is the contract the implementation must produce on first start; without it, an implementer would invent structure.
 
@@ -44,7 +49,7 @@ the target for runtime-created objects, but it is not active in v1.
 | `$guest` | class | `$player` | `$wiz` | — | Inherits player state | Overrides `:on_disfunc()` | Reusable temporary player class. Guest instances bind to short-lived sessions and return to the free pool on reap. |
 | `$sequenced_log` | class | `$root` | `$wiz` | — | Inherits descriptive slots | Host operations `append(message)`, `read(from,limit)` | Append-only sequenced log base class. `$space` and registry-like coordination objects inherit its sequence/replay shape. |
 | `$space` | class | `$sequenced_log` | `$wiz` | — | Defines `next_seq`, `subscribers`, `last_snapshot_seq`, `features`, `features_version`, `auto_presence` | `:replay(from_seq,limit)`, `:add_feature(f)`, `:remove_feature(f)`, `:has_feature(f)` | Coordination base class: one local sequence, applied-frame history, present subscribers, and feature-extended direct verbs. Room composition is catalog-level behavior, not part of `$space`. |
-| `$thing` | class | `$root` | `$wiz` | fertile | Inherits descriptive slots | `:can_be_attached_by(actor)`, `:moveto(target)` | Simple non-actor base for addressable stateful objects. Fertile so first-light programmers can create ordinary owned objects. |
+| `$thing` | class | `$root` | `$wiz` | fertile | Inherits descriptive slots | `:can_be_attached_by(actor)`, `:moveto(target)` | Simple non-actor base for addressable stateful objects. Fertile so programmer actors can create ordinary owned objects. |
 | `$catalog` | class | `$thing` | `$wiz` | — | Defines `catalog_name`, `alias`, `version`, `tap`, `objects`, `seeds`, `provenance` | Inherits root/thing verbs | Base class for installed catalog records. Instances record provenance and created refs for introspection and uninstall planning. |
 | `$catalog_registry` | singleton space | `$space` | `$wiz` | — | Own values for `$space` state plus `installed_catalogs=[]` | `:install(manifest,frontmatter,alias,provenance)`, `:list()` | Sequenced registry space for catalog install/update/uninstall operations. See [catalogs.md §CT5](../discovery/catalogs.md#ct5-install). |
 | `$nowhere` | singleton location | `$thing` | `$wiz` | — | Own `description`; inherits descriptive slots | Inherits root/thing verbs | Universal default-home location for disconnected guests, recycled objects, and objects whose home cannot otherwise be resolved. |
@@ -193,10 +198,10 @@ permission checks.
 | `provenance` | map | `{}` | Source metadata used for audit and update decisions. |
 | `migration_state` | map | absent | Last update migration state, if any. |
 
-### B2.14 v1-ops catalog registry
+### B2.14 Catalog registry
 
 Catalog-capable worlds seed `$catalog` and `$catalog_registry` in addition to
-the v1-core universal classes. `$catalog_registry` has the normal `$space`
+the universal classes. `$catalog_registry` has the normal `$space`
 properties plus registry state:
 
 | Property | Type | Default | Notes |
@@ -289,7 +294,7 @@ available.
 All these behaviors are reached through `$space:call`. In v0.5 the dubspace
 catalog installs simple property-update behaviors as authored bytecode or
 fixtures, and list/timer-heavy behaviors via trusted local `implementation`
-hints until the VM profile can express them directly.
+hints until the VM can express them directly.
 
 ---
 
@@ -488,7 +493,7 @@ For the taskspace, no instances exist at boot — tasks are created at runtime b
 
 A pre-seeded pool of `$guest` objects, e.g. `guest_1`..`guest_8`, exists at boot. Guest pool objects are operational seed instances, not universal classes. Each has `parent = $guest`, `owner = $wiz`, `location = $nowhere`, no special flags, a display `name` mirrored into the `name` property, a non-empty `description`, `presence_in = []`, `session_id = null`, and `home = $nowhere`. When a client presents `auth { token: "guest:<random>" }`, `allocateGuest` assigns one of the unbound guest objects to the new session. The pool refills as sessions are reaped: `$guest:on_disfunc` resets the guest's state and returns it to the free pool via `$system:return_guest(this)` (identity.md §I6.4).
 
-For the demo, 8 guests is enough for a small cohort. Real worlds would mint guests on demand or scale the pool to expected concurrent traffic. Each guest's description states that it is a pre-seeded temporary player and exists to give local users or agents a stable first-light actor.
+For the demo, 8 guests is enough for a small cohort. Real worlds would mint guests on demand or scale the pool to expected concurrent traffic. Each guest's description states that it is a pre-seeded temporary player and exists to give local users or agents a stable guest actor.
 
 Allocation uses an explicit free pool, **not** "any guest with no live session" — the latter is what the v0.5 impl does and what causes pool exhaustion across restarts (every guest looks bound because its session record persisted past the dead connection). The free pool is in-memory and rebuilt at boot from "guests with no session in the session table."
 

@@ -50,10 +50,10 @@ Start with [spec/README.md](spec/README.md).
 ## Implementation Plan
 
 Runtime code lives under [src/](src/), with focused tests under [tests/](tests/).
-Historical milestone notes are in [notes/](notes/).
+Historical implementation notes are in [notes/](notes/).
 
 Near-term goals: functional IDE for programmers; user onboarding flows;
-fork/suspend VM operations; more detail in [spec/profiles.md](spec/profiles.md).
+fork/suspend VM operations.
 
 ## Run Locally
 

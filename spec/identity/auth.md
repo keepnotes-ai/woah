@@ -1,14 +1,21 @@
+---
+date: 2026-04-29
+status: partial
+---
+
 # Auth
 
-> Part of the [woo specification](../../SPEC.md). Layer: **identity**. Profile: **v1-ops**.
+> Part of the [woo specification](../../SPEC.md). Layer: **identity**.
 
-The contract for actor identity beyond first-light guest tokens. Covers credentialed authentication, account-vs-actor separation, multi-character users, service/agent accounts, and recovery. Builds on [identity.md](../semantics/identity.md) — the actor and session model is unchanged; this document specifies how credentials bind to actors.
+The contract for actor identity beyond guest tokens. Covers credentialed authentication, account-vs-actor separation, multi-character users, service/agent accounts, and recovery. Builds on [identity.md](../semantics/identity.md) — the actor and session model is unchanged; this document specifies how credentials bind to actors.
+
+This document is the full-identity profile. The in-memory and local SQLite runtimes may run a reduced auth surface when intentionally scoped for development or small private deployments.
 
 ---
 
 ## A1. Beyond guest
 
-First-light identity ([identity.md §I3](../semantics/identity.md#i3-auth-first-light-guest)) supports `guest:<random>` and `session:<id>` tokens. That's enough for a demo where every actor is anonymous and short-lived. It's not enough for:
+Guest-baseline identity ([identity.md §I3](../semantics/identity.md#i3-auth-guest-baseline)) supports `guest:<random>` and `session:<id>` tokens. That's enough for a demo where every actor is anonymous and short-lived. It's not enough for:
 
 - A developer who wants to log in as themselves across sessions, days, devices.
 - A team where each member's actions are attributable.
@@ -23,7 +30,7 @@ This document specifies the credentialed-token vocabulary that extends `op: "aut
 
 A clean separation:
 
-- **Account.** A credential-bearing identity. Has a username (or email or external IdP id), credentials, recovery info, profile metadata.
+- **Account.** A credential-bearing identity. Has a username (or email or external IdP id), credentials, recovery info, and account metadata.
 - **Actor.** The runtime principal — an `$actor`-descended object with `progr` authority. Lives in the world graph.
 
 One account → one or more actors. A human with one account may have multiple `$player`-typed actors (multi-character). A team account may have many actors representing automated personas.
@@ -34,7 +41,7 @@ This separation lets credential management live alongside the runtime (where it 
 
 ## A3. Token vocabulary (extended)
 
-Extending [identity.md §I3](../semantics/identity.md#i3-auth-first-light-guest):
+Extending [identity.md §I3](../semantics/identity.md#i3-auth-guest-baseline):
 
 - **`bearer:<jwt>`** — a signed JWT issued by a known issuer (the world's auth service or a delegated IdP). Required claims: `iss`, `sub`, `exp`, `aud`, `actor` (objref), `scope`. The runtime verifies signature against a published JWK set and rejects tokens with unknown `iss`, expired `exp`, wrong `aud`, or invalid signature.
 
@@ -64,7 +71,7 @@ The token format is server policy; clients receive their next-presentable token 
 
 **Client-side persistence is a threat-model decision, not a normative recommendation.** Browsers offer no fully-secure option for storing bearers in-process: `localStorage` is XSS-exfiltratable; HTTP-only cookies are XSS-resistant but require CSRF mitigations and don't compose cleanly with WebSocket auth flows; in-memory only is XSS-safe but loses on refresh. Worlds choose based on their actor population (web, native, agent) and their tolerance for re-authentication. Tokens crossing the wire (via `auth { token }`) are subject to the observability redaction rules ([observability.md §O8](../operations/observability.md#o8-privacy--pii)) — bearer values must not appear verbatim in logs, traces, or audit records.
 
-**Bearer lifetime.** Default 1 hour. A separate **refresh token** (JWT with `purpose: refresh`, longer lifetime — default 30 days) can mint new bearers without re-credentialing via `op: "refresh", token: "refresh:<jwt>"`. This frame is part of the credentialed wire (post-first-light).
+**Bearer lifetime.** Default 1 hour. A separate **refresh token** (JWT with `purpose: refresh`, longer lifetime — default 30 days) can mint new bearers without re-credentialing via `op: "refresh", token: "refresh:<jwt>"`. This frame is part of the credentialed wire.
 
 **Per-claim scopes.** A bearer's `scope` claim lists what the actor may do. First-light scopes: `read`, `write`, `admin`. Worlds may add their own. Scope is **advisory in v1**; the runtime trusts the actor's `progr` discipline as the enforcement primitive. Future versions may pre-filter calls by scope.
 
@@ -96,7 +103,7 @@ One account, multiple actors. The account's `actors` property is a list of `$pla
 
 Bearer's `actor` claim names the chosen character. Switching characters means re-authenticating with a different bearer (one per character) or a `op: "switch_actor", target: <objref>` frame after auth.
 
-For first-light v1: one bearer = one bound actor. Switching means new bearer issuance. `$account:list_actors()` returns the bound actors; UI exposes a character-select menu.
+For the current credentialed-token contract: one bearer = one bound actor. Switching means new bearer issuance. `$account:list_actors()` returns the bound actors; UI exposes a character-select menu.
 
 ---
 

@@ -1,6 +1,11 @@
+---
+date: 2026-04-29
+status: implemented
+---
+
 # Features
 
-> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **v1-core**.
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**.
 
 A **feature object** contributes verbs to a consumer object without being in the consumer's parent chain. Features are LambdaMOO's answer to "I need orthogonal capabilities" under single-parent inheritance: a player who is also a mail-recipient and an editor and a gendered-object composes those capabilities by attaching feature objects, not by reparenting.
 

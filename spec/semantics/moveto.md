@@ -1,6 +1,11 @@
+---
+date: 2026-05-02
+status: draft
+---
+
 # Moveto pipeline
 
-> Working draft. Profile: **v1-ops**.
+> Working draft.
 
 The LambdaMOO container model — `note:moveto(board)` triggers
 `board:acceptable(note)`, then `current.location:exitfunc(note)`, then
@@ -115,7 +120,7 @@ Sequenced `$space:call` bodies still should not use cross-host `moveto` as a
 deterministic state primitive. If a sequenced behavior needs to move remote
 objects, it should delegate to a direct/catalog operation that owns the
 cross-host effects, or fail with `E_CROSS_HOST_WRITE` until a stronger
-multi-host transaction profile exists.
+multi-host transaction contract exists.
 
 ## M5. Implementation surface
 

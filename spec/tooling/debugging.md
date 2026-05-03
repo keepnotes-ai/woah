@@ -1,6 +1,11 @@
+---
+date: 2026-04-29
+status: partial
+---
+
 # Debugging
 
-> Part of the [woo specification](../../SPEC.md). Layer: **tooling**. Profile: **v1-ops**.
+> Part of the [woo specification](../../SPEC.md). Layer: **tooling**.
 
 The contract for inspecting a verb's execution beyond `:on_$error` observations: stepping through bytecode, examining frames, comparing pre/post state, replaying sequenced calls with breakpoints.
 
@@ -30,7 +35,7 @@ This is why worktrees are a prerequisite. Without sandboxes, debugging would eit
 
 ## D3. Wire surface
 
-Debugging extends the wire protocol with frames that are not part of first-light. These are part of the developer wire (post-first-light, alongside the credentialed auth flows in [auth.md](../identity/auth.md)).
+Debugging extends the wire protocol with frames that are not part of the baseline wire. These are part of the developer wire, alongside the credentialed auth flows in [auth.md](../identity/auth.md).
 
 ```ts
 // Client → server (against an attached sandbox).

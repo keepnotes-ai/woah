@@ -1,6 +1,11 @@
+---
+date: 2026-05-02
+status: draft
+---
+
 # Editor Rooms
 
-> Part of the Woo authoring specification. Working draft. Profile: **v1-ops**.
+> Part of the Woo authoring specification. Working draft.
 
 The authoring environment is itself a world object. Following LambdaCore, an
 editor is a room-like object: an actor enters it, runs ordinary verbs there, and

@@ -1,6 +1,11 @@
+---
+date: 2026-04-30
+status: partial
+---
+
 # Migrations
 
-> Part of the [woo specification](../../SPEC.md). Layer: **operations**. Profile: **v1-ops**.
+> Part of the [woo specification](../../SPEC.md). Layer: **operations**.
 
 How woo handles transitions when the world has changed: bytecode version upgrades, schema changes (property defs evolving, types changing), and data migrations (existing object state needs rewriting under new conventions).
 
@@ -122,7 +127,7 @@ The migration is a recurring forked task that processes batches until done, with
 
 **Live state during migration.** Migrations run concurrently with live calls. A call that arrives mid-migration sees either the old or new value. New code that lands as part of a migration-bearing worktree must accept both shapes — see §M5.1 for the normative rule.
 
-`pause_space(space, reason)` and `resume_space(space)` are first-class wizard verbs in v1-ops profile. A paused space rejects all calls with `E_PAUSED` until resumed; the runtime continues to accept the wizard verbs that re-enable it. Used when dual-shape compatibility (§M5.1) is impossible.
+`pause_space(space, reason)` and `resume_space(space)` are first-class wizard verbs for operational maintenance. A paused space rejects all calls with `E_PAUSED` until resumed; the runtime continues to accept the wizard verbs that re-enable it. Used when dual-shape compatibility (§M5.1) is impossible.
 
 ---
 

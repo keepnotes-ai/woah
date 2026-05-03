@@ -1,6 +1,11 @@
+---
+date: 2026-04-29
+status: partial
+---
+
 # Conformance
 
-> Part of the [woo specification](../../SPEC.md). Layer: **tooling**. Profile: **v1-ops**.
+> Part of the [woo specification](../../SPEC.md). Layer: **tooling**.
 
 The behavioral test corpus that any woo runtime implementation must pass. The contract is "given this seed, this call sequence, and this configuration, the implementation produces these applied frames and these final state values." Multiple implementations of the spec — alternate runtimes, custom hosts, embedded variants — verify themselves against the same suite.
 
@@ -91,7 +96,7 @@ Each category has a section of named tests; total target ~500 tests for v1 launc
 
 ---
 
-## CF4. Storage target profiles
+## CF4. Storage target categories
 
 The conformance runner distinguishes **live storage backends** from
 **archive/import-export targets**.
@@ -102,7 +107,7 @@ storage-failure behavior, and concurrent-write semantics. The reference live
 targets are in-memory, SQLite, and future host storage adapters.
 
 The JSON folder format is not a live storage backend. It is a human-readable
-world dump/import format. The suite covers it under an archive profile:
+world dump/import format. The suite covers it as an archive target:
 
 - Full world dump/load round trip.
 - Manifest and per-object file shape.
@@ -177,7 +182,7 @@ Performance benchmarks are *not* part of conformance. The same harness can run b
 
 ## CF10. What's deferred
 
-- **Live-system probing.** A "is this running deployment spec-compliant?" check that runs against a live world. Possible via the suite if you have a wizard-credentialed test actor; not first-light.
+- **Live-system probing.** A "is this running deployment spec-compliant?" check that runs against a live world. Possible via the suite if you have a wizard-credentialed test actor; deferred.
 - **Cross-world conformance.** When federation v1 lands, the suite extends to cover multi-world scenarios. v2.
 - **UI conformance.** Whether the IDE / dubspace client / taskspace client behave correctly is *application* conformance, not runtime. Belongs to a separate UI test suite.
 - **Property-based tests / fuzzing.** Useful complement but separate work; the conformance suite is hand-curated against the spec.

@@ -1,6 +1,11 @@
+---
+date: 2026-05-02
+status: implemented
+---
+
 # Builtins and errors
 
-> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **v1-core**.
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**.
 
 Sketch of the v1 builtin function set (registered with stable indices for the `BUILTIN` opcode) and the canonical error catalogue.
 

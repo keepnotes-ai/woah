@@ -1,10 +1,15 @@
+---
+date: 2026-04-30
+status: implemented
+---
+
 # Spaces
 
-> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **v1-core** (§S7 snapshots escalate to **v1-ops**, see §S7.1).
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**.
 
 `$space` is woo's coordination workhorse: a `$sequenced_log` subclass that adds dispatch, subscribers, and observation broadcast on top of the underlying append-only sequence primitive. This document is the normative behavior of `$space:call` and the related lifecycle. The lower-level append/read primitive lives in [sequenced-log.md](sequenced-log.md). The conceptual framing is in [core.md §C4–§C6](core.md).
 
-The split: `$sequenced_log` provides atomically-allocated seqs and a durable message log; `$space` provides the dispatch loop, the audience model, and the applied-frame contract. Almost every v1 coordination use case is a `$space`; alternative subclasses ([sequenced-log.md §SL6](sequenced-log.md#sl6-other-plausible-subclasses)) are possible without runtime changes.
+The split: `$sequenced_log` provides atomically-allocated seqs and a durable message log; `$space` provides the dispatch loop, the audience model, and the applied-frame contract. Almost every coordination use case is a `$space`; alternative subclasses ([sequenced-log.md §SL6](sequenced-log.md#sl6-other-plausible-subclasses)) are possible without runtime changes.
 
 ---
 
@@ -108,17 +113,15 @@ Reload follows: load the latest snapshot, then `replay(snapshot.seq + 1, limit)`
 
 Snapshots are content-addressable via replay-canonical encoding ([values.md §V8](values.md#v8-replay-canonical-form)): two snapshots with the same materialized state hash to the same bytes regardless of insertion order.
 
-### S7.1 Snapshot profile escalation
+### S7.1 Snapshot policy
 
-Snapshots are **optional in v1-core** — a sequencer can run without them; small spaces don't need them, and replay-from-1 is cheap.
+Snapshots are optional for small or short-lived spaces: a sequencer can run without them when replay-from-1 is cheap.
 
-Snapshots are **required in v1-ops** because:
+Snapshots are required for deployments and features that need bounded replay, because:
 - Worktree creation requires a snapshot for sandbox seeding ([worktrees.md §W4](../operations/worktrees.md#w4-sandboxes)).
 - Replay debugging requires snapshot+forward-replay reconstruction ([debugging.md §D6](../tooling/debugging.md#d6-replay-debugging)).
 - Backup export depends on snapshot+log composition ([backups.md §B2](../operations/backups.md#b2-world-export-format)).
 - Conformance includes snapshot reconstruction tests ([conformance.md §CF3](../tooling/conformance.md#cf3-required-categories)).
-
-A v1-ops implementation must implement snapshots; a v1-core implementation may skip them and skip the corresponding conformance categories.
 
 **Triggering convention.** Short-lived spaces (e.g., the dubspace demo, where the log is bounded by control surface complexity) can skip snapshots entirely — replay from seq 1 is cheap. Long-lived spaces (e.g., the taskspace demo, where the log accumulates over weeks) need snapshots so late-joining clients and agents have a reasonable reload path. The recommended trigger is **every K calls or M minutes idle**, whichever comes first — defaults `K = 256`, `M = 10`. Concretely:
 

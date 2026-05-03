@@ -1,6 +1,11 @@
+---
+date: 2026-05-02
+status: implemented
+---
+
 # MCP protocol
 
-> Part of the [woo specification](../../SPEC.md). Layer: **protocol**. Profile: **v1-ops**.
+> Part of the [woo specification](../../SPEC.md). Layer: **protocol**.
 
 Model Context Protocol surface that lets an LLM agent inhabit a woo world. The agent connects, gets an actor, and from then on its tool list tracks its current location: in `the_chatroom` it sees `say`/`look`/`take`; if it walks to `the_dubspace` the toolset shifts to `set_control`/`save_scene`. The wire shape is standard MCP (tools, notifications); the woo-specific behavior is which tools materialize for which actor at which moment.
 
@@ -20,7 +25,7 @@ One MCP connection binds to one woo session, which binds to one actor. The sessi
 
 For Streamable HTTP, the first request carries that woo token in `Mcp-Token`. Clients that only expose bearer-token configuration may instead send `Authorization: Bearer <woo-token>`; the bearer envelope is transport syntax, not a separate woo token class. Subsequent requests carry `Mcp-Session-Id`.
 
-- One actor per connection. Multi-actor multiplexing is not in v1-ops.
+- One actor per connection. Multi-actor multiplexing is not part of this MCP contract.
 - The connection's **caller authority** is the actor's identity. Inside the VM, a verb's `progr` ([../semantics/permissions.md](../semantics/permissions.md)) is the verb owner — set at compile time and carried in every frame. The MCP gateway does not invent `progr`; it dispatches calls under the actor's identity, and verb dispatch then derives `progr` from the verb being called per the standard rule. MCP does not elevate authority; an agent connected as `$guest_42` can do exactly what a browser-attached `$guest_42` can do.
 - Disconnect drops the connection. Whether the session survives follows the standard session-grace rule from [identity.md §I6](../semantics/identity.md#i6-disconnect-and-reap-lifecycle).
 
@@ -154,7 +159,7 @@ The dynamic tool set at any moment is computed against the actor's **reachable s
 4. **Inventory.** Non-actor objects in `actor.contents`. After `take lamp`, the lamp's verbs follow the actor between rooms.
 5. **Presence spaces.** Spaces the actor is subscribed to via `actor.presence_in`. This is how `the_dubspace` and `the_taskspace` show up in the tool list when the actor is "in" them — even when the actor is *physically* located in a chatroom that frames them. Presence is the woo notion of "I'm in this space" and it's what governs the tool list more than physical location does.
 6. **Working set.** Objects the actor has explicitly added to its scope via `$actor:focus(target)` (§M3.1). This is how task refs returned from `the_taskspace:list_tasks()` become callable: the agent calls `focus(t-7)` and `t-7`'s verbs (`claim`, `set_status`, `add_subtask`) join the tool list. Bounded; capped per implementation policy (default 32 entries).
-7. **Catalog-visible singletons.** Objects the catalog registry advertises as visible to this actor's class/role (per [discovery/catalogs.md](../discovery/catalogs.md)). v1-ops typically surfaces nothing here for ordinary actors; wizard actors get whatever wizard-discoverable singletons the catalog declares. There is no hardcoded list of "universal corenames" in the protocol — visibility is data-driven from the catalog registry, not from the MCP spec.
+7. **Catalog-visible singletons.** Objects the catalog registry advertises as visible to this actor's class/role (per [discovery/catalogs.md](../discovery/catalogs.md)). Ordinary actors usually see nothing here; wizard actors get whatever wizard-discoverable singletons the catalog declares. There is no hardcoded list of "universal corenames" in the protocol — visibility is data-driven from the catalog registry, not from the MCP spec.
 
 Full tool enumeration is **lazy** and **not the default**. Standard MCP `tools/list` returns stable control tools plus a bounded `active` dynamic projection. `woo_list_reachable_tools` uses the same bounded default unless the agent explicitly asks for `here`, `focus`, `object`, `space`, or `all`. A canonical `woo_call(object, verb, args?)` resolves only the requested reachable object/verb. Ordinary tool calls do not force a full cross-host enumeration after they run.
 
@@ -251,7 +256,7 @@ There is no implicit drain on other tool calls. Every observation the agent sees
 
 The MCP gateway is part of the woo deployment. Same-deployment trust ([../protocol/hosts.md §3.3](hosts.md#33-trust-model-across-hosts)) applies: the gateway has been authenticated to the cluster and forwards calls under the actor's identity.
 
-- **Authentication.** Token-based, identical to wire and REST. v1-ops typically uses `apikey:<...>` for long-lived agents and `bearer:<...>` for short-lived OAuth flows.
+- **Authentication.** Token-based, identical to wire and REST. Agent deployments typically use `apikey:<...>` for long-lived agents and `bearer:<...>` for short-lived OAuth flows.
 - **Authorization.** Per-tool: `assertCanExecuteVerb(actor, target, verb)` runs on every tool invocation. Failure is `E_PERM` per §M6.
 - **`tool_exposed` is an opt-in, not authority.** A verb with `tool_exposed: true` is *advertised* to MCP; the actual call still goes through verb-x perms. A verb with `tool_exposed: false` is hidden from the tool list but reachable via the room's parser if a parser verb (e.g. `:command_plan`) routes there — same as a human typing the command. The flag is a discoverability filter, not a permission.
 
@@ -304,9 +309,9 @@ Disconnect: the MCP transport closes; the woo session may persist per session-gr
 
 ---
 
-## M8. Profile boundary
+## M8. Deployment boundary
 
-This is **v1-ops**: agents are an operational addition on top of v1-core's human-in-browser baseline. The MCP gateway is a separate deployment surface from the worker that serves the SPA — they may co-locate, but the SPA must function without the MCP gateway running. v1-core conformance does not require an MCP implementation.
+MCP is an agent-oriented deployment surface. The MCP gateway is separate from the worker that serves the SPA — they may co-locate, but the SPA must function without the MCP gateway running. Browser/runtime conformance does not require an MCP implementation.
 
 A second-implementation conformance suite for MCP follows the broader conformance plan ([tooling/conformance.md](../tooling/conformance.md)) and is deferred until at least one alternative MCP gateway exists.
 
@@ -314,7 +319,7 @@ A second-implementation conformance suite for MCP follows the broader conformanc
 
 ## Open questions
 
-- **Resources surface.** Skipped in v1-ops because MCP resource support across clients is uneven. The verb-tool surface plus `:describe` (a tool-exposed verb on every object) covers the main browse cases. If clients converge on resources later, add `woo://here`, `woo://me`, `woo://object/{id}` as a layered addition without changing the tool surface.
-- **Multi-actor agents.** A single LLM driving multiple characters (a "puppeteer" pattern) wants several MCP sessions multiplexed over one transport. v1-ops keeps this 1:1; revisit when there's a workload that demands it.
-- **Streaming verbs.** Some verbs (a long compile, a multi-step task creation) emit progress observations. Today these flow through the per-actor queue alongside everything else, drained by `wait`. A future MCP profile could attach them to the originating tool call as a streamed result, matching MCP's `progressNotification` shape; v1-ops keeps it flat.
-- **Coalescing dense streams.** Dubspace gesture progress at 60 Hz floods the observation queue if the agent isn't draining. v1-ops emits raw; v1.x could offer a per-actor coalescing rule (e.g., "keep only latest of `gesture_progress` per `(actor, target, name)` triple").
+- **Resources surface.** Skipped for now because MCP resource support across clients is uneven. The verb-tool surface plus `:describe` (a tool-exposed verb on every object) covers the main browse cases. If clients converge on resources later, add `woo://here`, `woo://me`, `woo://object/{id}` as a layered addition without changing the tool surface.
+- **Multi-actor agents.** A single LLM driving multiple characters (a "puppeteer" pattern) wants several MCP sessions multiplexed over one transport. This contract keeps the model 1:1; revisit when there's a workload that demands it.
+- **Streaming verbs.** Some verbs (a long compile, a multi-step task creation) emit progress observations. Today these flow through the per-actor queue alongside everything else, drained by `wait`. A future MCP revision could attach them to the originating tool call as a streamed result, matching MCP's `progressNotification` shape; this contract keeps it flat.
+- **Coalescing dense streams.** Dubspace gesture progress at 60 Hz floods the observation queue if the agent isn't draining. This contract emits raw observations; a later revision could offer a per-actor coalescing rule (e.g., "keep only latest of `gesture_progress` per `(actor, target, name)` triple").

@@ -1,6 +1,11 @@
+---
+date: 2026-04-30
+status: implemented
+---
+
 # Permissions and security
 
-> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **v1-core**.
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**.
 
 Covers object flags, verb/property perms, the `progr` discipline, the trust boundary between persistent and transient hosts, and per-owner quotas.
 

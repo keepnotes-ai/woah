@@ -3,7 +3,7 @@
 Date: 2026-04-29
 Commit: `14e474c`
 
-This is a snapshot of what is currently built in `src/`. It documents the **first-light** profile cut. As the implementation moves forward (toward v0.5 with full VM + persistence + DSL compiler, and v1-core with Cloudflare deployment), this doc becomes a historical record of the first runnable cut.
+This is a snapshot of what is currently built in `src/`. It documents the first runnable cut. As the implementation moves forward (toward v0.5 with full VM + persistence + DSL compiler, and Cloudflare deployment), this doc becomes a historical record of the first runnable cut.
 
 The forward-looking specification continues to live under `spec/`. This notes doc is *what was built*; the spec is *what we are building toward*.
 
@@ -64,7 +64,7 @@ The demo specs are the contract; this notes doc records that the implementation 
 
 ## What's not built
 
-Per the [v1-core](../spec/profiles.md) / [v1-ops](../spec/profiles.md) profiles, the following are spec'd but not implemented in this cut:
+The following are spec'd but not implemented in this historical cut:
 
 - **Full VM** beyond T0: no `CALL_VERB`, `PASS`, exception handling (`TRY_PUSH`/`TRY_POP`/`RAISE`), `FORK`, `SUSPEND`, `READ`, arithmetic ops, control flow beyond `JUMP`/`JUMP_IF_FALSE`, list/map mutation ops beyond what the demo needs.
 - **Persistence** — the world is in-memory; restart loses state.

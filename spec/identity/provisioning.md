@@ -1,8 +1,13 @@
+---
+date: 2026-04-29
+status: draft
+---
+
 # Actor Provisioning
 
-> Part of the [woo specification](../../SPEC.md). Layer: **identity**. Profile: **v1-ops**. **Status: placeholder.**
+> Part of the [woo specification](../../SPEC.md). Layer: **identity**. **Status: placeholder.**
 
-How actors come into existence and how their capabilities are granted, revoked, and audited. v1-core covers only the trivial cases (guest pool, wizard-created players); a multi-developer or multi-tenant deployment needs more — class-based provisioning, directory sync, group-derived capabilities, deactivation. This document is a placeholder marking the open design space; concrete normative content lands once the v1-ops use cases harden.
+How actors come into existence and how their capabilities are granted, revoked, and audited. The baseline contract covers only the trivial cases (guest pool, wizard-created players); a multi-developer or multi-tenant deployment needs more — class-based provisioning, directory sync, group-derived capabilities, deactivation. This document is a placeholder marking the open design space; concrete normative content lands once operational provisioning use cases harden.
 
 ---
 
@@ -18,17 +23,17 @@ Things this document will eventually specify:
 
 ---
 
-## AP2. What v1-core already covers
+## AP2. What the baseline already covers
 
-- **Guest pool** ([identity.md §I3](../semantics/identity.md#i3-auth-first-light-guest), [bootstrap.md §B7](../semantics/bootstrap.md#b7-guest-player-pool)). Pre-seeded `$guest` instances allocated on auth, reset on reap.
+- **Guest pool** ([identity.md §I3](../semantics/identity.md#i3-auth-guest-baseline), [bootstrap.md §B7](../semantics/bootstrap.md#b7-guest-player-pool)). Pre-seeded `$guest` instances allocated on auth, reset on reap.
 - **Wizard creation.** `wiz:create($player, owner=$wiz)` (or any builtin per [recycle.md](../semantics/recycle.md) and [permissions.md](../semantics/permissions.md)) is sufficient for ad-hoc cases — useful in development, insufficient for managed deployments.
-- **Class-based capability defaults via parent chain + features.** The mechanism exists; v1-ops needs to specify the conventions.
+- **Class-based capability defaults via parent chain + features.** The mechanism exists; operational provisioning needs to specify the conventions.
 
-These cover first-light demos and "single operator, manual provisioning" worlds. Anything multi-developer needs AP3.
+These cover bundled demos and "single operator, manual provisioning" worlds. Anything multi-developer needs AP3.
 
 ---
 
-## AP3. The v1-ops gap
+## AP3. The operational provisioning gap
 
 The concrete shortfall:
 
@@ -37,13 +42,13 @@ The concrete shortfall:
 - No standard "promote a guest to a credentialed user" flow.
 - No standard "deactivate without deleting" — leaves audit trail and ownership intact while denying new sessions.
 
-LambdaMOO had none of this; admins ran `@make-player` and `@toad` by hand. That model doesn't scale past a small operator-manager-user hierarchy. v1-ops is where it has to.
+LambdaMOO had none of this; admins ran `@make-player` and `@toad` by hand. That model doesn't scale past a small operator-manager-user hierarchy. This is the layer where provisioning has to become explicit.
 
 ---
 
 ## AP4. Rough shape (non-normative)
 
-A plausible v1-ops shape, to be refined:
+A plausible operational shape, to be refined:
 
 **Player classes** as `$player` subclasses with explicit capability defaults:
 
@@ -86,9 +91,9 @@ Each source converges on the same `$system:provision_actor` underneath. Source-s
 1. **Class vs. flags vs. features — which carries which capability?** Some capabilities are clearly class-shaped (a `$service_account` is fundamentally different from a `$human`); others are clearly features (an `$editor` capability). The boundary is unclear.
 2. **Class change over time.** Can a `$guest` be promoted to `$human` (preserving objref + history)? `chparent` exists ([objects.md §9.5](../semantics/objects.md#95-no-cross-world-parents)) but isn't currently audit-shaped.
 3. **Deactivation vs. recycle.** Deactivated actors should keep their owned objects and audit history; recycled actors don't. Two distinct lifecycle states.
-4. **Directory sync as v1-ops vs. v2.** A real SCIM endpoint is significant work and not strictly needed for the first multi-developer deployments. Start with a JSON snapshot importer; defer streaming SCIM.
+4. **Directory sync timing.** A real SCIM endpoint is significant work and not strictly needed for the first multi-developer deployments. Start with a JSON snapshot importer; defer streaming SCIM.
 5. **Service accounts and key rotation.** Credentialed long-lived actors need a key-rotation discipline that doesn't break in-flight calls.
-6. **Cross-world identity (federation).** Reserved for v2; mentioned here so the v1-ops design doesn't paint federation into a corner.
+6. **Cross-world identity (federation).** Reserved for v2; mentioned here so the provisioning design doesn't paint federation into a corner.
 
 ---
 

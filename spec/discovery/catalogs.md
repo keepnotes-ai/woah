@@ -1,6 +1,11 @@
+---
+date: 2026-05-03
+status: partial
+---
+
 # Catalogs
 
-> Part of the [woo specification](../../SPEC.md). Layer: **discovery**. Profile: **v1-ops**.
+> Part of the [woo specification](../../SPEC.md). Layer: **discovery**.
 
 The contract for naming, sharing, and installing reusable object sets — the "publish a `$task` library, use it in your world" story. Beyond the wizard-curated `$system` corename map, multi-developer worlds need a way to introduce *named, versioned* sets of base classes and feature objects that other worlds (or the same world's separate clusters) can adopt.
 
@@ -231,7 +236,7 @@ Boot-time auto-install is controlled by `WOO_AUTO_INSTALL_CATALOGS` (a comma-sep
 - `WOO_AUTO_INSTALL_CATALOGS=` (empty) — clean world; operators install what they want.
 - Each entry is a catalog name resolved against `@local:<name>`.
 
-The repository's local Node server intentionally uses the **unset** case for first-light development: clone, run, and see the bundled demos. The repository's Cloudflare `wrangler.toml` intentionally ships with the **empty** case so fork-and-deploy operators start from a clean core world unless they opt into bundled local catalogs before deploy.
+The repository's local Node server intentionally uses the **unset** case for local development: clone, run, and see the bundled demos. The repository's Cloudflare `wrangler.toml` intentionally ships with the **empty** case so fork-and-deploy operators start from a clean core world unless they opt into bundled local catalogs before deploy.
 
 Auto-install is idempotent: if a catalog is already in `$catalog_registry`, the boot-time pass skips it without appending a no-op registry log row. Boot-time local auto-install is part of deterministic world construction, so it installs directly from the bundled manifest and records the catalog in `$catalog_registry` state without routing through `$catalog_registry:call`. Runtime catalog install/update operations are sequenced through `$catalog_registry` and audited. Runtime uninstall uses the same pattern once implemented.
 
@@ -627,7 +632,7 @@ The v1 migration vocabulary is intentionally minimal. Runtime status is listed p
 - `change_parent` — implemented through the normal authored `chparent` path.
 - `rename_class` — deferred; changing corename/object identity safely requires object-reference migration.
 - `transform_property` — deferred; needs typed transform compilation and metering discipline.
-- `custom` — deferred; needs a stable migration-verb execution profile.
+- `custom` — deferred; needs a stable migration-verb execution contract.
 
 Anything more complex requires a custom migration verb, declared as `kind: "custom"` with a `verb` body in DSL source. Custom steps run with the install actor's authority, like any other catalog code.
 

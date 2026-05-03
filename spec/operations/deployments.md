@@ -1,20 +1,29 @@
+---
+date: 2026-04-30
+status: partial
+---
+
 # Deployments
 
-> Part of the [woo specification](../../SPEC.md). Layer: **operations**. Profile: **v1-ops**.
+> Part of the [woo specification](../../SPEC.md). Layer: **operations**.
 
-How a woo world moves through dev / staging / prod environments and how spec, code, and schema versions propagate. The contract for "we have multiple environments and changes flow between them."
+How a woo world moves through dev / staging / prod environments and how spec, code, and schema versions propagate in the Cloudflare production profile. The contract for "we have multiple environments and changes flow between them."
+
+This section does **not** apply to in-memory or local SQLite modes. Those runtimes are single-target deployments that rely on local process or local database resets/reloads and do not require multi-environment promotion.
 
 ---
 
 ## DP1. Environments
 
-A **deployment** is a runtime instance of woo: one Worker namespace plus its attached DOs, one Directory, one bootstrap world graph, one set of bound credentials. Multiple deployments coexist; each has a name and URL.
+A **deployment** in this section is a runtime instance of woo in the Cloudflare profile: one Worker namespace plus its attached DOs, one Directory, one bootstrap world graph, one set of bound credentials.
 
 Conventional environments:
 
 - **dev** — short-lived; per-developer or per-feature; world reset freely.
 - **staging** — long-lived but disposable; mirrors prod's recent state.
 - **prod** — long-lived, live; loss-of-state is a disaster.
+
+In the other runtime modes, a "world" is usually a single process target or local database.
 
 A world *exists* in a deployment. Moving a world between deployments uses backups ([backups.md](backups.md)).
 
@@ -30,7 +39,7 @@ Seed graph is delivered with the runtime code; bumping the spec version updates 
 
 ## DP3. Code deployment vs world content
 
-Verb code (bytecode) lives in the world's persistent state, not in the runtime binary. Deploying new *runtime* code (a fresh Worker bundle) does not change the verbs already in the world — those are durable.
+Verb code (bytecode) lives in the world's persistent state, not in the runtime binary. In the Cloudflare profile, deploying new *runtime* code (a fresh Worker bundle) does not change the verbs already in the world — those are durable.
 
 What changes with a runtime deploy:
 - Builtins, opcodes, scheduler, host primitives — anything implemented in TypeScript, not in woo verbs.
@@ -39,16 +48,16 @@ What changes with a runtime deploy:
 What does *not* change with a runtime deploy:
 - Verbs, properties, schemas, instances. Those move via worktrees and migrations.
 
-This separation matters: a runtime upgrade with no spec changes is a hot-patch; deployments can do it during business hours. A runtime upgrade *with* spec changes is more careful — see DP5.
+This separation matters: a runtime upgrade with no spec changes is a hot-patch; Cloudflare deployments can do it during business hours. A runtime upgrade *with* spec changes is more careful — see DP5.
 
 ---
 
 ## DP4. Promote-flow across environments
 
-A typical change flow:
+A typical Cloudflare production flow:
 
 ```
-1. Developer creates worktree on dev (or local).
+1. Developer creates worktree on dev.
 2. Develops, tests in sandbox.
 3. Promotes to dev: live dev now has the change.
 4. CI exports dev's affected cluster, restores into staging.
@@ -66,7 +75,7 @@ For schema and data migrations, the same flow applies — the migration runs in 
 
 ## DP5. Spec version coordination
 
-Each deployment records its `$system.spec_version`. Runtime deploys may bump it; the runtime applies migrations from its catalog to bring older worlds forward (per [migrations.md §M6](migrations.md#m6-world-level-spec-versioning)).
+Each Cloudflare deployment records its `$system.spec_version`. Runtime deploys may bump it; the runtime applies migrations from its catalog to bring older worlds forward (per [migrations.md §M6](migrations.md#m6-world-level-spec-versioning)).
 
 Coordination across environments:
 
@@ -74,7 +83,7 @@ Coordination across environments:
 - **staging** is typically aligned with prod or at most one minor version ahead.
 - **prod** lags by policy (e.g., one minor version behind staging).
 
-A deployment refuses to boot a world whose spec version is *ahead* of the runtime. Operators must upgrade runtime before they can boot a world that requires a newer spec.
+A Cloudflare deployment refuses to boot a world whose spec version is *ahead* of the runtime. Operators must upgrade runtime before they can boot a world that requires a newer spec.
 
 ---
 
@@ -103,7 +112,7 @@ sync_deployment(source: deployment_id, target: deployment_id, options)
 
 Sync requires elevated permissions (wizard or platform-admin) on both source and target.
 
-`mode: incremental` is harder than it looks: staging's seq numbers and prod's seq numbers diverge; merging requires re-numbering. For first-light v1, snapshot mode is the recommended default.
+`mode: incremental` is harder than it looks: staging's seq numbers and prod's seq numbers diverge; merging requires re-numbering. Snapshot mode is the recommended default.
 
 ---
 
@@ -117,13 +126,13 @@ Different deployments have different URLs:
 
 Clients pick which to connect to. A "preview environment" is a per-feature deployment created on PR open and torn down on merge — the per-feature URL embeds the PR id.
 
-The auth service is typically shared (one IdP for all environments) but bearer tokens encode the audience (`aud` claim) so a token issued for prod is rejected by staging. Per-environment audience claims compose with the OAuth/OIDC integration in [auth.md](../identity/auth.md).
+In Cloudflare profiles, the auth service is typically shared (one IdP for all environments) but bearer tokens encode the audience (`aud` claim) so a token issued for prod is rejected by staging. Per-environment audience claims compose with the OAuth/OIDC integration in [auth.md](../identity/auth.md).
 
 ---
 
 ## DP9. What's deferred
 
 - **Multi-region deployments** (one prod world replicated across regions for latency). Cloudflare DOs are per-region by default; multi-region replication requires extra coordination not specced here.
-- **Canary deployments** (release new code to 1% of traffic first). Possible via custom routing; not first-light.
+- **Canary deployments** (release new code to 1% of traffic first). Possible via custom routing; deferred.
 - **Automated rollback** (revert a deploy if error rate spikes). Requires observability metrics; lives there, not here.
 - **Per-actor environment tagging** (an actor sees prod for some calls, staging for others). Useful for testing in production but operationally complex; out of v1.

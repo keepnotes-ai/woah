@@ -1,6 +1,11 @@
+---
+date: 2026-05-03
+status: partial
+---
+
 # Reference architecture: Cloudflare
 
-> Part of the [woo specification](../../SPEC.md). Layer: **reference**. Profile: **v1-core**. Concrete mapping of woo's abstract host model and persistence onto Cloudflare's primitives. Other implementations are possible; this document is the reference plan.
+> Part of the [woo specification](../../SPEC.md). Layer: **reference**. Concrete mapping of woo's abstract host model and persistence onto Cloudflare's primitives. Other implementations are possible; this document is the reference plan.
 
 ---
 
@@ -18,7 +23,7 @@ DO instances fall into three classes, all of which use the same `PersistentObjec
 
 | Class | Naming | Hosts |
 |---|---|---|
-| **Self-hosted-instance DO** | `env.WOO.idFromName(<obj_id>)` | One DO per instance of a class declaring `instances_self_host` (per [semantics/objects.md §4.2](../semantics/objects.md#42-host-placement)). Rooms, players, anchor spaces (`the_dubspace`, `the_taskspace`), and v1-ops singletons (`$catalog_registry`) each get their own DO. |
+| **Self-hosted-instance DO** | `env.WOO.idFromName(<obj_id>)` | One DO per instance of a class declaring `instances_self_host` (per [semantics/objects.md §4.2](../semantics/objects.md#42-host-placement)). Rooms, players, anchor spaces (`the_dubspace`, `the_taskspace`), and operational singletons (`$catalog_registry`) each get their own DO. |
 | **Gateway DO** | `env.WOO.idFromName("world")` | The default home for objects whose class does not self-host. Universal `$`-classes, ad-hoc objects with no anchor, and runtime-created objects whose creator is the gateway itself live here. The Worker entry uses the gateway DO for global routes (`/api/auth`, `/healthz`, `/ws` upgrade) and as the catch-all when no other host claims an id. |
 | **Service DO** | `env.DIRECTORY.idFromName("directory")` and similar | Singletons for routing and bookkeeping. See [§R2](#r2-singleton-dos). |
 
@@ -401,7 +406,7 @@ The seed graph from [bootstrap.md](../semantics/bootstrap.md) materializes the f
 3. `$system` DO checks its `bootstrapped` flag. If false:
    - Acquires its own storage transaction.
    - Materializes universal classes by RPC-creating each — `$root`, `$actor`, `$player`, `$wiz`, `$guest`, `$sequenced_log`, `$space`, `$thing`. Each landed via `env.WOO.get(idFromName(corename)).create(...)`.
-   - Installs configured local catalogs per `WOO_AUTO_INSTALL_CATALOGS`; first-light demo classes and instances come from those catalog manifests.
+   - Installs configured local catalogs per `WOO_AUTO_INSTALL_CATALOGS`; bundled demo classes and instances come from those catalog manifests.
    - Runs deployment-local catalog repair for already-installed local catalogs.
    - Registers corenames in the `Directory` DO.
    - Sets `bootstrapped = true`.
@@ -546,7 +551,7 @@ Unresolvable identifiers → `404 E_OBJNF`.
 
 The Worker validates `Authorization: Session <id>` against the Sessions surface (a singleton SessionsDO or per-player session table — see R11.4). Successful resolution yields `{actor, expires_at}`. The actor + correlation_id flow into the DO RPC envelope.
 
-Token classes (`guest:`, `session:` v1-core; `bearer:`/`apikey:` v1-ops) are validated here. Rejected tokens return `400 E_INVARG` or `401 E_NOSESSION` without ever touching DOs.
+Token classes (`guest:`, `session:`, `bearer:`, `apikey:`) are validated here. Rejected tokens return `400 E_INVARG` or `401 E_NOSESSION` without ever touching DOs.
 
 ### R11.4 Sessions placement
 
@@ -752,7 +757,7 @@ Required for first deploy:
 Deferred to v1.1+:
 - Callback-shaped cross-DO async (`awaitable_call` or equivalent) that relaxes §R6.2.
 - QuotaAccountant DO (table scaffolded; alarm skipped at first; raise `E_QUOTA` only on hard caps from inline writes).
-- Snapshot policy automation (snapshots are still optional in v1-core).
+- Snapshot policy automation for spaces that choose manual snapshot triggers.
 - Distributed tracing.
 - Multi-region tuning.
 - Dashboard UI for `:metrics()` rollup.

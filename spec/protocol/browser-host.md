@@ -1,6 +1,11 @@
+---
+date: 2026-04-30
+status: implemented
+---
+
 # Browser host bootstrap
 
-> Part of the [woo specification](../../SPEC.md). Layer: **protocol**. Profile: **v1-core**.
+> Part of the [woo specification](../../SPEC.md). Layer: **protocol**.
 
 Wire-level interaction between a player host and a browser tab hosting transient objects.
 

@@ -1,6 +1,11 @@
+---
+date: 2026-04-30
+status: implemented
+---
+
 # REST API
 
-> Part of the [woo specification](../../SPEC.md). Layer: **protocol**. Profile: **v1-core**.
+> Part of the [woo specification](../../SPEC.md). Layer: **protocol**.
 
 An HTTP+SSE alternative to the WebSocket wire ([wire.md](wire.md)), exposing the same call/applied/observe semantics in a request-response shape that agents and integrations can consume natively.
 
@@ -45,16 +50,16 @@ body:    { token: string }
 returns: { actor: ObjRef, session: string }
 ```
 
-**v1-core token vocabulary** matches [identity.md §I3](../semantics/identity.md#i3-auth-first-light-guest):
+**Baseline token vocabulary** matches [identity.md §I3](../semantics/identity.md#i3-auth-guest-baseline):
 
 - `guest:<random>` — server-allocated guest actor.
 - `session:<id>` — resume an existing live session.
 
-Subsequent requests carry the session id as `Authorization: Session <id>`. The session id is opaque server-side state — no signing, no claims, no expiry beyond the session timeout — so v1-core REST has no JWT machinery requirement.
+Subsequent requests carry the session id as `Authorization: Session <id>`. The session id is opaque server-side state — no signing, no claims, no expiry beyond the session timeout — so baseline REST has no JWT machinery requirement.
 
-**v1-ops** extends the vocabulary per [auth.md §A3](../identity/auth.md#a3-token-vocabulary-extended): `bearer:<jwt>`, `apikey:<id>:<secret>`, `oauth_code:<provider>:<code>`, `recovery:<token>`. Bearer tokens use `Authorization: Bearer <jwt>` with signature/claims validation. The endpoint shape is unchanged; only the accepted vocabulary expands.
+Credentialed auth extends the vocabulary per [auth.md §A3](../identity/auth.md#a3-token-vocabulary-extended): `bearer:<jwt>`, `apikey:<id>:<secret>`, `oauth_code:<provider>:<code>`, `recovery:<token>`. Bearer tokens use `Authorization: Bearer <jwt>` with signature/claims validation. The endpoint shape is unchanged; only the accepted vocabulary expands.
 
-A v1-core implementation that doesn't ship credentialed auth returns `400 E_INVARG` for `bearer:`/`apikey:`/`oauth_code:` tokens. A v1-ops implementation accepts both vocabularies.
+An implementation that doesn't ship credentialed auth returns `400 E_INVARG` for `bearer:`/`apikey:`/`oauth_code:` tokens. An implementation that ships credentialed auth accepts both vocabularies.
 
 ---
 
@@ -167,7 +172,7 @@ The SSE event id is `<space-id>:<seq>` for applied frames; live `event` SSE entr
 
 For multi-space streams (`/objects/$me/stream` and any `/objects/{actor}/stream`), `Last-Event-ID` is ignored on reconnect — a single id cannot encode cursors across N spaces. A reconnecting multi-space client must fetch `/log` per space it cares about (using locally tracked per-space `last_seq` values) before resuming the live stream. This trades resume convenience for correctness; per-space gap recovery is the right granularity anyway.
 
-A future variant may define a cursor-map header (e.g., `X-Woo-Cursors: <base64-encoded {space: seq} map>`) for multi-space resume; not part of v1-core.
+A future variant may define a cursor-map header (e.g., `X-Woo-Cursors: <base64-encoded {space: seq} map>`) for multi-space resume; not part of the baseline REST contract.
 
 ---
 
@@ -181,15 +186,15 @@ A future variant may define a cursor-map header (e.g., `X-Woo-Cursors: <base64-e
 
 `$me` is reserved alongside the static corename namespace. See [objects.md §5.3.1](../semantics/objects.md#531-dynamic-corenames).
 
-`$peer` is reserved for the calling peer in cross-world contexts ([federation-early.md](../deferred/federation-early.md)). Not active in v1-core.
+`$peer` is reserved for the calling peer in cross-world contexts ([federation-early.md](../deferred/federation-early.md)). It is inactive in single-operator deployments.
 
 ---
 
-## R10. Profile placement
+## R10. REST placement
 
-REST is **v1-core** because a wire-format alternative is foundational, not an operational add-on. It runs alongside WebSocket, exposes the same model, uses the same auth, and counts toward the same conformance suite.
+REST is a foundational runtime protocol, not an operational add-on. It runs alongside WebSocket, exposes the same model, uses the same auth, and counts toward the same conformance suite.
 
-A v1-core implementation must support REST. WebSocket is recommended but optional in resource-constrained deployments. The conformance suite ([conformance.md §CF3](../tooling/conformance.md#cf3-required-categories)) tests both.
+An implementation must support REST. WebSocket is recommended but optional in resource-constrained deployments. The conformance suite ([conformance.md §CF3](../tooling/conformance.md#cf3-required-categories)) tests both.
 
 ---
 
@@ -197,7 +202,7 @@ A v1-core implementation must support REST. WebSocket is recommended but optiona
 
 - **Authoring operations** (`compile_verb`, `set_verb_code`, `define_property`). The minimal IDE ([authoring/minimal-ide.md](../authoring/minimal-ide.md)) goes through dedicated authoring endpoints with their own auth requirements; not the runtime REST verb-call shape.
 - **Worktree operations.** Same — authoring-side, separate endpoints.
-- **Cross-world calls.** Federation early profile ([federation-early.md](../deferred/federation-early.md)) defines its own HTTPS POST surface (`/.woo/api/call` with mTLS) distinct from this REST API.
+- **Cross-world calls.** The early federation design ([federation-early.md](../deferred/federation-early.md)) defines its own HTTPS POST surface (`/.woo/api/call` with mTLS) distinct from this REST API.
 
 These are intentional. REST here is the runtime API for actors and agents; authoring and federation have different security boundaries and warrant their own surfaces.
 

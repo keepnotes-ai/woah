@@ -1,6 +1,11 @@
+---
+date: 2026-05-02
+status: implemented
+---
+
 # Objects, identity, verb dispatch, properties
 
-> Part of the [woo specification](../../SPEC.md). Layer: **semantics**. Profile: **v1-core**.
+> Part of the [woo specification](../../SPEC.md). Layer: **semantics**.
 
 Covers the object model (§4), identity and addressing (§5), verb dispatch and inheritance (§9), and property definition/value/inheritance semantics (§10).
 
@@ -88,13 +93,13 @@ The runtime stamps the resolved decision onto the new instance as a runtime prop
 
 `host_placement` is the on-disk projection. `instances_self_host` is the class-level declaration.
 
-The classes that declare `instances_self_host = true` in v1-core and the bundled first-light catalogs:
+The classes that declare `instances_self_host = true` in the baseline object graph and bundled catalogs:
 
 - `$room` (and subclasses) — every room has its own log, subscribers, and fixtures, scaling independently of other rooms.
 - `$player` (and subclasses including `$wiz`, `$guest`) — every player owns a host for sessions, attached connections, and inventory.
-- Anchor spaces declared by demo catalogs: `$dubspace`, `$taskspace`. The `$catalog_registry` and similar v1-ops singletons.
+- Anchor spaces declared by demo catalogs: `$dubspace`, `$taskspace`. The `$catalog_registry` and similar operational singletons.
 
-Authority to instantiate self-hosting classes is narrower than ordinary `create()`. Because each instance reserves a real host resource, the `assertCanCreateObject` check requires wizard authority (or an explicit programmer capability grant under v1-ops); ordinary programmer-creates-own-fertile-parent authority is not sufficient. See [permissions.md §11.4](permissions.md#114-progr-and-actor) and [reference/cloudflare.md §R1.1](../reference/cloudflare.md#r11-routing).
+Authority to instantiate self-hosting classes is narrower than ordinary `create()`. Because each instance reserves a real host resource, the `assertCanCreateObject` check requires wizard authority (or an explicit programmer capability grant); ordinary programmer-creates-own-fertile-parent authority is not sufficient. See [permissions.md §11.4](permissions.md#114-progr-and-actor) and [reference/cloudflare.md §R1.1](../reference/cloudflare.md#r11-routing).
 
 #### Routing precedence
 
@@ -150,7 +155,7 @@ Most corenames are *static*: `$wiz`, `$root`, `$dubspace` are defined at boot an
 A small reserved set of corenames are *dynamic*: their resolution depends on the calling context.
 
 - **`$me`** — the actor making the current call. Resolves to the bearer's actor in REST requests ([rest.md §R9](../protocol/rest.md#r9-me-resolution)), to the frame's `actor` field in verb bodies, and is unset (raises `E_VARNF`) outside any call context. Equivalent to writing `actor` in a verb body; the dynamic corename gives the same identity a name in REST and tooling contexts.
-- **`$peer`** — reserved for the calling peer in cross-world contexts ([federation-early.md](../deferred/federation-early.md)). Not active in v1-core.
+- **`$peer`** — reserved for the calling peer in cross-world contexts ([federation-early.md](../deferred/federation-early.md)). Inactive in single-operator deployments.
 
 Dynamic corenames may not be assigned via `set_corename`; the runtime owns their resolution. A wizard with the `impersonate` capability may override `$me` for a single call (REST: `X-Woo-Impersonate-Actor: <ref>` header; verb code: `wiz:as_actor(...)`); the impersonation is logged as a wizard action.
 

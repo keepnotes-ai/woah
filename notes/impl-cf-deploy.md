@@ -154,7 +154,7 @@ Phase 2.4 (host-scoped cluster loader) — landed:
 - Host slices contain hosted objects, parent/classes/features needed for local verb resolution, bytecode literal object references, subscriber actor objects for hosted spaces, and hosted logs/snapshots/tasks. They do not include unrelated bundled demo objects, `$catalog_registry` install history, or gateway sessions.
 - Cluster `/api/auth` and `/ws` now fail loud; the gateway remains the only public auth and WebSocket host. Forwarded internal calls create a minimal local actor/session if the actor was not already in the host slice.
 - Runtime-created object ids now include their anchor-derived scope (`obj_<scope>_<n>`) so independent hosts do not mint the same `obj_1` name.
-- Verification for this phase was superseded by later runs; current local verification is tracked in the latest work notes and `TECH_DEBT_AUDIT.md`.
+- Verification for this phase was superseded by later runs.
 
 Phase 2.5 (single async runtime path + cross-host dispatch bridge) — landed locally:
 
@@ -205,7 +205,7 @@ In dependency order:
 ## Open questions
 
 1. **Sessions placement.** Current slice uses Directory's `session_id -> actor` table. Lean from §R11.4 still points toward embedded player ids for long-term removal of a session lookup hop; decide before player-DO routing.
-2. **`world.ts` decomposition.** The Worker can route top-level calls now, but `WooWorld` still assumes local class/verb availability and local dispatch within a host. Light refactor (cluster-aware dispatch + remote definition cache) vs. full decomposition along TECH_DEBT_AUDIT F001 lines remains open.
+2. **`world.ts` decomposition.** The Worker can route top-level calls now, but `WooWorld` still assumes local class/verb availability and local dispatch within a host.
 3. **Storage transaction boundaries** at CF: repository-local savepoint behavior is now covered by a DurableObjectState-shaped adapter, but still needs a Miniflare/DO probe against real `state.storage.sql` semantics.
 
 ## Reference

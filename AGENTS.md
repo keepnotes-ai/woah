@@ -44,16 +44,15 @@ DSL or VM cannot yet express them efficiently. Each `native()` call
 carries a doc-string of the equivalent Woo verb signature; the direction
 of travel is woocode-ward, not native-ward.
 
-## Pointers
+## Development Process
 
-- `ARCHITECTURE.md` — layer rules and the longer rationale.
-- `notes/principles.md` — implementation principles (`$space` stays
-  boring; semantic layers separated; LambdaCore is reference, not
-  compatibility).
-- `npm run guard:object-names` enforces a subset of the naming rule.
+Use Git worktrees for isolation.
+
+**DO NOT commit or deploy** without explicit instruction.
 
 ## Commands
 
+- `npm run guard:object-names` enforces a subset of the naming rule.
 - `npm test` — vitest (runs `catalog:index` + `guard:object-names` first).
 - `npm run typecheck` — both tsconfigs.
 - `npm run dev` — local dev server at `http://localhost:5173`.

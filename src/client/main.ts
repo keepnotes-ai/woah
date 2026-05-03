@@ -21,6 +21,7 @@ type AppState = {
   selectedTask?: string;
   taskExpanded: Record<string, boolean>;
   taskStatusFilter: Record<string, boolean>;
+  pinboardNewColor: string;
   pinboardView: PinboardView;
   pinboardViewports: Record<string, PinboardViewportPresence>;
   compileResult?: any;
@@ -92,6 +93,7 @@ const state: AppState = {
   selectedObject: "",
   taskExpanded: {},
   taskStatusFilter: { open: true, claimed: true, in_progress: true, blocked: true, done: false },
+  pinboardNewColor: "",
   pinboardView: { x: 0, y: 0, scale: 1 },
   pinboardViewports: {}
 };
@@ -99,6 +101,7 @@ const state: AppState = {
 let audio: DubAudio | undefined;
 const sessionKey = "woo.session";
 const chatHistoryKey = "woo.chat.history";
+const pinboardNewColorKey = "woo.pinboard.newColor";
 const chatHistoryLimit = 80;
 const drumVoices = [
   { id: "kick", label: "Kick" },
@@ -452,11 +455,13 @@ function projectPinboard(world: any, meta: any) {
   const props = board?.props ?? {};
   const legacyNotes = Array.isArray(props.notes) && props.notes.length > 0 ? props.notes : undefined;
   const notes = legacyNotes ?? pinboardNotesFromContents(world, meta.board, props.layout);
+  const palette = Array.isArray(props.palette) ? props.palette.map(String) : ["yellow", "blue", "green", "pink", "white"];
+  state.pinboardNewColor = normalizePinboardStickyColor(state.pinboardNewColor, palette);
   return {
     board,
     notes: normalizePinboardNotes(notes, state.world?.pinboard?.notes),
     present: Array.isArray(props.subscribers) ? props.subscribers.map(String) : [],
-    palette: Array.isArray(props.palette) ? props.palette.map(String) : ["yellow", "blue", "green", "pink", "white"],
+    palette,
     viewport: props.viewport && typeof props.viewport === "object" && !Array.isArray(props.viewport) ? props.viewport : { w: 960, h: 560 }
   };
 }
@@ -2043,10 +2048,11 @@ function pinboardGridStyle(view = normalizedPinboardView()) {
 }
 
 function renderPinboardCreate(palette: string[]) {
+  const selected = normalizePinboardStickyColor(state.pinboardNewColor, palette);
   return `
     <form class="panel pinboard-create" data-pinboard-create>
       <textarea data-pinboard-new-text placeholder="New note"></textarea>
-      <select data-pinboard-new-color>${pinboardPalette(palette).map((color) => `<option value="${escapeHtml(color)}">${escapeHtml(color)}</option>`).join("")}</select>
+      <select data-pinboard-new-color>${pinboardPalette(palette).map((color) => `<option value="${escapeHtml(color)}" ${color === selected ? "selected" : ""}>${escapeHtml(color)}</option>`).join("")}</select>
       <button>Add Note</button>
     </form>
   `;
@@ -2108,6 +2114,20 @@ function pinNoteColor(note: any, palette: any): string {
   return colors[0] ?? "white";
 }
 
+function normalizePinboardStickyColor(value: unknown, palette: any): string {
+  const colors = pinboardPalette(palette);
+  if (typeof value === "string" && colors.includes(value)) return value;
+  const stored = readStorage(pinboardNewColorKey);
+  if (stored && colors.includes(stored)) return stored;
+  return colors[0] ?? "white";
+}
+
+function rememberPinboardNewColor(value: unknown, palette: any = state.world?.pinboard?.palette) {
+  const color = normalizePinboardStickyColor(value, palette);
+  state.pinboardNewColor = color;
+  writeStorage(pinboardNewColorKey, color);
+}
+
 function pinNoteMeta(note: any): string {
   const author = typeof note?.author === "string" ? actorLabel(note.author) : "unknown";
   const created = pinNoteTimestamp(note?.created_at);
@@ -2141,8 +2161,13 @@ function bindPinboard() {
     const text = textInput?.value.trim() ?? "";
     if (!text) return;
     const placement = newPinNotePlacement();
-    pinboardCall("add_note", [text, colorInput?.value ?? "yellow", placement.x, placement.y, placement.w, placement.h]);
+    const color = normalizePinboardStickyColor(colorInput?.value, state.world?.pinboard?.palette);
+    rememberPinboardNewColor(color);
+    pinboardCall("add_note", [text, color, placement.x, placement.y, placement.w, placement.h]);
     if (textInput) textInput.value = "";
+  });
+  document.querySelector<HTMLSelectElement>("[data-pinboard-new-color]")?.addEventListener("change", (event) => {
+    rememberPinboardNewColor((event.currentTarget as HTMLSelectElement).value);
   });
   document.querySelectorAll<HTMLTextAreaElement>("[data-pin-note-text]").forEach((input) => {
     input.addEventListener("blur", () => {
@@ -2156,6 +2181,7 @@ function bindPinboard() {
   document.querySelectorAll<HTMLSelectElement>("[data-pin-note-color]").forEach((select) => {
     select.addEventListener("change", () => {
       const id = select.dataset.pinNoteColor ?? "";
+      rememberPinboardNewColor(select.value);
       if (id) pinboardTargetCall(id, "set_color", [select.value]);
     });
   });

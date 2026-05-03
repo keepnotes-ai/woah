@@ -10,8 +10,11 @@ head_sampling_rate = 1.0
 [vars]
 # Cloudflare deploys start as a clean core world by default. To auto-install
 # bundled local catalogs at bootstrap, set a comma-separated list here before
-# first deploy, for example: "chat,dubspace,pinboard,taskspace".
-WOO_AUTO_INSTALL_CATALOGS = "chat,dubspace,help,note,pinboard,prog,taskspace"
+# first deploy. Foundational catalogs (help, chat, note, prog) ship classes
+# only; demoworld + dubspace + pinboard + taskspace ship the bundled demo
+# instances. For foundational-only: "help,chat,note,prog". For the full demo:
+# "chat,demoworld,dubspace,help,note,pinboard,prog,taskspace".
+WOO_AUTO_INSTALL_CATALOGS = "chat,demoworld,dubspace,help,note,pinboard,prog,taskspace"
 
 # Static assets: the bundled SPA is built to dist/ via `npm run build`.
 # The Worker entry routes global API/WS traffic to the gateway DO and object
@@ -55,3 +58,30 @@ renamed_classes = [
   { from = "PersistentObjectV3DO", to = "PersistentObjectDO" },
   { from = "DirectoryV3DO", to = "DirectoryDO" }
 ]
+
+# Optional staging slot. Uncomment, rename to taste, and deploy with:
+#   wrangler deploy --env staging
+# The staging worker gets its own DO storage namespace; cost is per-request
+# + DO storage proportional to staging data (idle stagings are near-zero).
+# See DEPLOY.md "Pre-deploy testing" for usage.
+#
+# [env.staging]
+# name = "woo-staging"
+#
+# [[env.staging.durable_objects.bindings]]
+# name = "WOO"
+# class_name = "PersistentObjectDO"
+#
+# [[env.staging.durable_objects.bindings]]
+# name = "DIRECTORY"
+# class_name = "DirectoryDO"
+#
+# [env.staging.assets]
+# directory = "./dist"
+# binding = "ASSETS"
+# not_found_handling = "single-page-application"
+#
+# [env.staging.vars]
+# # Foundational only: "help,chat,note,prog"
+# # Full demo: "chat,demoworld,dubspace,help,note,pinboard,prog,taskspace"
+# WOO_AUTO_INSTALL_CATALOGS = "chat,demoworld,dubspace,help,note,pinboard,prog,taskspace"

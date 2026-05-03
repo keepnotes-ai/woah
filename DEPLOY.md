@@ -278,6 +278,64 @@ DO tags after it.
 
 ---
 
+## Pre-deploy testing
+
+Four progressively more thorough ways to validate a deploy before it lands on prod, in order of cost.
+
+### 1. `wrangler deploy --dry-run` — free, ~10 seconds
+
+Builds the Worker bundle, validates `wrangler.toml`, and checks DO migration tags against what's currently deployed. Catches config errors and migration-history drift; does not exercise runtime behavior.
+
+```sh
+npm run build && npx wrangler deploy --dry-run
+```
+
+Run this before any real deploy. It's the cheapest way to catch a misconfigured binding or a forgotten `npm run cf:migrations`.
+
+### 2. `wrangler dev --remote` — per-request pricing only
+
+Runs local code on Cloudflare's edge, hitting real DO storage in a sandbox namespace separate from production. Good for "does the worker boot, do API calls work, does first-auth land?" smoke testing without touching prod data.
+
+```sh
+npx wrangler dev --remote
+```
+
+Costs are billed at normal Workers/DO per-request rates, so a 5-minute session is fractions of a cent. The sandbox namespace is isolated; prod data is unaffected.
+
+### 3. Staging worker — low cost, real upgrade path
+
+A second Worker with its own name and its own DO storage namespace, deployed from the same code. Confirms that boot-time migrations, catalog installs, and the Worker entrypoint all behave on a real CF deploy without risking prod.
+
+`wrangler.toml` ships with a commented-out `[env.staging]` block. Uncomment and edit (rename, optionally adjust `WOO_AUTO_INSTALL_CATALOGS`), then:
+
+```sh
+# One-time: provision secrets for the staging worker
+npx wrangler secret put WOO_INITIAL_WIZARD_TOKEN --env staging
+npx wrangler secret put WOO_INTERNAL_SECRET --env staging
+
+# Deploy
+npm run build && npx wrangler deploy --env staging
+```
+
+Cost: per-request + DO storage proportional to staging data. An idle staging is near-zero; a small test world is cents per month.
+
+### 4. Backup-then-restore drill — highest confidence
+
+Restore a recent prod backup into the staging worker, redeploy staging with the new code, and watch the upgrade-adopt path execute against real prod-shaped data. This is the only way to catch upgrade bugs that depend on production state shape.
+
+```sh
+# Export prod (see backups documentation in spec/operations/backups.md)
+# Restore the archive into the staging worker
+# Then deploy staging with the new code
+npm run build && npx wrangler deploy --env staging
+```
+
+Cost: staging slot + transfer. Use this before deploys that touch catalog schemas, seed graphs, or migration-bearing changes.
+
+**Recommended cadence**: option 1 every deploy, option 2 for any code change to the Worker entrypoint or DO classes, option 3 for catalog-schema or boot-flow changes, option 4 before a deploy you'd be reluctant to roll back.
+
+---
+
 ## Failure modes & troubleshooting
 
 | Symptom | Cause | Fix |

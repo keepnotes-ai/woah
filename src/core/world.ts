@@ -4744,6 +4744,14 @@ export class WooWorld {
       if (!flags || typeof flags !== "object" || Array.isArray(flags)) throw wooError("E_TYPE", "set_object_flags requires a flags map", { value: flags as WooValue });
       return this.setObjectFlags(ctx.actor, target, flags as Record<string, unknown>) as unknown as WooValue;
     });
+    this.nativeHandlers.set("mint_session_for", (ctx, args) => {
+      if (!this.isWizard(ctx.actor)) throw wooError("E_PERM", "wizard authority required to mint sessions", ctx.actor);
+      const target = assertObj(args[0]);
+      this.object(target);
+      const session = this.createSessionForActor(target, "bearer");
+      this.recordWizardAction(ctx.actor, "mint_session_for", { actor: target, session: session.id });
+      return { id: session.id, actor: session.actor, expires_at: session.expiresAt, token_class: session.tokenClass } as unknown as WooValue;
+    });
     this.nativeHandlers.set("feature_can_be_attached_by", (ctx, args) => {
       const actor = assertObj(args[0] ?? ctx.actor);
       return actor === this.object(ctx.thisObj).owner;

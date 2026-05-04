@@ -291,6 +291,9 @@
         },
         {
           "name": "out",
+          "aliases": [
+            "back"
+          ],
           "perms": "rxd",
           "direct_callable": true,
           "tool_exposed": true,

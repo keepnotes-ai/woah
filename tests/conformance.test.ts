@@ -647,6 +647,52 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
     }
   });
 
+  it("lazily scrubs stale remote subscribers from room reads and direct audiences", async () => {
+    const homeHarness = make();
+    const roomHarness = make();
+    try {
+      const home = homeHarness.world;
+      const roomHost = roomHarness.world;
+      const stale = home.auth("guest:conf-stale-subscriber").actor;
+      const watcher = home.auth("guest:conf-live-subscriber").actor;
+      const worlds = new Map<string, WooWorld>([
+        ["home", home],
+        ["room", roomHost]
+      ]);
+      const routes = new Map<ObjRef, string>([
+        [stale, "home"],
+        [watcher, "home"],
+        ["conf_scrub_room", "room"]
+      ]);
+      home.setHostBridge(new LocalHostBridge("home", worlds, routes));
+      roomHost.setHostBridge(new LocalHostBridge("room", worlds, routes));
+
+      roomHost.createObject({ id: "conf_scrub_room", name: "Scrub Room", parent: "$chatroom", owner: "$wiz" });
+      roomHost.setProp("conf_scrub_room", "subscribers", [stale, watcher]);
+      roomHost.setProp("conf_scrub_room", "features", ["$conversational"]);
+      home.setActorPresence(watcher, "conf_scrub_room", true);
+      // Isolation setup: this test is only about presence/subscriber mirror
+      // repair, so location is direct-mutated instead of going through :enter.
+      home.object(watcher).location = "conf_scrub_room";
+
+      const denied = await roomHost.directCall("stale-who", stale, "conf_scrub_room", "who", []);
+      expect(denied.op).toBe("error");
+      if (denied.op === "error") expect(denied.error.code).toBe("E_PERM");
+      expect(roomHost.getProp("conf_scrub_room", "subscribers")).toEqual([watcher]);
+
+      const who = await roomHost.directCall("live-who", watcher, "conf_scrub_room", "who", []);
+      expect(who.op).toBe("result");
+      if (who.op === "result") {
+        expect(who.result).toEqual([watcher]);
+        const observed = who.observations.find((obs) => obs.type === "who");
+        expect(observed).toMatchObject({ present_actors: [watcher] });
+      }
+    } finally {
+      roomHarness.cleanup();
+      homeHarness.cleanup();
+    }
+  });
+
   it("resolves commands against a remote current room and cross-host room contents", async () => {
     const homeHarness = make();
     const roomHarness = make();

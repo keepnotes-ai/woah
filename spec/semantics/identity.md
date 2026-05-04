@@ -132,7 +132,7 @@ Operators may override per world via `$server_options.session_*`.
 While at least one live connection is attached, the session is not reaped for ordinary timeout. When no live connections are attached and either `session.last_detach_at + grace < now` or `now > session.expires_at`, the runtime reaps:
 
 1. Kill any `READ` tasks for this actor (`E_INTRPT`).
-2. Remove the actor from every space's `subscribers` list and from `actor.presence_in`. Pair the two; they're a mirror.
+2. Remove the actor from every space's `subscribers` list and from `actor.presence_in`. Pair the two; they're a mirror. In hosted deployments, the actor and space can live on different hosts; if a remote subscriber cleanup fails, later authoritative reads of the space audience may confirm that `actor.presence_in` no longer contains the space and lazily remove the stale `space.subscribers` entry.
 3. Call `actor:on_disfunc()` if defined. This is where guest reset happens (§I6.4). Errors are caught and logged; reap continues.
 4. Delete the session record.
 

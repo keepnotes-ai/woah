@@ -35,6 +35,7 @@ const GUEST_SESSION_GRACE_MS = 60_000;
 const GUEST_SESSION_TTL_MS = 5 * 60_000;
 const CREDENTIAL_SESSION_GRACE_MS = 5 * 60_000;
 const CREDENTIAL_SESSION_TTL_MS = 24 * 60 * 60_000;
+const SUBSCRIBER_SCRUB_FLOOR_MS = 5_000;
 
 type ResolvedVerb = {
   definer: ObjRef;
@@ -271,6 +272,7 @@ export class WooWorld {
   private subscribersIndex = new Map<ObjRef, Set<ObjRef>>();
   private actorPresenceIndex = new Map<ObjRef, Set<ObjRef>>();
   private presenceIndexBuilt = false;
+  private lastSubscriberScrubAt = new Map<ObjRef, number>();
 
   constructor(private repository?: WooRepository, options: { hostBridge?: HostBridge | null } = {}) {
     this.objectRepository = isObjectRepository(repository) ? repository : null;
@@ -1143,6 +1145,8 @@ export class WooWorld {
       if (forceDirect && !wizard) throw wooError("E_PERM", "only wizards may force direct calls", { actor, target, verb: verbName });
       if (forceDirect) this.recordWizardAction(actor, "force_direct", { target, verb: verbName, reason: options.forceReason ?? null });
       const audience = this.directAudience(target);
+      const hostMemo = createHostOperationMemo();
+      if (audience) await this.scrubStaleSubscribersForSpace(audience, actor, this.chatPresent(audience), hostMemo);
       if (audience && verb.skip_presence_check !== true && !forceDirect) this.authorizePresence(actor, audience);
       const observations: Observation[] = [];
       if (forceDirect) observations.push({ type: "wizard_action", action: "force_direct", actor, target, verb: verbName, source: target });
@@ -1164,7 +1168,7 @@ export class WooWorld {
         definer: target,
         message,
         observations,
-        hostMemo: createHostOperationMemo(),
+        hostMemo,
         observe: (event) => {
           observations.push({ ...event, source: event.source ?? target });
         },
@@ -1229,6 +1233,7 @@ export class WooWorld {
     const frame = await this.withPersistencePaused(async () => {
       this.validateMessage(message);
       const space = this.object(spaceRef);
+      await this.scrubStaleSubscribersForSpace(spaceRef, message.actor, this.chatPresent(spaceRef));
       this.authorizePresence(message.actor, spaceRef);
       const nextSeq = Number(this.getProp(spaceRef, "next_seq"));
       const seq = nextSeq;
@@ -1308,6 +1313,7 @@ export class WooWorld {
       const frame = await this.withPersistencePaused(async () => {
         this.validateMessage(message);
         const space = this.object(spaceRef);
+        await this.scrubStaleSubscribersForSpace(spaceRef, message.actor, this.chatPresent(spaceRef));
         this.authorizePresence(message.actor, spaceRef);
         const seq = Number(this.getProp(spaceRef, "next_seq"));
         const ts = Date.now();
@@ -5058,7 +5064,30 @@ export class WooWorld {
 
   private async chatPresentAsync(room: ObjRef, progr: ObjRef): Promise<ObjRef[]> {
     const present = await this.propOrNullForActorAsync(progr, room, "subscribers");
-    return Array.isArray(present) ? present.filter((item): item is ObjRef => typeof item === "string") : [];
+    const subscribers = Array.isArray(present) ? present.filter((item): item is ObjRef => typeof item === "string") : [];
+    return await this.scrubStaleSubscribersForSpace(room, progr, subscribers);
+  }
+
+  private async scrubStaleSubscribersForSpace(space: ObjRef, progr: ObjRef, subscribers: ObjRef[], memo?: HostOperationMemo): Promise<ObjRef[]> {
+    if (!this.objects.has(space) || subscribers.length === 0) return subscribers;
+    const now = Date.now();
+    const last = this.lastSubscriberScrubAt.get(space) ?? 0;
+    if (now - last < SUBSCRIBER_SCRUB_FLOOR_MS) return subscribers;
+    this.lastSubscriberScrubAt.set(space, now);
+    const kept: ObjRef[] = [];
+    const stale: ObjRef[] = [];
+    await Promise.all(subscribers.map(async (actor) => {
+      const presence = await this.propOrNullForActorAsync(progr, actor, "presence_in", memo);
+      if (!Array.isArray(presence)) {
+        kept.push(actor);
+        return;
+      }
+      if (presence.includes(space)) kept.push(actor);
+      else stale.push(actor);
+    }));
+    for (const actor of stale) this.updateSpaceSubscriberLocal(space, actor, false);
+    const keptSet = new Set(kept);
+    return subscribers.filter((actor) => keptSet.has(actor));
   }
 
   private async defaultLookSelf(ctx: CallContext): Promise<WooValue> {

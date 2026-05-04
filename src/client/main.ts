@@ -167,6 +167,16 @@ let pinboardViewAnimationTimer: number | undefined;
 let lastPinboardViewportPublishAt = 0;
 let lastPinboardViewportSent: PinNoteBox & { scale: number } | undefined;
 const pinNoteClientZ = new Map<string, number>();
+// Optimistic position/size cache for pins the user just moved or resized.
+// Renders prefer these values over the server's note record until a
+// pin_moved / pin_resized observation arrives confirming the new value.
+// Without this, a stray render between pointerup and the server's applied
+// frame snaps the note back to its old position briefly before re-moving.
+// Each entry has a wall-clock fallback expiry so a dropped frame doesn't
+// pin the cache forever.
+type PinboardOptimisticPatch = { x?: number; y?: number; w?: number; h?: number; expiresAt: number };
+const pendingPinPatches = new Map<string, PinboardOptimisticPatch>();
+const PINBOARD_OPTIMISTIC_TTL_MS = 5_000;
 let pinboardTextHydrationRequestedBoard = "";
 let pinboardTextHydrationRequestedSignature = "";
 let pinboardTextHydrationRequested = false;
@@ -216,6 +226,13 @@ function connect() {
         render();
       }
       requestReplay(socket);
+      // Auto-enter the default chat room once per session: a freshly auth'd
+      // guest otherwise lands on the chat tab "in the room" only because the
+      // SPA was reading a possibly-stale subscribers projection. With the
+      // canonical actorPresentInSpace check now sourced from `presence_in`,
+      // a new guest reads as outside; ensureSpacePresence is idempotent so
+      // an already-present actor (session resume) makes this a no-op.
+      ensureSpacePresence(chatRoom(), () => render(), () => render());
     }
     if (frame.op === "applied") {
       if (typeof frame.id === "string") pendingFrameErrors.delete(frame.id);
@@ -223,6 +240,16 @@ function connect() {
       const pinboardAnimations = capturePinboardAnimations(observations);
       const needsPinboardNotesRefresh = observations.some((observation: any) => isPinboardObservation(observation) && pinboardObservationNeedsNotesRefresh(String(observation?.type ?? "")));
       if (needsPinboardNotesRefresh) pinboardNotesRefreshPending = false;
+      // The server has confirmed any pin moves/resizes that show up here;
+      // clear the optimistic patch so subsequent renders pick up server
+      // values directly.
+      for (const observation of observations) {
+        const type = String(observation?.type ?? "");
+        if (type === "pin_moved" || type === "pin_resized" || type === "note_moved" || type === "note_resized") {
+          const pinId = String(observation?.pin ?? observation?.id ?? "");
+          if (pinId) clearPendingPinPatch(pinId);
+        }
+      }
       forgetLiveControls(observations);
       rememberTaskObservations(observations, typeof frame.id === "string" ? frame.id : undefined);
       for (const observation of observations) if (isChatObservation(observation)) receiveChatEvent(observation, false);
@@ -834,11 +861,18 @@ function callWithError(space: string, target: string, verb: string, args: any[] 
   return id;
 }
 
+function actorPresenceList(actor: string): string[] {
+  const raw = state.world?.objects?.[actor]?.props?.presence_in;
+  return Array.isArray(raw) ? raw.filter((id): id is string => typeof id === "string") : [];
+}
+
 function actorPresentInSpace(space: string) {
   const actor = state.actor;
   if (!actor) return false;
-  const raw = state.world?.objects?.[space]?.props?.subscribers;
-  return Array.isArray(raw) && raw.includes(actor);
+  // Reads from `actor.presence_in` rather than `space.subscribers` —
+  // the actor's own list is local-write and never goes stale via a
+  // failed cross-host cleanup the way the room's mirror can.
+  return actorPresenceList(actor).includes(space);
 }
 
 function ensureSpacePresence(space: string, onReady: () => void, onError?: (error: any) => void) {
@@ -2002,7 +2036,14 @@ function setCurrentChatRoom(room: string) {
 function renderChat() {
   const room = state.world?.chat?.room;
   const present = state.chatPresent;
-  const inRoom = Boolean(state.actor && present.includes(state.actor));
+  // Canonical "am I in this room?" reads the actor's own presence_in, not
+  // the room's projected subscribers. The latter can be momentarily stale
+  // when a recycled guest id has a leftover entry from a prior session
+  // whose cross-host cleanup failed; the lazy scrub on next verb call
+  // would drop the actor and we'd be showing the in-room UI for a user
+  // the substrate doesn't actually consider present.
+  const myPresence = state.actor ? actorPresenceList(state.actor) : [];
+  const inRoom = Boolean(state.actor && room?.id && myPresence.includes(room.id));
   const lines = chatLinesForSpace(chatRoom());
   if (!inRoom) {
     const canEnter = canSendDirect();
@@ -2430,12 +2471,13 @@ function estimatedPinboardViewport(width: number, height: number): PinNoteBox & 
 }
 
 function pinNoteRecordBox(note: any): PinNoteBox {
-  return {
+  const id = String(note?.id ?? "");
+  return applyPendingPinPatch(id, {
     x: pinNoteNumber(note?.x, 40),
     y: pinNoteNumber(note?.y, 40),
     w: pinNoteNumber(note?.w, 180),
     h: pinNoteNumber(note?.h, 110)
-  };
+  });
 }
 
 function pinboardStageStyle(width: number, height: number, view = normalizedPinboardView()) {
@@ -2458,12 +2500,50 @@ function renderPinboardCreate(palette: string[]) {
   `;
 }
 
+function setPendingPinPatch(id: string, patch: { x?: number; y?: number; w?: number; h?: number }) {
+  if (!id) return;
+  const existing = pendingPinPatches.get(id);
+  pendingPinPatches.set(id, {
+    x: patch.x ?? existing?.x,
+    y: patch.y ?? existing?.y,
+    w: patch.w ?? existing?.w,
+    h: patch.h ?? existing?.h,
+    expiresAt: Date.now() + PINBOARD_OPTIMISTIC_TTL_MS
+  });
+}
+
+function clearPendingPinPatch(id: string) {
+  if (id) pendingPinPatches.delete(id);
+}
+
+function applyPendingPinPatch<T extends { x: number; y: number; w: number; h: number }>(id: string, base: T): T {
+  const pending = pendingPinPatches.get(id);
+  if (!pending) return base;
+  if (pending.expiresAt < Date.now()) {
+    pendingPinPatches.delete(id);
+    return base;
+  }
+  return {
+    ...base,
+    x: pending.x ?? base.x,
+    y: pending.y ?? base.y,
+    w: pending.w ?? base.w,
+    h: pending.h ?? base.h
+  };
+}
+
 function renderPinNote(note: any, editable: boolean, palette: string[]) {
   const id = String(note?.id ?? "");
-  const x = pinNoteNumber(note?.x, 40);
-  const y = pinNoteNumber(note?.y, 40);
-  const w = pinNoteNumber(note?.w, 180);
-  const h = pinNoteNumber(note?.h, 110);
+  const merged = applyPendingPinPatch(id, {
+    x: pinNoteNumber(note?.x, 40),
+    y: pinNoteNumber(note?.y, 40),
+    w: pinNoteNumber(note?.w, 180),
+    h: pinNoteNumber(note?.h, 110)
+  });
+  const x = merged.x;
+  const y = merged.y;
+  const w = merged.w;
+  const h = merged.h;
   const serverZ = pinNoteNumber(note?.z, 1);
   const clientZ = pinNoteClientZ.get(id) ?? 0;
   const z = Math.max(serverZ, clientZ);
@@ -3040,7 +3120,11 @@ function bindPinNoteDrag(handle: HTMLButtonElement) {
   handle.addEventListener("pointerup", () => {
     if (!active) return;
     active = false;
-    pinboardCall("move_pin", [note.dataset.pinNote ?? "", pinNoteNumber(note.dataset.x, 0), pinNoteNumber(note.dataset.y, 0)]);
+    const id = note.dataset.pinNote ?? "";
+    const x = pinNoteNumber(note.dataset.x, 0);
+    const y = pinNoteNumber(note.dataset.y, 0);
+    setPendingPinPatch(id, { x, y });
+    pinboardCall("move_pin", [id, x, y]);
   });
   handle.addEventListener("pointercancel", () => {
     active = false;
@@ -3077,7 +3161,11 @@ function bindPinNoteResize(handle: HTMLButtonElement) {
   handle.addEventListener("pointerup", () => {
     if (!active) return;
     active = false;
-    pinboardCall("resize_pin", [note.dataset.pinNote ?? "", pinNoteNumber(note.dataset.w, 180), pinNoteNumber(note.dataset.h, 110)]);
+    const id = note.dataset.pinNote ?? "";
+    const w = pinNoteNumber(note.dataset.w, 180);
+    const h = pinNoteNumber(note.dataset.h, 110);
+    setPendingPinPatch(id, { w, h });
+    pinboardCall("resize_pin", [id, w, h]);
   });
   handle.addEventListener("pointercancel", () => {
     active = false;

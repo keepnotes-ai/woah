@@ -3756,16 +3756,25 @@ export class WooWorld {
     for (const taskId of deletedTasks) this.deletedTasks.delete(taskId);
     if (dirtyCounters) this.dirtyCounters = false;
     this.persistenceDirty = this.hasDirtyPersistence();
+    const persistedProps = dirtyProperties.filter(({ objRef }) => !deletedObjectSet.has(objRef) && !dirtyObjectSet.has(objRef));
+    // top_properties answers "what kinds of writes were these"; top_objects
+    // answers "where did this flush spend its writes" — both ranked by
+    // per-property write count so they're directly comparable. dirtyObjects
+    // (the row-level writes for object metadata) and the delete sets are
+    // excluded from these breakdowns: they're flat, single-row events that
+    // would just produce ties of 1. They're still represented in `objects`.
     this.recordMetric({
       kind: "storage_flush",
       objects: dirtyObjects.length + deletedObjects.length,
-      properties: dirtyProperties.filter(({ objRef }) => !deletedObjectSet.has(objRef) && !dirtyObjectSet.has(objRef)).length,
+      properties: persistedProps.length,
       sessions: dirtySessions.length,
       deleted_sessions: deletedSessions.length,
       tasks: dirtyTasks.length,
       deleted_tasks: deletedTasks.length,
       counters: dirtyCounters,
-      ms: Date.now() - startedAt
+      ms: Date.now() - startedAt,
+      top_properties: topByName(persistedProps.map(({ name }) => name), STORAGE_FLUSH_TOP_N),
+      top_objects: topByName(persistedProps.map(({ objRef }) => objRef), STORAGE_FLUSH_TOP_N)
     });
   }
 
@@ -5824,6 +5833,19 @@ function isPlainValueMap(value: WooValue | undefined): value is Record<string, W
 
 function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
   return value !== null && typeof value === "object" && typeof (value as Promise<T>).then === "function";
+}
+
+const STORAGE_FLUSH_TOP_N = 5;
+
+// Group identical strings, return the K most-frequent as [name, count] pairs.
+// Used by storage_flush to surface which property names / object IDs dominate
+// a flush. Returns undefined for empty input so the metric stays compact.
+function topByName<T extends string>(items: T[], k: number): Array<[T, number]> | undefined {
+  if (items.length === 0) return undefined;
+  const counts = new Map<T, number>();
+  for (const name of items) counts.set(name, (counts.get(name) ?? 0) + 1);
+  const sorted = Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
+  return sorted.slice(0, k);
 }
 
 function hashCanonical(value: WooValue): string {

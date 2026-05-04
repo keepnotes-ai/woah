@@ -20,6 +20,31 @@ media renderers -- is built on that substrate.
 
 ---
 
+## C0. Substrate and catalog boundary
+
+Woo-core owns the substrate: object identity, inheritance, property and verb
+storage, VM execution, authority checks, persistence, host routing, containment
+mutation, presence indexes, logs, and transport-neutral observation delivery.
+It also owns small universal fallbacks needed before any catalog has run, such
+as `$root:title()` and the generic `$root:look_self()` shape.
+
+Catalogs own application behavior: English strings, command policy, projection
+shapes for particular classes, matching enrichments, room geography, actor
+inventory presentation, and observations whose semantics are specific to a
+world surface. If a behavior can be expressed as woocode by composing substrate
+primitives such as `moveto`, `location`, `contents`, `dispatch`, `tell`,
+`observe`, `observe_to_space`, `set_presence`, and property reads, it belongs in
+a catalog or authored seed verb rather than in a native handler.
+
+Native handlers remain appropriate when the behavior is a primitive that
+woocode cannot express safely or efficiently: cross-host persistence/routing,
+auth/session lifecycle, log replay, catalog installation, host-visible
+introspection, or hot matching primitives. A native matching primitive may
+iterate candidates and enforce visibility, but per-class name policy and
+human-facing failure text should live in catalog code where possible.
+
+---
+
 ## C1. Objects
 
 An object is a persistent identity with state and behavior.

@@ -5037,8 +5037,6 @@ export class WooWorld {
     this.nativeHandlers.set("room_look_self", (ctx) => this.spaceLookSelf(ctx));
     this.nativeHandlers.set("space_look_self", (ctx) => this.spaceLookSelf(ctx));
     this.nativeHandlers.set("room_who", (ctx) => this.roomWho(ctx));
-    this.nativeHandlers.set("room_take", (ctx, args) => this.roomTake(ctx, assertString(args[0] ?? "")));
-    this.nativeHandlers.set("room_drop", (ctx, args) => this.roomDrop(ctx, assertString(args[0] ?? "")));
     this.nativeHandlers.set("help_db_find_topics", (ctx, args) => this.helpDbFindTopics(ctx, args));
     this.nativeHandlers.set("help_db_get_topic", (ctx, args) => this.helpDbGetTopic(ctx, args));
     this.nativeHandlers.set("help_db_dump_topic", (ctx, args) => this.helpDbDumpTopic(ctx, args));
@@ -5058,42 +5056,11 @@ export class WooWorld {
   private async defaultLookSelf(ctx: CallContext): Promise<WooValue> {
     const title = await this.titleForLook(ctx, ctx.caller, ctx.thisObj);
     const description = this.propOrNullForActor(ctx.actor, ctx.thisObj, "description");
-    if (this.objects.has(ctx.thisObj) && this.inheritsFrom(ctx.thisObj, "$actor")) {
-      const carried = await this.carriedLookEntries(ctx);
-      return {
-        id: ctx.thisObj,
-        title,
-        description: this.actorDescriptionWithCarrying(ctx, title, typeof description === "string" ? description : "", carried),
-        carrying: carried
-      } as unknown as WooValue;
-    }
     return {
       id: ctx.thisObj,
       title,
       description
     } as unknown as WooValue;
-  }
-
-  private async carriedLookEntries(ctx: CallContext): Promise<Record<string, WooValue>[]> {
-    const items = await this.objectContents(ctx.thisObj, ctx.hostMemo);
-    return await Promise.all(items.map(async (item) => ({
-      id: item,
-      title: await this.titleForLook(ctx, ctx.thisObj, item),
-      description: await this.propOrNullForActorAsync(ctx.actor, item, "description", ctx.hostMemo)
-    })));
-  }
-
-  private actorDescriptionWithCarrying(ctx: CallContext, title: string, description: string, carried: Record<string, WooValue>[]): string {
-    if (carried.length === 0) return description;
-    const names = carried.map((item) => typeof item.title === "string" && item.title ? item.title : String(item.id ?? "")).filter(Boolean);
-    const inventory = this.inventorySentence(ctx.thisObj === ctx.actor ? "You are" : `${title} is`, names);
-    return [description, inventory].filter(Boolean).join(" ");
-  }
-
-  private inventorySentence(prefix: string, names: string[]): string {
-    if (names.length === 0) return `${prefix} carrying nothing.`;
-    if (names.length === 1) return `${prefix} carrying ${names[0]}.`;
-    return `${prefix} carrying ${names.slice(0, -1).join(", ")}, and ${names.at(-1)}.`;
   }
 
   private async spaceLookSelf(ctx: CallContext): Promise<WooValue> {
@@ -5267,64 +5234,6 @@ export class WooWorld {
     }
     if (this.objects.has(objRef)) return this.object(objRef).name || objRef;
     return objRef;
-  }
-
-  private async roomTake(ctx: CallContext, rawName: string): Promise<WooValue> {
-    const room = ctx.thisObj;
-    const name = rawName.trim();
-    if (!name) throw wooError("E_INVARG", "take requires an object name");
-    const match = await this.matchObjectInCandidatesAsync(ctx, name, await this.objectContents(room, ctx.hostMemo));
-    if (match.status === "ambiguous") throw wooError("E_AMBIGUOUS", `I don't know which "${name}" you mean.`, name);
-    if (match.status !== "ok") throw wooError("E_INVARG", `I don't see "${name}" here.`, name);
-    const item = match.value;
-    if (item === ctx.actor || (this.objects.has(item) && this.inheritsFrom(item, "$actor"))) throw wooError("E_PERM", "actors are not carryable", item);
-    if (!await this.isPortableFor(ctx, item)) throw wooError("E_PERM", `${await this.titleForLook(ctx, room, item)} is not carryable`, item);
-    await this.moveObjectChecked(item, ctx.actor);
-    // Load-bearing for item-local moves; redundant for remote-item moves.
-    // See suppress-and-self-mirror convention in hosts.md §3.4.
-    if (this.objects.has(room)) this.mirrorContents(room, item, false);
-    const title = await this.titleForLook(ctx, room, item);
-    const actorName = await this.objectDisplayNameAsync(ctx.progr, ctx.actor, ctx.hostMemo);
-    this.tellPlayer(ctx, ctx.actor, [`You take ${title}.`]);
-    ctx.observe({ type: "taken", actor: ctx.actor, item, text: `${actorName} takes ${title}.`, ts: Date.now() });
-    return { item, title };
-  }
-
-  private async roomDrop(ctx: CallContext, rawName: string): Promise<WooValue> {
-    const room = ctx.thisObj;
-    const name = rawName.trim();
-    if (!name) throw wooError("E_INVARG", "drop requires an object name");
-    const match = await this.matchObjectInCandidatesAsync(ctx, name, await this.objectContents(ctx.actor, ctx.hostMemo));
-    if (match.status !== "ok") throw wooError("E_INVARG", `You are not carrying "${name}".`, name);
-    const item = match.value;
-    await this.moveObjectChecked(item, room);
-    // Load-bearing for item-local moves; redundant for remote-item moves.
-    // See suppress-and-self-mirror convention in hosts.md §3.4.
-    if (this.objects.has(room)) this.mirrorContents(room, item, true);
-    const title = await this.titleForLook(ctx, room, item);
-    const actorName = await this.objectDisplayNameAsync(ctx.progr, ctx.actor, ctx.hostMemo);
-    this.tellPlayer(ctx, ctx.actor, [`You drop ${title}.`]);
-    ctx.observe({ type: "dropped", actor: ctx.actor, item, room, text: `${actorName} drops ${title}.`, ts: Date.now() });
-    return { item, title, room };
-  }
-
-  private isPortable(objRef: ObjRef): boolean {
-    try {
-      return this.getProp(objRef, "portable") === true;
-    } catch (err) {
-      if (normalizeError(err).code !== "E_PROPNF") throw err;
-      return false;
-    }
-  }
-
-  private async isPortableFor(ctx: CallContext, objRef: ObjRef): Promise<boolean> {
-    if (!await this.remoteHostForObject(objRef, ctx.hostMemo)) return this.isPortable(objRef);
-    try {
-      return await this.getPropChecked(ctx.progr, objRef, "portable", ctx.hostMemo) === true;
-    } catch (err) {
-      if (normalizeError(err).code !== "E_PROPNF") throw err;
-      return false;
-    }
   }
 
   private tryResolveVerb(target: ObjRef, verb: string): ResolvedVerb | null {

@@ -89,7 +89,7 @@ has no ordinary parent chain; `$nowhere` inherits descriptive slots from
 |---|---|---|
 | `:describe()` rxd | map | Introspection (see [introspection.md](introspection.md)). |
 | `:title()` rxd | str | Short identifying phrase for `:look`-style composition; default returns `this.name`. Subclasses override to add flair (e.g. `$cockatoo:title()` decorates with *"a sulphur-crested cockatoo perched on the mantelpiece"*). MOO/LambdaCore convention. |
-| `:look_self()` rxd | map | Generic object view. Default returns the object's `:title()` and actor-readable `description`. MOO/LambdaCore convention adapted to structured return values. |
+| `:look_self()` rxd | map | Generic object view. Default returns the object's `:title()` and actor-readable `description`. MOO/LambdaCore convention adapted to structured return values. Actor and catalog classes may override for richer presentation. |
 | `:set_value(value)` | any | T0 fixture-style helper for simple property update verbs. |
 | `:set_prop(name, value)` | str, any | T0 fixture-style helper for simple named property update verbs. |
 
@@ -109,6 +109,7 @@ has no ordinary parent chain; `$nowhere` inherits descriptive slots from
 | `:add_feature(f)` | obj | Append to `features`; idempotent. See [features.md §FT5](features.md#ft5-adding-and-removing-features). |
 | `:remove_feature(f)` | obj | Remove from `features`. |
 | `:has_feature(f)` rxd | obj | Predicate. |
+| `:look_self()` rxd | — | Actor-authored view. Returns the generic title/description plus `carrying`, and appends the current inventory sentence to `description`. This is woocode seeded on `$actor`, not a substrate special case. |
 | `:wait(timeout_ms?, limit?)` rxd | int?, int? | MCP observation drain for the actor's session queue. Tool-exposed. |
 | `:focus(target)` rxd | obj | Add an object/space to `focus_list`. Tool-exposed. |
 | `:unfocus(target)` rxd | obj | Remove an object/space from `focus_list`. Tool-exposed. |
@@ -411,7 +412,7 @@ All direct-callable (rxd). Observations are live-only by route per [chat DESIGN.
 | `:match_exit(name)` | str | Resolve a name through `this.exits`, returning an `$exit` or `$failed_match`. |
 | direction verbs / `:go(exit)` | str | Find an exit object and call `exit:invoke()`. |
 | `:acceptable(obj)` / `:enterfunc(obj)` / `:exitfunc(obj)` | obj | Default moveto hooks. |
-| `:take(name)` / `:drop(name)` | str | Match visible/carryable objects and move them between room contents and actor inventory. |
+| `:take(name)` / `:drop(name)` | str | Catalog woocode. Match visible/carryable objects and move them between room contents and actor inventory with `moveto`; emits `taken` / `dropped`. The substrate supplies matching and movement primitives, not the English or room command policy. |
 
 `$exit:invoke()` calls `$exit:move(actor)`. `$exit:move(who)` sends private
 leave/arrival text to `who`, calls `moveto(who, dest)`, updates room presence,

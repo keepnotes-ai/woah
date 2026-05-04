@@ -25,9 +25,9 @@ moving object.
 | `moveto(obj, target)` | Caller controls `obj` (owner/wizard) *or* the verb running it has appropriate perms | Full chain (see M2) | Ordinary actor-level container moves |
 
 `move()` keeps its current implementation. `moveto()` is the verb-friendly
-path. Chat room exits use it now; `room_take`/`room_drop` still use trusted
-native mechanics until matching and portable checks are expressible in ordinary
-woocode.
+path. Chat room exits and room `:take`/`:drop` use it from catalog woocode;
+the substrate supplies the move primitive while room command policy remains
+catalog-authored.
 
 ## M2. The hook chain
 
@@ -206,10 +206,9 @@ Optional. Skip if it adds noise.
 
 After landing:
 
-- room exits in chat now use `moveto()` in source woocode. `room_take` /
-  `room_drop` still use trusted native mechanics because they combine command
-  matching, portable checks, and inventory moves; once those checks are
-  expressible in ordinary woocode, they can become plain `moveto()` callers.
+- room exits, `:take`, and `:drop` in chat use `moveto()` in source woocode.
+  Matching remains a runtime primitive, but portable checks, English messages,
+  inventory moves, and observations are catalog behavior.
 - `pinboard v0.2` (`catalogs/pinboard/manifest.draft.json`) becomes
   installable: `:post(pin) → move(pin, this)` becomes `moveto(pin, this)`,
   triggering `:acceptable`/`:enterfunc` automatically.

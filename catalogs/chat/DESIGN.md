@@ -84,9 +84,10 @@ Most `$conversational` verbs are portable source, including the command planner.
 Room entry/exit (`:enter`, `:leave`) is source woocode on `$conversational`.
 Geographic movement belongs to `$room` and `$exit` below. The core only
 supplies generic primitives: `set_presence`, `moveto`, `observe_to_space`,
-`tell`, and `location`. Carrying objects with `:take` and `:drop` still uses
-native hints for the object matcher and portable checks; that remains catalog
-behavior behind ordinary dispatch, not a room primitive in the host protocol.
+`tell`, and `location`. Carrying objects with `:take` and `:drop` is source
+woocode on `$room`: the matcher remains a trusted primitive, but portable
+checks, user-facing text, `moveto`, and `taken` / `dropped` observations are
+catalog-authored behavior.
 
 Inside each verb body: `this` = the consumer space (the room being talked in), `definer` = the `$conversational` feature, `progr` = the feature's owner. Observations are emitted to `this.subscribers`, not to the feature's own subscribers (which would be empty).
 

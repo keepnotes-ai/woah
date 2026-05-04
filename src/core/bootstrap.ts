@@ -1,3 +1,4 @@
+import { compileVerb } from "./authoring";
 import { setPropBytecode, setValueBytecode } from "./fixtures";
 import { installLocalCatalogs } from "./local-catalogs";
 import type { ObjectRepository, SerializedObject, SerializedWorld, WorldRepository } from "./repository";
@@ -9,6 +10,37 @@ import { WooWorld } from "./world";
 type BootstrapOptions = {
   catalogs?: readonly string[] | false;
 };
+
+const ACTOR_LOOK_SELF_SOURCE = `verb :look_self() rxd {
+  let title = this:title();
+  let description = this.description;
+  if (description == null) { description = ""; }
+  let carried = [];
+  let names = [];
+  for item in contents(this) {
+    let item_title = null;
+    try { item_title = item:title(); } except err { item_title = item.name; }
+    if (!item_title) { item_title = to_string(item); }
+    carried = carried + [{ id: item, title: item_title, description: item.description }];
+    names = names + [item_title];
+  }
+  if (length(names) > 0) {
+    let prefix = title + " is";
+    if (this == actor) { prefix = "You are"; }
+    let joined = "";
+    let i = 1;
+    for name in names {
+      if (i == 1) { joined = name; }
+      else if (i == length(names)) { joined = joined + ", and " + name; }
+      else { joined = joined + ", " + name; }
+      i = i + 1;
+    }
+    let inventory = prefix + " carrying " + joined + ".";
+    if (description) { description = description + " " + inventory; }
+    else { description = inventory; }
+  }
+  return { id: this, title: title, description: description, carrying: carried };
+}`;
 
 export function createWorld(options: { repository?: WorldRepository & Partial<ObjectRepository>; catalogs?: readonly string[] | false } = {}): WooWorld {
   const world = new WooWorld(options.repository);
@@ -251,6 +283,7 @@ function seedUniversal(world: WooWorld): void {
   native(world, "$root", "describe", "describe", "verb :describe() rxd { ... }", { directCallable: true });
   native(world, "$root", "title", "default_title", "verb :title() rxd { return this.name; }", { directCallable: true });
   native(world, "$root", "look_self", "default_look_self", "verb :look_self() rxd { return { title: this:title(), description: this.description }; }", { directCallable: true });
+  sourceVerb(world, "$actor", "look_self", ACTOR_LOOK_SELF_SOURCE, { directCallable: true });
   native(world, "$player", "on_disfunc", "player_on_disfunc", "verb :on_disfunc() r { ... }", { perms: "r" });
   native(world, "$player", "moveto", "player_moveto", "verb :moveto(target) r { ... }", { perms: "r" });
   native(world, "$player", "tell", "player_tell", "verb :tell(text) rxd { ... }", { directCallable: true });
@@ -399,6 +432,43 @@ function bytecode(world: WooWorld, obj: ObjRef, name: string, bytecodeValue: Tin
     direct_callable: parsedPerms.directCallable,
     skip_presence_check: options.skipPresenceCheck === true
   });
+}
+
+function sourceVerb(world: WooWorld, obj: ObjRef, name: string, source: string, options: { directCallable?: boolean; skipPresenceCheck?: boolean; toolExposed?: boolean; perms?: string; argSpec?: Record<string, WooValue>; aliases?: string[] } = {}): void {
+  const compiled = compileVerb(source);
+  if (!compiled.ok || !compiled.bytecode) {
+    throw new Error(`bootstrap source verb failed to compile: ${obj}:${name}`);
+  }
+  const existing = world.ownVerbExact(obj, name);
+  const parsedPerms = normalizeVerbPerms(options.perms ?? compiled.metadata?.perms ?? existing?.perms ?? "rx", options.directCallable === true);
+  const next = {
+    kind: "bytecode" as const,
+    name,
+    aliases: options.aliases ?? existing?.aliases ?? [],
+    owner: "$wiz" as ObjRef,
+    perms: parsedPerms.perms,
+    arg_spec: options.argSpec ?? compiled.metadata?.arg_spec ?? existing?.arg_spec ?? {},
+    source,
+    source_hash: compiled.source_hash ?? hashSource(source),
+    version: (existing?.version ?? 0) + 1,
+    bytecode: { ...compiled.bytecode, version: (existing?.version ?? 0) + 1 },
+    line_map: compiled.line_map ?? {},
+    direct_callable: parsedPerms.directCallable,
+    skip_presence_check: existing?.skip_presence_check || options.skipPresenceCheck === true,
+    tool_exposed: existing?.tool_exposed || options.toolExposed === true
+  };
+  if (
+    existing &&
+    existing.kind === next.kind &&
+    existing.source_hash === next.source_hash &&
+    existing.perms === next.perms &&
+    existing.direct_callable === next.direct_callable &&
+    existing.skip_presence_check === next.skip_presence_check &&
+    existing.tool_exposed === next.tool_exposed &&
+    JSON.stringify(existing.aliases ?? []) === JSON.stringify(next.aliases ?? []) &&
+    JSON.stringify(existing.arg_spec ?? {}) === JSON.stringify(next.arg_spec ?? {})
+  ) return;
+  world.addVerb(obj, next);
 }
 
 function native(world: WooWorld, obj: ObjRef, name: string, handler: string, source: string, options: { directCallable?: boolean; skipPresenceCheck?: boolean; toolExposed?: boolean; perms?: string; argSpec?: Record<string, WooValue>; aliases?: string[] } = {}): void {

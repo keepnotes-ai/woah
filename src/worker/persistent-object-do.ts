@@ -1128,10 +1128,11 @@ export class PersistentObjectDO {
     if (world.objects.has(actor)) return;
     const parent = world.objects.has("$player") ? "$player" : world.objects.has("$actor") ? "$actor" : null;
     world.createObject({ id: actor, name: actor, parent, owner: actor });
-    if (world.objects.has(actor)) {
-      world.setProp(actor, "presence_in", []);
-      world.setProp(actor, "session_id", null);
-    }
+    // `presence_in` and `session_id` already have the right defaults via
+    // their parent-class definitions ($actor, $player). Writing them
+    // explicitly here just persists a per-actor row to the value already
+    // returned by the inherited default — pure overhead at first-touch
+    // for every (actor × host) pair.
   }
 
   // ---- auth helpers (port from dev-server.ts) ----

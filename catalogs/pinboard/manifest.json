@@ -24,6 +24,16 @@
       ],
       "verbs": [
         {
+          "name": "look_self",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "arg_spec": {
+            "args": []
+          },
+          "source": "verb :look_self() rxd { let summary = \"A sticky note.\"; let lines = this:text(); if (length(lines) > 0 && lines[1]) { summary = summary + \" It says: \" + lines[1]; } return { id: this, title: this:title(), description: summary, lines: length(lines), location: location(this) }; }"
+        },
+        {
           "name": "set_color",
           "perms": "rx",
           "tool_exposed": true,
@@ -136,7 +146,7 @@
           "arg_spec": {
             "args": []
           },
-          "source": "verb :leave() rxd { set_presence(this, false); let dest = actor.home; if (this.mount_room != null) { dest = this.mount_room; } if (dest != null) { move(actor, dest); set_presence(dest, true); } let text = actor.name + \" steps back from \" + this.name + \".\"; observe({ type: \"pinboard_left\", actor: actor, board: this, destination: dest, text: text, ts: now() }); if (this.mount_room != null) { observe_to_space(this.mount_room, { type: \"pinboard_activity\", source: this.mount_room, board: this, actor: actor, text: text, ts: now() }); } return this.subscribers; }"
+          "source": "verb :leave() rxd { let dest = actor.home; if (this.mount_room != null) { dest = this.mount_room; } if (dest == null) { dest = $nowhere; } set_presence(this, false); move(actor, dest); if (dest != $nowhere) { set_presence(dest, true); } let text = actor.name + \" steps back from \" + this.name + \".\"; observe({ type: \"pinboard_left\", actor: actor, board: this, destination: dest, text: text, ts: now() }); if (this.mount_room != null) { observe_to_space(this.mount_room, { type: \"pinboard_activity\", source: this.mount_room, board: this, actor: actor, text: text, ts: now() }); } return this.subscribers; }"
         },
         {
           "name": "out",
@@ -231,7 +241,8 @@
           "arg_spec": {
             "args": [
               "object"
-            ]
+            ],
+            "resolve": "object"
           },
           "source": "verb :drop(object) rx { let pin = object; if (typeof(object) == \"string\") { pin = $match:match_object(object, actor); } if (pin == $failed_match) { raise { code: \"E_INVARG\", message: \"You are not carrying \" + object + \".\", value: object }; } if (pin == $ambiguous_match) { raise { code: \"E_AMBIGUOUS\", message: \"I don't know which \" + object + \" you mean.\", value: object }; } if (!isa(pin, $note)) { raise { code: \"E_INVARG\", message: \"only notes can be dropped on the pinboard\", value: pin }; } if (location(pin) != actor) { raise { code: \"E_INVARG\", message: \"You are not carrying \" + object + \".\", value: pin }; } moveto(pin, this); return pin; }"
         },
@@ -246,7 +257,8 @@
           "arg_spec": {
             "args": [
               "pin"
-            ]
+            ],
+            "resolve": "object"
           },
           "source": "verb :take(pin) rx { if (location(pin) != this) { raise { code: \"E_INVARG\", message: \"that note is not on this board\", value: pin }; } if (pin.owner != actor && !has_flag(actor, \"wizard\")) { raise { code: \"E_PERM\", message: \"only the pin's author may take it; board owners use eject\", value: pin }; } moveto(pin, actor); return pin; }"
         },
@@ -301,7 +313,7 @@
               "h?"
             ]
           },
-          "source": "verb :add_note(text, color, x, y, w, h) rx { if (typeof(text) != \"string\" || !text) { raise { code: \"E_INVARG\", message: \"add_note requires text\" }; } let pin = create($pin, { owner: actor, name: \"sticky note\", description: \"A sticky note pinned to \" + this.name + \".\" }); moveto(pin, this); pin:set_text([text]); if (typeof(color) == \"string\" && color != \"white\" && color in this.palette) { pin:set_color(color); } let key = to_string(pin); let layout = this.layout; let entry = layout[key]; if (typeof(x) == \"number\") { entry[\"x\"] = floor(x); } if (typeof(y) == \"number\") { entry[\"y\"] = floor(y); } if (typeof(w) == \"number\") { entry[\"w\"] = max(100, min(360, floor(w))); } if (typeof(h) == \"number\") { entry[\"h\"] = max(72, min(260, floor(h))); } layout[key] = entry; this.layout = layout; let note_record = { id: pin, name: pin.name, text: text, color: pin.color, owner: pin.owner, x: entry[\"x\"], y: entry[\"y\"], w: entry[\"w\"], h: entry[\"h\"], z: entry[\"z\"] }; observe({ type: \"note_added\", actor: actor, board: this, pin: pin, note: note_record, ts: now() }); return note_record; }"
+          "source": "verb :add_note(text, color, x, y, w, h) rx { if (typeof(text) != \"string\" || !text) { raise { code: \"E_INVARG\", message: \"add_note requires text\" }; } let pin = create($pin, { owner: actor, name: \"sticky note\", description: \"A sticky note. It says: \" + text }); moveto(pin, this); pin:set_text([text]); if (typeof(color) == \"string\" && color != \"white\" && color in this.palette) { pin:set_color(color); } let key = to_string(pin); let layout = this.layout; let entry = layout[key]; if (typeof(x) == \"number\") { entry[\"x\"] = floor(x); } if (typeof(y) == \"number\") { entry[\"y\"] = floor(y); } if (typeof(w) == \"number\") { entry[\"w\"] = max(100, min(360, floor(w))); } if (typeof(h) == \"number\") { entry[\"h\"] = max(72, min(260, floor(h))); } layout[key] = entry; this.layout = layout; let note_record = { id: pin, name: pin.name, text: text, color: pin.color, owner: pin.owner, x: entry[\"x\"], y: entry[\"y\"], w: entry[\"w\"], h: entry[\"h\"], z: entry[\"z\"] }; observe({ type: \"note_added\", actor: actor, board: this, pin: pin, note: note_record, ts: now() }); return note_record; }"
         }
       ]
     }

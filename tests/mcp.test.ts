@@ -142,7 +142,6 @@ describe("McpHost", () => {
     // Walk into the chatroom so its verbs and contents are in scope.
     const entered = await world.directCall(undefined, session.actor, "the_chatroom", "enter", []);
     expect(entered.op).toBe("result");
-
     const tools = await host.enumerateTools(session.actor);
     const byObjVerb = new Map(tools.map((t) => [`${t.object}:${t.verb}`, t]));
 
@@ -160,8 +159,11 @@ describe("McpHost", () => {
     expect(byObjVerb.has("the_cockatoo:squawk")).toBe(true);
 
     // Taskspace mutators are sequenced (tool_exposed, not direct_callable);
-    // the actor has presence in the_taskspace via auto_presence on auth.
-    const createTask = byObjVerb.get("the_taskspace:create_task");
+    const enteredTaskspace = await world.directCall(undefined, session.actor, "the_taskspace", "enter", []);
+    expect(enteredTaskspace.op).toBe("result");
+    const taskspaceTools = await host.enumerateTools(session.actor);
+    const taskspaceByObjVerb = new Map(taskspaceTools.map((t) => [`${t.object}:${t.verb}`, t]));
+    const createTask = taskspaceByObjVerb.get("the_taskspace:create_task");
     expect(createTask).toBeDefined();
     expect(createTask?.direct).toBe(false);
     expect(createTask?.enclosingSpace).toBe("the_taskspace");
@@ -340,6 +342,8 @@ describe("McpHost", () => {
     const session = world.auth("guest:mcp-seq");
     const host = new McpHost(world);
     host.bindSession(session.id, session.actor);
+    const enteredTaskspace = await world.directCall(undefined, session.actor, "the_taskspace", "enter", []);
+    expect(enteredTaskspace.op).toBe("result");
 
     const create = (await host.enumerateTools(session.actor)).find((t) => t.object === "the_taskspace" && t.verb === "create_task")!;
     expect(create).toBeDefined();
@@ -410,6 +414,8 @@ describe("McpHost", () => {
     const session = world.auth("guest:mcp-focus");
     const host = new McpHost(world);
     host.bindSession(session.id, session.actor);
+    const enteredTaskspace = await world.directCall(undefined, session.actor, "the_taskspace", "enter", []);
+    expect(enteredTaskspace.op).toBe("result");
     await host.refreshToolList(session.id, session.actor); // seed snapshot
 
     const create = (await host.enumerateTools(session.actor)).find((t) => t.object === "the_taskspace" && t.verb === "create_task")!;
@@ -418,8 +424,8 @@ describe("McpHost", () => {
     expect(typeof taskRef).toBe("string");
     expect(taskRef.length).toBeGreaterThan(0);
 
-    // Before focus, the task's per-instance verbs aren't reachable.
-    expect((await host.enumerateTools(session.actor)).some((t) => t.object === taskRef)).toBe(false);
+    // Before focus, the task's per-instance verbs aren't reachable via focus scope.
+    expect((await host.enumerateTools(session.actor, { scope: "focus" })).some((t) => t.object === taskRef)).toBe(false);
 
     let listChanged = 0;
     host.onToolListChanged(() => { listChanged += 1; });
@@ -428,14 +434,14 @@ describe("McpHost", () => {
     await host.invokeTool(session.actor, session.id, focus, [taskRef]);
 
     // After focus, task's verbs (claim, set_status, add_subtask) are reachable.
-    const taskTools = (await host.enumerateTools(session.actor)).filter((t) => t.object === taskRef);
+    const taskTools = (await host.enumerateTools(session.actor, { scope: "focus" })).filter((t) => t.object === taskRef);
     expect(taskTools.length).toBeGreaterThan(0);
     expect(taskTools.some((t) => t.verb === "claim")).toBe(true);
     expect(listChanged).toBeGreaterThan(0);
 
     const unfocus = (await host.enumerateTools(session.actor)).find((t) => t.object === session.actor && t.verb === "unfocus")!;
     await host.invokeTool(session.actor, session.id, unfocus, [taskRef]);
-    expect((await host.enumerateTools(session.actor)).some((t) => t.object === taskRef)).toBe(false);
+    expect((await host.enumerateTools(session.actor, { scope: "focus" })).some((t) => t.object === taskRef)).toBe(false);
   });
 
   it("sends list_changed only to sessions for the actor whose tool list changed", async () => {
@@ -535,6 +541,7 @@ describe("McpGateway", () => {
   it("initializes a session via Mcp-Token, lists tools, and calls a verb", async () => {
     const world = bootstrapWorld();
     const gateway = new McpGateway(world);
+    const sessionsBeforeInit = new Set(world.sessions.keys());
 
     // 1) initialize
     const init = await gateway.handle(jsonRpcRequest("http://t/mcp", {
@@ -558,6 +565,12 @@ describe("McpGateway", () => {
       method: "notifications/initialized"
     }, { "mcp-session-id": sessionId! }));
     expect(notified.status).toBe(202);
+    const gatewaySession = Array.from(world.sessions.values()).find((candidate) => !sessionsBeforeInit.has(candidate.id)) ?? Array.from(world.sessions.values()).at(0);
+    expect(gatewaySession).toBeDefined();
+    if (gatewaySession) {
+      const enteredTaskspace = await world.directCall("mcp-enter-taskspace", gatewaySession.actor, "the_taskspace", "enter", []);
+      expect(enteredTaskspace.op).toBe("result");
+    }
 
     // 2) tools/list
     const list = await gateway.handle(jsonRpcRequest("http://t/mcp", {

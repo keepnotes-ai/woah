@@ -529,7 +529,6 @@
         "next_seq": 1,
         "subscribers": [],
         "last_snapshot_seq": 0,
-        "auto_presence": true,
         "host_placement": "self",
         "aliases": [
           "dubspace",
@@ -540,6 +539,11 @@
         "operators": [],
         "mount_room": "demoworld:the_chatroom"
       }
+    },
+    {
+      "kind": "attach_feature",
+      "consumer": "the_dubspace",
+      "feature": "chat:$conversational"
     },
     {
       "kind": "create_instance",

@@ -13,6 +13,20 @@ function authedWorld() {
   return { world, session, actor: session.actor };
 }
 
+async function callInDubspace(
+  world: ReturnType<typeof createWorld>,
+  sessionId: string,
+  requestId: string,
+  request: Message
+): Promise<ReturnType<typeof world.call>> {
+  const sessionActor = world.sessions.get(sessionId)?.actor;
+  if (sessionActor === request.actor && !world.hasPresence(sessionActor, "the_dubspace")) {
+    const entered = await world.directCall(`enter-${requestId}`, sessionActor, "the_dubspace", "enter", []);
+    if (entered.op === "error") return entered;
+  }
+  return world.call(requestId, sessionId, "the_dubspace", request);
+}
+
 function addBytecodeVerb(name: string, bytecode: TinyBytecode): VerbDef {
   return {
     kind: "bytecode",
@@ -77,7 +91,7 @@ describe("v0.5 in-memory VM", () => {
       })
     );
 
-    const applied = await world.call("sum", session.id, "the_dubspace", message(actor, "delay_1", "sum_to", [5]));
+    const applied = await callInDubspace(world, session.id, "sum", message(actor, "delay_1", "sum_to", [5]));
     expect(applied.op).toBe("applied");
     if (applied.op === "applied") expect(applied.observations).toEqual([]);
     expect(await world.dispatch(
@@ -138,7 +152,7 @@ describe("v0.5 in-memory VM", () => {
       })
     );
 
-    const applied = await world.call("call-counter", session.id, "the_dubspace", message(actor, "delay_1", "call_counter", []));
+    const applied = await callInDubspace(world, session.id, "call-counter", message(actor, "delay_1", "call_counter", []));
     expect(applied.op).toBe("applied");
     expect(await world.dispatch(
       {
@@ -176,7 +190,7 @@ describe("v0.5 in-memory VM", () => {
       })
     );
 
-    const applied = await world.call("depth", session.id, "the_dubspace", message(actor, "delay_1", "recurse", []));
+    const applied = await callInDubspace(world, session.id, "depth", message(actor, "delay_1", "recurse", []));
     expect(applied.op).toBe("applied");
     if (applied.op === "applied") {
       expect(applied.observations[0].type).toBe("$error");
@@ -227,7 +241,7 @@ describe("v0.5 in-memory VM", () => {
       "catch_div",
       []
     )).toBe("E_DIV");
-    const applied = await world.call("catch-div", session.id, "the_dubspace", message(actor, "delay_1", "catch_div", []));
+    const applied = await callInDubspace(world, session.id, "catch-div", message(actor, "delay_1", "catch_div", []));
     expect(applied.op).toBe("applied");
   });
 
@@ -320,7 +334,7 @@ describe("v0.5 in-memory VM", () => {
       })
     );
 
-    const applied = await world.call("ticks", session.id, "the_dubspace", message(actor, "delay_1", "burn_ticks", []));
+    const applied = await callInDubspace(world, session.id, "ticks", message(actor, "delay_1", "burn_ticks", []));
     expect(applied.op).toBe("applied");
     if (applied.op === "applied") {
       expect(applied.observations[0].type).toBe("$error");
@@ -458,7 +472,7 @@ describe("v0.5 in-memory VM", () => {
       })
     );
 
-    const scheduled = await world.call("fork", session.id, "the_dubspace", message(actor, "delay_1", "schedule_mark", ["later"]));
+    const scheduled = await callInDubspace(world, session.id, "fork", message(actor, "delay_1", "schedule_mark", ["later"]));
     expect(scheduled.op).toBe("applied");
     expect(world.parkedTasks.size).toBe(1);
     expect(world.propOrNull("delay_1", "forked")).toBeNull();
@@ -502,7 +516,7 @@ describe("v0.5 in-memory VM", () => {
       })
     );
 
-    const applied = await world.call("suspend", session.id, "the_dubspace", message(actor, "delay_1", "suspend_then_mark", ["ok"]));
+    const applied = await callInDubspace(world, session.id, "suspend", message(actor, "delay_1", "suspend_then_mark", ["ok"]));
     expect(applied.op).toBe("applied");
     if (applied.op === "applied") {
       expect(applied.observations[0].type).toBe("task_suspended");
@@ -535,7 +549,7 @@ describe("v0.5 in-memory VM", () => {
       })
     );
 
-    const applied = await world.call("observe-suspend", session.id, "the_dubspace", message(actor, "delay_1", "observe_then_suspend", []));
+    const applied = await callInDubspace(world, session.id, "observe-suspend", message(actor, "delay_1", "observe_then_suspend", []));
     expect(applied.op).toBe("applied");
     if (applied.op === "applied") expect(applied.observations.map((obs) => obs.type)).toEqual(["before_suspend", "task_suspended"]);
     const parked = Array.from(world.parkedTasks.values())[0]?.serialized as any;
@@ -556,7 +570,7 @@ describe("v0.5 in-memory VM", () => {
       })
     );
 
-    const applied = await world.call("wall-suspend", session.id, "the_dubspace", message(actor, "delay_1", "short_wall_suspend", ["ok"]));
+    const applied = await callInDubspace(world, session.id, "wall-suspend", message(actor, "delay_1", "short_wall_suspend", ["ok"]));
     expect(applied.op).toBe("applied");
     const parked = Array.from(world.parkedTasks.values())[0]?.serialized as any;
     parked.task.frames[0].startedAt = Date.now() - 60_000;
@@ -597,7 +611,7 @@ describe("v0.5 in-memory VM", () => {
       })
     );
 
-    const applied = await world.call("read", session.id, "the_dubspace", message(actor, "delay_1", "read_then_mark", []));
+    const applied = await callInDubspace(world, session.id, "read", message(actor, "delay_1", "read_then_mark", []));
     expect(applied.op).toBe("applied");
     if (applied.op === "applied") expect(applied.observations[0].type).toBe("task_awaiting_read");
     expect(world.parkedTasks.size).toBe(1);

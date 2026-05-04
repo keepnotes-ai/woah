@@ -135,6 +135,20 @@ function message(actor: string, target: string, verb: string, args: WooValue[] =
   return { actor, target, verb, args };
 }
 
+async function callInDubspace(
+  world: ReturnType<typeof createWorld>,
+  sessionId: string,
+  requestId: string,
+  request: Message
+): Promise<ReturnType<typeof world.call>> {
+  const sessionActor = world.sessions.get(sessionId)?.actor;
+  if (sessionActor === request.actor && !world.hasPresence(sessionActor, "the_dubspace")) {
+    const entered = await world.directCall(`enter-${requestId}`, sessionActor, "the_dubspace", "enter", []);
+    if (entered.op === "error") return entered;
+  }
+  return world.call(requestId, sessionId, "the_dubspace", request);
+}
+
 function bytecodeVerb(name: string, bytecode: TinyBytecode): VerbDef {
   return {
     kind: "bytecode",
@@ -242,7 +256,7 @@ describe("CFObjectRepository production-shape coverage", () => {
     try {
       let world = harness.world;
       const session = world.auth("guest:cf-repo-reload");
-      const applied = await world.call("cf-set-control", session.id, "the_dubspace", message(session.actor, "the_dubspace", "set_control", ["delay_1", "wet", 0.58]));
+      const applied = await callInDubspace(world, session.id, "cf-set-control", message(session.actor, "the_dubspace", "set_control", ["delay_1", "wet", 0.58]));
       expect(applied.op).toBe("applied");
       const snapshot = world.saveSnapshot("the_dubspace");
 
@@ -263,7 +277,7 @@ describe("CFObjectRepository production-shape coverage", () => {
       const world = harness.world;
       installFailureFixture(world);
       const session = world.auth("guest:cf-savepoint");
-      const applied = await world.call("cf-fail", session.id, "the_dubspace", message(session.actor, "delay_1", "cf_mutate_then_fail", ["discarded"]));
+      const applied = await callInDubspace(world, session.id, "cf-fail", message(session.actor, "delay_1", "cf_mutate_then_fail", ["discarded"]));
 
       expect(applied.op).toBe("applied");
       if (applied.op === "applied") {

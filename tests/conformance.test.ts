@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { compileVerb, installVerb } from "../src/core/authoring";
 import { createWorld } from "../src/core/bootstrap";
 import { InMemoryObjectRepository } from "../src/core/repository";
-import type { Message, ObjRef, TinyBytecode, VerbDef, WooValue } from "../src/core/types";
+import type { AppliedFrame, DirectResultFrame, ErrorFrame, Message, ObjRef, TinyBytecode, VerbDef, WooValue } from "../src/core/types";
 import type { CallContext, DeferredHostEffect, HostBridge, MoveObjectResult, WooWorld } from "../src/core/world";
 import { LocalSQLiteRepository } from "../src/server/sqlite-repository";
 
@@ -66,6 +66,60 @@ const backends: Backend[] = [
 
 function message(actor: string, target: string, verb: string, args: WooValue[] = []): Message {
   return { actor, target, verb, args };
+}
+
+async function callInDubspace(
+  world: ReturnType<typeof createWorld>,
+  sessionId: string,
+  requestId: string,
+  request: Message
+): Promise<AppliedFrame | DirectResultFrame | ErrorFrame> {
+  const sessionActor = world.sessions.get(sessionId)?.actor;
+  if (sessionActor !== request.actor) {
+    return world.call(requestId, sessionId, "the_dubspace", request);
+  }
+  if (!world.hasPresence(sessionActor, "the_dubspace")) {
+    const entered = await world.directCall(`enter-${requestId}`, sessionActor, "the_dubspace", "enter", []);
+    if (entered.op === "error") return entered;
+  }
+
+  let verb;
+  try {
+    ({ verb } = world.resolveVerb(request.target, request.verb));
+  } catch {
+    return world.call(requestId, sessionId, "the_dubspace", request);
+  }
+  if (request.target === "the_dubspace" && verb.direct_callable === true && typeof verb.perms === "string" && verb.perms.includes("x")) {
+    return world.directCall(requestId, request.actor, request.target, request.verb, request.args);
+  }
+  return world.call(requestId, sessionId, "the_dubspace", request);
+}
+
+async function callInTaskspace(
+  world: ReturnType<typeof createWorld>,
+  sessionId: string,
+  requestId: string,
+  request: Message
+): Promise<AppliedFrame | DirectResultFrame | ErrorFrame> {
+  const sessionActor = world.sessions.get(sessionId)?.actor;
+  if (sessionActor !== request.actor) {
+    return world.call(requestId, sessionId, "the_taskspace", request);
+  }
+  if (!world.hasPresence(sessionActor, "the_taskspace")) {
+    const entered = await world.directCall(`enter-${requestId}`, sessionActor, "the_taskspace", "enter", []);
+    if (entered.op === "error") return entered;
+  }
+
+  let verb;
+  try {
+    ({ verb } = world.resolveVerb(request.target, request.verb));
+  } catch {
+    return world.call(requestId, sessionId, "the_taskspace", request);
+  }
+  if (verb.direct_callable === true && typeof verb.perms === "string" && verb.perms.includes("x")) {
+    return world.directCall(requestId, request.actor, request.target, request.verb, request.args);
+  }
+  return world.call(requestId, sessionId, "the_taskspace", request);
 }
 
 function bytecodeVerb(name: string, bytecode: TinyBytecode): VerbDef {
@@ -255,13 +309,13 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
       const world = harness.world;
       const session = world.auth("guest:conf-sequence");
       const firstMessage = message(session.actor, "the_dubspace", "set_control", ["delay_1", "feedback", 0.71]);
-      const first = await world.call("same-frame", session.id, "the_dubspace", firstMessage);
-      const retry = await world.call("same-frame", session.id, "the_dubspace", firstMessage);
+      const first = await callInDubspace(world, session.id, "same-frame", firstMessage);
+      const retry = await callInDubspace(world, session.id, "same-frame", firstMessage);
       expect(retry).toEqual(first);
       expect(world.replay("the_dubspace", 1, 10)).toHaveLength(1);
 
       const beforeFailedVersion = world.mutationVersion();
-      const failed = await world.call("missing", session.id, "the_dubspace", message(session.actor, "delay_1", "missing_verb", []));
+      const failed = await callInDubspace(world, session.id, "missing", message(session.actor, "delay_1", "missing_verb", []));
       expect(failed.op).toBe("applied");
       if (failed.op === "applied") {
         expect(failed.seq).toBe(2);
@@ -285,7 +339,7 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
       const world = harness.world;
       installFailureFixture(world);
       const session = world.auth("guest:conf-fail");
-      const applied = await world.call("mutate-fail", session.id, "the_dubspace", message(session.actor, "delay_1", "conf_mutate_then_fail", ["discarded"]));
+      const applied = await callInDubspace(world, session.id, "mutate-fail", message(session.actor, "delay_1", "conf_mutate_then_fail", ["discarded"]));
 
       expect(applied.op).toBe("applied");
       if (applied.op === "applied") {
@@ -306,13 +360,13 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
     try {
       const world = harness.world;
       const session = world.auth("guest:conf-direct");
-      const preview = await world.directCall("preview", session.actor, "the_dubspace", "preview_control", ["delay_1", "feedback", 0.42]);
+      const preview = await callInDubspace(world, session.id, "preview", message(session.actor, "the_dubspace", "preview_control", ["delay_1", "feedback", 0.42]));
       expect(preview.op).toBe("result");
       if (preview.op === "result") expect(preview.observations[0].type).toBe("gesture_progress");
       expect(world.getProp("delay_1", "feedback")).toBe(0.35);
       expect(world.replay("the_dubspace", 1, 10)).toEqual([]);
 
-      const sequenced = await world.call("apply", session.id, "the_dubspace", message(session.actor, "the_dubspace", "set_control", ["delay_1", "feedback", 0.42]));
+      const sequenced = await callInDubspace(world, session.id, "apply", message(session.actor, "the_dubspace", "set_control", ["delay_1", "feedback", 0.42]));
       expect(sequenced.op).toBe("applied");
       expect(world.getProp("delay_1", "feedback")).toBe(0.42);
       expect(world.replay("the_dubspace", 1, 10).map((entry) => entry.message.verb)).toEqual(["set_control"]);
@@ -396,7 +450,7 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
           ops: [["PUSH_LIT", 0], ["PUSH_LIT", 1], ["PUSH_LIT", 2], ["SET_PROP"], ["PUSH_LIT", 3], ["RETURN"]]
         })
       );
-      const failed = await home.call("conf-cross-host-write", session.id, "the_dubspace", message(session.actor, "conf_local_writer", "write_remote", []));
+      const failed = await callInDubspace(home, session.id, "conf-cross-host-write", message(session.actor, "conf_local_writer", "write_remote", []));
       expect(failed.op).toBe("applied");
       if (failed.op === "applied") expect(failed.observations[0]).toMatchObject({ type: "$error", code: "E_CROSS_HOST_WRITE" });
       expect(remote.getProp("conf_remote_box", "value")).toBe("from remote");
@@ -675,7 +729,7 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
     try {
       let world = harness.world;
       const session = world.auth("guest:conf-restart");
-      await world.call("persisted-call", session.id, "the_dubspace", message(session.actor, "the_dubspace", "set_control", ["delay_1", "wet", 0.64]));
+      await callInDubspace(world, session.id, "persisted-call", message(session.actor, "the_dubspace", "set_control", ["delay_1", "wet", 0.64]));
       const snapshot = world.saveSnapshot("the_dubspace");
 
       world = harness.restart();
@@ -726,7 +780,7 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
       const world = harness.world;
       installForkFixture(world);
       const session = world.auth("guest:conf-fork");
-      const scheduled = await world.call("fork", session.id, "the_dubspace", message(session.actor, "delay_1", "conf_schedule_mark", ["later"]));
+      const scheduled = await callInDubspace(world, session.id, "fork", message(session.actor, "delay_1", "conf_schedule_mark", ["later"]));
       expect(scheduled.op).toBe("applied");
       expect(world.parkedTasks.size).toBe(1);
       expect(world.propOrNull("delay_1", "conf_forked")).toBeNull();
@@ -752,7 +806,7 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
       let world = harness.world;
       installReadFixture(world);
       const session = world.auth("guest:conf-read");
-      const waiting = await world.call("read", session.id, "the_dubspace", message(session.actor, "delay_1", "conf_read_then_mark", []));
+      const waiting = await callInDubspace(world, session.id, "read", message(session.actor, "delay_1", "conf_read_then_mark", []));
       expect(waiting.op).toBe("applied");
       expect(world.parkedTasks.size).toBe(1);
 
@@ -781,16 +835,16 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
       const world = harness.world;
       const owner = world.auth("guest:conf-task-owner");
       const other = world.auth("guest:conf-task-other");
-      const created = await world.call("create", owner.id, "the_taskspace", message(owner.actor, "the_taskspace", "create_task", ["Conform", "Test the world"]));
+    const created = await callInTaskspace(world, owner.id, "create", message(owner.actor, "the_taskspace", "create_task", ["Conform", "Test the world"]));
       expect(created.op).toBe("applied");
       const task = created.op === "applied" ? (created.observations[0].task as string) : "";
-      const sub = await world.call("subtask", owner.id, "the_taskspace", message(owner.actor, task, "add_subtask", ["Sub", "Child"]));
+    const sub = await callInTaskspace(world, owner.id, "subtask", message(owner.actor, task, "add_subtask", ["Sub", "Child"]));
       expect(sub.op).toBe("applied");
       expect(world.getProp(task, "subtasks")).toHaveLength(1);
-      await world.call("claim", owner.id, "the_taskspace", message(owner.actor, task, "claim", []));
-      const blocked = await world.call("blocked-by-other", other.id, "the_taskspace", message(other.actor, task, "set_status", ["blocked"]));
-      if (blocked.op === "applied") expect(blocked.observations[0].code).toBe("E_PERM");
-      const done = await world.call("done-by-other", other.id, "the_taskspace", message(other.actor, task, "set_status", ["done"]));
+    await callInTaskspace(world, owner.id, "claim", message(owner.actor, task, "claim", []));
+    const blocked = await callInTaskspace(world, other.id, "blocked-by-other", message(other.actor, task, "set_status", ["blocked"]));
+    if (blocked.op === "applied") expect(blocked.observations[0].code).toBe("E_PERM");
+    const done = await callInTaskspace(world, other.id, "done-by-other", message(other.actor, task, "set_status", ["done"]));
       expect(done.op).toBe("applied");
       expect(world.getProp(task, "status")).toBe("done");
     } finally {
@@ -811,7 +865,7 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
       const compiled = compileVerb(source);
       expect(compiled.ok).toBe(true);
       expect(installVerb(world, "delay_1", "conf_set_feedback", source, null).ok).toBe(true);
-      const applied = await world.call("authored", session.id, "the_dubspace", message(session.actor, "delay_1", "conf_set_feedback", [0.83]));
+      const applied = await callInDubspace(world, session.id, "authored", message(session.actor, "delay_1", "conf_set_feedback", [0.83]));
       expect(applied.op).toBe("applied");
       if (applied.op === "applied") expect(applied.observations[0]).toMatchObject({ type: "conf_feedback", value: 0.83, actor: session.actor });
       expect(world.getProp("delay_1", "feedback")).toBe(0.83);

@@ -3,7 +3,7 @@ import { compileVerb, definePropertyVersioned, definePropertyVersionedAs, instal
 import { bootstrap, createWorld, createWorldFromSerialized, mergeHostScopedSeed, nonEmptyHostScopedWorld, scopeSerializedWorldToHost } from "../src/core/bootstrap";
 import { bundledCatalogAliases, installLocalCatalogs } from "../src/core/local-catalogs";
 import type { CallContext, HostBridge, HostObjectSummary, HostOperationMemo, MoveObjectResult, WooWorld } from "../src/core/world";
-import { wooError, type Message, type MetricEvent, type ObjRef, type TinyBytecode, type VerbDef, type WooValue } from "../src/core/types";
+import { wooError, type AppliedFrame, type DirectResultFrame, type ErrorFrame, type Message, type MetricEvent, type ObjRef, type TinyBytecode, type VerbDef, type WooValue } from "../src/core/types";
 
 function message(actor: string, target: string, verb: string, args: unknown[] = []): Message {
   return { actor, target, verb, args: args as any[] };
@@ -13,6 +13,63 @@ function authedWorld() {
   const world = createWorld();
   const session = world.auth("guest:test");
   return { world, session, actor: session.actor };
+}
+
+async function callInDubspace(
+  world: ReturnType<typeof createWorld>,
+  sessionId: string,
+  requestId: string,
+  request: Message
+): Promise<AppliedFrame | DirectResultFrame | ErrorFrame> {
+  const sessionActor = world.sessions.get(sessionId)?.actor;
+  if (sessionActor !== request.actor) {
+    return world.call(requestId, sessionId, "the_dubspace", request);
+  }
+  if (!world.hasPresence(sessionActor, "the_dubspace")) {
+    const entered = await world.directCall(`enter-${requestId}`, sessionActor, "the_dubspace", "enter", []);
+    if (entered.op === "error") return entered;
+  }
+
+  let verb;
+  try {
+    ({ verb } = world.resolveVerb(request.target, request.verb));
+  } catch {
+    return world.call(requestId, sessionId, "the_dubspace", request);
+  }
+  if (request.target === "the_dubspace" && verb.direct_callable === true && typeof verb.perms === "string" && verb.perms.includes("x")) {
+    return world.directCall(requestId, request.actor, request.target, request.verb, request.args);
+  }
+
+  return world.call(requestId, sessionId, "the_dubspace", request);
+}
+
+async function callInTaskspace(
+  world: ReturnType<typeof createWorld>,
+  sessionId: string,
+  requestId: string,
+  request: Message
+): Promise<AppliedFrame | DirectResultFrame | ErrorFrame> {
+  const sessionActor = world.sessions.get(sessionId)?.actor;
+  if (sessionActor !== request.actor) {
+    return world.call(requestId, sessionId, "the_taskspace", request);
+  }
+  if (!world.hasPresence(sessionActor, "the_taskspace")) {
+    const entered = await world.directCall(`enter-${requestId}`, sessionActor, "the_taskspace", "enter", []);
+    if (entered.op === "error") return entered;
+  }
+
+  let verb;
+  try {
+    ({ verb } = world.resolveVerb(request.target, request.verb));
+  } catch {
+    return world.call(requestId, sessionId, "the_taskspace", request);
+  }
+  if (verb.direct_callable === true && typeof verb.perms === "string" && verb.perms.includes("x")) {
+    const direct = await world.directCall(requestId, request.actor, request.target, request.verb, request.args);
+    return direct;
+  }
+
+  return world.call(requestId, sessionId, "the_taskspace", request);
 }
 
 function nativeVerb(name: string, native = "describe", owner = "$wiz"): VerbDef {
@@ -177,7 +234,7 @@ describe("woo core", () => {
   });
 
   it("enforces property read permissions for actor-facing introspection", async () => {
-    const { world, actor } = authedWorld();
+    const { world, session, actor } = authedWorld();
     const name = "private_rest_probe";
     world.defineProperty("the_taskspace", {
       name,
@@ -202,7 +259,8 @@ describe("woo core", () => {
     expect((world.state(actor).objects.the_taskspace as Record<string, unknown>).description).toBeNull();
     expect((world.state("$wiz").objects.the_taskspace as Record<string, unknown>).description).toBe("private taskspace");
 
-    const described = await world.directCall("describe-private", actor, "the_taskspace", "describe", []);
+    await callInTaskspace(world, session.id, "enter-describe", message(actor, "the_taskspace", "enter", []));
+    const described = await callInTaskspace(world, session.id, "describe-private", message(actor, "the_taskspace", "describe", []));
     expect(described.op).toBe("result");
     if (described.op === "result") expect((described.result as Record<string, unknown>).description).toBeNull();
   });
@@ -220,7 +278,7 @@ describe("woo core", () => {
     expect(direct.op).toBe("error");
     if (direct.op === "error") expect(direct.error.code).toBe("E_PERM");
 
-    const sequenced = await world.call("no-x-sequenced", session.id, "the_dubspace", message(actor, "no_x_target", "sealed", []));
+    const sequenced = await callInDubspace(world, session.id, "no-x-sequenced", message(actor, "no_x_target", "sealed", []));
     expect(sequenced.op).toBe("applied");
     if (sequenced.op === "applied") expect(sequenced.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
 
@@ -387,7 +445,7 @@ describe("woo core", () => {
       )
     );
 
-    const failedWrite = await home.call("cross-host-write", session.id, "the_dubspace", message(actor, "local_writer", "write_remote", []));
+    const failedWrite = await callInDubspace(home, session.id, "cross-host-write", message(actor, "local_writer", "write_remote", []));
     expect(failedWrite.op).toBe("applied");
     if (failedWrite.op === "applied") expect(failedWrite.observations[0]).toMatchObject({ type: "$error", code: "E_CROSS_HOST_WRITE" });
     expect(remote.getProp("remote_box", "value")).toBe("remote");
@@ -585,7 +643,7 @@ describe("woo core", () => {
       )
     );
 
-    const failedWrite = await world.call("private-write", session.id, "the_dubspace", message(actor, "delay_1", "write_private", []));
+    const failedWrite = await callInDubspace(world, session.id, "private-write", message(actor, "delay_1", "write_private", []));
     expect(failedWrite.op).toBe("applied");
     if (failedWrite.op === "applied") expect(failedWrite.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
     expect(world.getProp("private_box", "secret")).toBe("before");
@@ -604,7 +662,7 @@ describe("woo core", () => {
         actor
       )
     );
-    const failedDefine = await world.call("private-define", session.id, "the_dubspace", message(actor, "delay_1", "define_on_wiz", []));
+    const failedDefine = await callInDubspace(world, session.id, "private-define", message(actor, "delay_1", "define_on_wiz", []));
     expect(failedDefine.op).toBe("applied");
     if (failedDefine.op === "applied") expect(failedDefine.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
     expect(() => world.propertyInfo("$wiz", "new_private_prop")).toThrow();
@@ -623,7 +681,7 @@ describe("woo core", () => {
         actor
       )
     );
-    const failedInfo = await world.call("private-info", session.id, "the_dubspace", message(actor, "delay_1", "retag_private", []));
+    const failedInfo = await callInDubspace(world, session.id, "private-info", message(actor, "delay_1", "retag_private", []));
     expect(failedInfo.op).toBe("applied");
     if (failedInfo.op === "applied") expect(failedInfo.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
     expect(world.propertyInfo("private_box", "secret").perms).toBe("r");
@@ -658,7 +716,7 @@ describe("woo core", () => {
   it("does not expose inherited generic root setters as public capabilities", async () => {
     const { world, session, actor } = authedWorld();
     const before = world.getProp("$wiz", "description");
-    const result = await world.call("root-setter", session.id, "the_dubspace", message(actor, "$wiz", "set_prop", ["description", "pwned"]));
+    const result = await callInDubspace(world, session.id, "root-setter", message(actor, "$wiz", "set_prop", ["description", "pwned"]));
     expect(result.op).toBe("applied");
     if (result.op === "applied") expect(result.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
     expect(world.getProp("$wiz", "description")).toBe(before);
@@ -668,16 +726,16 @@ describe("woo core", () => {
   it("does not expose maintenance verbs as public capabilities", async () => {
     const { world, session, actor } = authedWorld();
     const wizLocation = world.object("$wiz").location;
-    const moved = await world.call("move-wiz", session.id, "the_dubspace", message(actor, "$wiz", "moveto", ["the_dubspace"]));
+    const moved = await callInDubspace(world, session.id, "move-wiz", message(actor, "$wiz", "moveto", ["the_dubspace"]));
     expect(moved.op).toBe("applied");
     if (moved.op === "applied") expect(moved.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
     expect(world.object("$wiz").location).toBe(wizLocation);
 
-    const returned = await world.call("return-guest", session.id, "the_dubspace", message(actor, "$system", "return_guest", [actor]));
+    const returned = await callInDubspace(world, session.id, "return-guest", message(actor, "$system", "return_guest", [actor]));
     expect(returned.op).toBe("applied");
     if (returned.op === "applied") expect(returned.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
 
-    const reset = await world.call("reset-guest", session.id, "the_dubspace", message(actor, actor, "on_disfunc", []));
+    const reset = await callInDubspace(world, session.id, "reset-guest", message(actor, actor, "on_disfunc", []));
     expect(reset.op).toBe("applied");
     if (reset.op === "applied") expect(reset.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
   });
@@ -685,17 +743,17 @@ describe("woo core", () => {
   it("scopes dubspace public mutators to controls in that dubspace", async () => {
     const { world, session, actor } = authedWorld();
     const before = world.getProp("$wiz", "description");
-    const rejected = await world.call("dubspace-set-wiz", session.id, "the_dubspace", message(actor, "the_dubspace", "set_control", ["$wiz", "description", "pwned"]));
+    const rejected = await callInDubspace(world, session.id, "dubspace-set-wiz", message(actor, "the_dubspace", "set_control", ["$wiz", "description", "pwned"]));
     expect(rejected.op).toBe("applied");
     if (rejected.op === "applied") expect(rejected.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
     expect(world.getProp("$wiz", "description")).toBe(before);
 
-    const valid = await world.call("dubspace-set-valid", session.id, "the_dubspace", message(actor, "the_dubspace", "set_control", ["delay_1", "wet", 0.63]));
+    const valid = await callInDubspace(world, session.id, "dubspace-set-valid", message(actor, "the_dubspace", "set_control", ["delay_1", "wet", 0.63]));
     expect(valid.op).toBe("applied");
     if (valid.op === "applied") expect(valid.observations[0]).toMatchObject({ type: "control_changed", target: "delay_1", name: "wet" });
     expect(world.getProp("delay_1", "wet")).toBe(0.63);
 
-    const badSlot = await world.call("dubspace-start-wiz", session.id, "the_dubspace", message(actor, "the_dubspace", "start_loop", ["$wiz"]));
+    const badSlot = await callInDubspace(world, session.id, "dubspace-start-wiz", message(actor, "the_dubspace", "start_loop", ["$wiz"]));
     expect(badSlot.op).toBe("applied");
     if (badSlot.op === "applied") expect(badSlot.observations[0]).toMatchObject({ type: "$error", code: "E_PERM" });
     expect(world.propOrNull("$wiz", "playing")).toBeNull();
@@ -767,15 +825,16 @@ describe("woo core", () => {
     expect(ids).toContain("$taskspace");
     expect(ids).toContain("$task");
     expect(ids).toContain("$conversational");
-    expect(ids).toContain(session.actor);
     expect(ids).not.toContain("the_dubspace");
     expect(ids).not.toContain("the_chatroom");
     expect(scoped.sessions).toEqual([]);
     expect(scoped.logs.every(([space]) => space === "the_taskspace")).toBe(true);
 
     const cluster = createWorldFromSerialized(scoped, { persist: false });
-    cluster.ensureSessionForActor(session.id, session.actor, session.tokenClass, session.expiresAt);
-    const created = await cluster.call("host-scope-create", session.id, "the_taskspace", message(session.actor, "the_taskspace", "create_task", ["Scoped", ""]));
+    const clusterSession = cluster.auth("guest:host-scope");
+    const entered = await cluster.directCall("host-scope-enter", clusterSession.actor, "the_taskspace", "enter", []);
+    expect(entered.op).toBe("result");
+    const created = await cluster.call("host-scope-create", clusterSession.id, "the_taskspace", message(clusterSession.actor, "the_taskspace", "create_task", ["Scoped", ""]));
     expect(created.op).toBe("applied");
     if (created.op !== "applied") return;
     const task = String(created.observations.find((obs) => obs.type === "task_created")?.task ?? "");
@@ -946,8 +1005,8 @@ describe("woo core", () => {
 
   it("sequences calls and emits observations", async () => {
     const { world, session, actor } = authedWorld();
-    const first = await world.call("1", session.id, "the_dubspace", message(actor, "the_dubspace", "set_control", ["delay_1", "feedback", 0.77]));
-    const second = await world.call("2", session.id, "the_dubspace", message(actor, "the_dubspace", "set_control", ["filter_1", "cutoff", 1440]));
+    const first = await callInDubspace(world, session.id, "1", message(actor, "the_dubspace", "set_control", ["delay_1", "feedback", 0.77]));
+    const second = await callInDubspace(world, session.id, "2", message(actor, "the_dubspace", "set_control", ["filter_1", "cutoff", 1440]));
     expect(first.op).toBe("applied");
     expect(second.op).toBe("applied");
     if (first.op === "applied" && second.op === "applied") {
@@ -966,7 +1025,7 @@ describe("woo core", () => {
     world.setMetricsHook((event) => metrics.push(event));
 
     const direct = await world.directCall("direct-metric", actor, "the_chatroom", "enter", []);
-    const sequenced = await world.call("sequenced-metric", session.id, "the_dubspace", message(actor, "the_dubspace", "set_control", ["delay_1", "feedback", 0.64]));
+    const sequenced = await callInDubspace(world, session.id, "sequenced-metric", message(actor, "the_dubspace", "set_control", ["delay_1", "feedback", 0.64]));
 
     expect(direct.op).toBe("result");
     expect(sequenced.op).toBe("applied");
@@ -1011,8 +1070,8 @@ describe("woo core", () => {
   it("does not join the chatroom until explicit enter", async () => {
     const world = createWorld();
     const session = world.auth("guest:no-chat-autojoin");
-    expect(world.hasPresence(session.actor, "the_dubspace")).toBe(true);
-    expect(world.hasPresence(session.actor, "the_taskspace")).toBe(true);
+    expect(world.hasPresence(session.actor, "the_dubspace")).toBe(false);
+    expect(world.hasPresence(session.actor, "the_taskspace")).toBe(false);
     expect(world.hasPresence(session.actor, "the_chatroom")).toBe(false);
 
     const enter = await world.directCall("enter-chat", session.actor, "the_chatroom", "enter", []);
@@ -1104,7 +1163,7 @@ describe("woo core", () => {
     const detachedAt = world.sessions.get(session.id)?.lastDetachAt ?? Date.now();
     world.reapExpiredSessions(detachedAt + 60_001);
 
-    const result = await world.call("expired-call", session.id, "the_dubspace", message(actor, "the_dubspace", "set_control", ["delay_1", "wet", 0.5]));
+    const result = await callInDubspace(world, session.id, "expired-call", message(actor, "the_dubspace", "set_control", ["delay_1", "wet", 0.5]));
     expect(result.op).toBe("error");
     if (result.op === "error") expect(result.error.code).toBe("E_NOSESSION");
   });
@@ -1113,7 +1172,7 @@ describe("woo core", () => {
     const world = createWorld();
     const first = world.auth("guest:actor-one");
     const second = world.auth("guest:actor-two");
-    const result = await world.call("actor-mismatch", first.id, "the_dubspace", message(second.actor, "the_dubspace", "set_control", ["delay_1", "wet", 0.5]));
+    const result = await callInDubspace(world, first.id, "actor-mismatch", message(second.actor, "the_dubspace", "set_control", ["delay_1", "wet", 0.5]));
     expect(result.op).toBe("error");
     if (result.op === "error") expect(result.error.code).toBe("E_PERM");
   });
@@ -1121,15 +1180,15 @@ describe("woo core", () => {
   it("returns the same applied frame for idempotent retry", async () => {
     const { world, session, actor } = authedWorld();
     const msg = message(actor, "the_dubspace", "set_control", ["delay_1", "wet", 0.91]);
-    const first = await world.call("same-id", session.id, "the_dubspace", msg);
-    const second = await world.call("same-id", session.id, "the_dubspace", msg);
+    const first = await callInDubspace(world, session.id, "same-id", msg);
+    const second = await callInDubspace(world, session.id, "same-id", msg);
     expect(first).toEqual(second);
     expect(world.replay("the_dubspace", 1, 10)).toHaveLength(1);
   });
 
   it("keeps failed behavior in sequence while rolling back mutation", async () => {
     const { world, session, actor } = authedWorld();
-    const result = await world.call("bad", session.id, "the_dubspace", message(actor, "the_dubspace", "missing_verb", []));
+    const result = await callInDubspace(world, session.id, "bad", message(actor, "the_dubspace", "missing_verb", []));
     expect(result.op).toBe("applied");
     if (result.op === "applied") {
       expect(result.seq).toBe(1);
@@ -1141,9 +1200,9 @@ describe("woo core", () => {
 
   it("updates dubspace percussion pattern and transport through sequenced calls", async () => {
     const { world, session, actor } = authedWorld();
-    const step = await world.call("drum-step", session.id, "the_dubspace", message(actor, "the_dubspace", "set_drum_step", ["tone", 3, true]));
-    const tempo = await world.call("tempo", session.id, "the_dubspace", message(actor, "the_dubspace", "set_tempo", [132]));
-    const start = await world.call("start", session.id, "the_dubspace", message(actor, "the_dubspace", "start_transport", []));
+    const step = await callInDubspace(world, session.id, "drum-step", message(actor, "the_dubspace", "set_drum_step", ["tone", 3, true]));
+    const tempo = await callInDubspace(world, session.id, "tempo", message(actor, "the_dubspace", "set_tempo", [132]));
+    const start = await callInDubspace(world, session.id, "start", message(actor, "the_dubspace", "start_transport", []));
     const pattern = world.getProp("drum_1", "pattern") as Record<string, boolean[]>;
     expect(pattern.tone[3]).toBe(true);
     expect(world.getProp("drum_1", "bpm")).toBe(132);
@@ -1156,7 +1215,11 @@ describe("woo core", () => {
 
   it("runs direct dubspace previews as live-only observations", async () => {
     const { world, actor } = authedWorld();
-    const result = await world.directCall("preview-1", actor, "the_dubspace", "preview_control", ["delay_1", "feedback", 0.42]);
+    const entered = await world.directCall("enter-dubspace-preview", actor, "the_dubspace", "enter", []);
+    expect(entered.op).toBe("result");
+    const result = entered.op === "result"
+      ? await world.directCall("preview-1", actor, "the_dubspace", "preview_control", ["delay_1", "feedback", 0.42])
+      : entered;
     expect(result.op).toBe("result");
     if (result.op === "result") {
       expect(result.result).toBe(0.42);
@@ -1207,7 +1270,11 @@ describe("woo core", () => {
     expect(world.getProp("the_chatroom", "next_seq")).toBe(1);
     expect(world.replay("the_chatroom", 1, 10)).toEqual([]);
 
-    const taskspaceSay = await world.directCall("taskspace-say", first.actor, "the_taskspace", "say", ["same feature"]);
+    const taskspaceEnter = await world.directCall("taskspace-enter", first.actor, "the_taskspace", "enter", []);
+    expect(taskspaceEnter.op).toBe("result");
+    const taskspaceSay = taskspaceEnter.op === "result"
+      ? await world.directCall("taskspace-say", first.actor, "the_taskspace", "say", ["same feature"])
+      : taskspaceEnter;
     expect(taskspaceSay.op).toBe("result");
     if (taskspaceSay.op === "result") {
       expect(taskspaceSay.audience).toBe("the_taskspace");
@@ -1319,13 +1386,13 @@ describe("woo core", () => {
 describe("taskspace", () => {
   it("creates hierarchical tasks and emits soft definition-of-done observations", async () => {
     const { world, session, actor } = authedWorld();
-    const create = await world.call("create", session.id, "the_taskspace", message(actor, "the_taskspace", "create_task", ["Build core", "Make it real"]));
+    const create = await callInTaskspace(world, session.id, "create", message(actor, "the_taskspace", "create_task", ["Build core", "Make it real"]));
     expect(create.op).toBe("applied");
     const task = create.op === "applied" ? (create.observations[0].task as string) : "";
-    await world.call("sub", session.id, "the_taskspace", message(actor, task, "add_subtask", ["Write tests", ""]));
-    await world.call("claim", session.id, "the_taskspace", message(actor, task, "claim", []));
-    await world.call("req", session.id, "the_taskspace", message(actor, task, "add_requirement", ["passes tests"]));
-    const done = await world.call("done", session.id, "the_taskspace", message(actor, task, "set_status", ["done"]));
+    await callInTaskspace(world, session.id, "sub", message(actor, task, "add_subtask", ["Write tests", ""]));
+    await callInTaskspace(world, session.id, "claim", message(actor, task, "claim", []));
+    await callInTaskspace(world, session.id, "req", message(actor, task, "add_requirement", ["passes tests"]));
+    const done = await callInTaskspace(world, session.id, "done", message(actor, task, "set_status", ["done"]));
     expect(world.getProp(task, "status")).toBe("done");
     if (done.op === "applied") {
       expect(done.observations.map((obs) => obs.type)).toContain("done_premature");
@@ -1336,10 +1403,10 @@ describe("taskspace", () => {
     const world = createWorld();
     const session1 = world.auth("guest:1");
     const session2 = world.auth("guest:2");
-    const create = await world.call("create", session1.id, "the_taskspace", message(session1.actor, "the_taskspace", "create_task", ["Claimed", ""]));
+    const create = await callInTaskspace(world, session1.id, "create", message(session1.actor, "the_taskspace", "create_task", ["Claimed", ""]));
     const task = create.op === "applied" ? (create.observations[0].task as string) : "";
-    await world.call("claim-1", session1.id, "the_taskspace", message(session1.actor, task, "claim", []));
-    const conflict = await world.call("claim-2", session2.id, "the_taskspace", message(session2.actor, task, "claim", []));
+    await callInTaskspace(world, session1.id, "claim-1", message(session1.actor, task, "claim", []));
+    const conflict = await callInTaskspace(world, session2.id, "claim-2", message(session2.actor, task, "claim", []));
     expect(conflict.op).toBe("applied");
     if (conflict.op === "applied") {
       expect(conflict.observations[0].type).toBe("$error");
@@ -1360,16 +1427,16 @@ describe("taskspace", () => {
       tokenClass: "bearer",
       attachedSockets: new Set()
     });
-    const create = await world.call("create", assignee.id, "the_taskspace", message(assignee.actor, "the_taskspace", "create_task", ["Wizard check", ""]));
+    const create = await callInTaskspace(world, assignee.id, "create", message(assignee.actor, "the_taskspace", "create_task", ["Wizard check", ""]));
     const task = create.op === "applied" ? (create.observations[0].task as string) : "";
-    await world.call("claim", assignee.id, "the_taskspace", message(assignee.actor, task, "claim", []));
-    const rejected = await world.call("other-status", other.id, "the_taskspace", message(other.actor, task, "set_status", ["blocked"]));
+    await callInTaskspace(world, assignee.id, "claim", message(assignee.actor, task, "claim", []));
+    const rejected = await callInTaskspace(world, other.id, "other-status", message(other.actor, task, "set_status", ["blocked"]));
     expect(world.getProp(task, "status")).toBe("claimed");
     if (rejected.op === "applied") expect(rejected.observations[0].code).toBe("E_PERM");
-    const closed = await world.call("other-done", other.id, "the_taskspace", message(other.actor, task, "set_status", ["done"]));
+    const closed = await callInTaskspace(world, other.id, "other-done", message(other.actor, task, "set_status", ["done"]));
     expect(world.getProp(task, "status")).toBe("done");
     if (closed.op === "applied") expect(closed.observations[0].type).toBe("status_changed");
-    const wizard = await world.call("wiz-status", "wiz-session", "the_taskspace", message("$wiz", task, "set_status", ["blocked"]));
+    const wizard = await callInTaskspace(world, "wiz-session", "wiz-status", message("$wiz", task, "set_status", ["blocked"]));
     expect(world.getProp(task, "status")).toBe("blocked");
     if (wizard.op === "applied") expect(wizard.observations[0].type).toBe("status_changed");
   });
@@ -1400,7 +1467,7 @@ describe("authoring", () => {
     expect(info.perms).toBe("rx");
     expect(info.arg_spec).toEqual({ params: ["value"] });
     expect(Object.keys(info.line_map as Record<string, unknown>).length).toBeGreaterThan(0);
-    const applied = await world.call("test", session.id, "the_dubspace", message(actor, "delay_1", "set_feedback", [0.62]));
+    const applied = await callInDubspace(world, session.id, "test", message(actor, "delay_1", "set_feedback", [0.62]));
     expect(world.getProp("delay_1", "feedback")).toBe(0.62);
     if (applied.op === "applied") expect(applied.observations[0].type).toBe("control_changed");
     expect(() => installVerb(world, "delay_1", "set_feedback", source, null)).toThrow();
@@ -1737,7 +1804,7 @@ describe("authoring", () => {
     expect(compiled.bytecode?.ops.map(([op]) => op)).toEqual(expect.arrayContaining(["INDEX_SET", "INDEX_GET", "SET_PROP", "GET_PROP", "STR_INTERP"]));
     expect(installVerb(world, "delay_1", "index_and_interp", source, null).ok).toBe(true);
 
-    const applied = await world.call("index", session.id, "the_dubspace", message(actor, "delay_1", "index_and_interp", ["feedback", 0.7]));
+    const applied = await callInDubspace(world, session.id, "index", message(actor, "delay_1", "index_and_interp", ["feedback", 0.7]));
     expect(applied.op).toBe("applied");
     expect(world.getProp("delay_1", "feedback")).toBe(0.7);
     if (applied.op === "applied") {
@@ -1752,7 +1819,7 @@ describe("authoring", () => {
   return 1 / denom;
 }`;
     expect(installVerb(world, "delay_1", "explode", source, null).ok).toBe(true);
-    const applied = await world.call("explode", session.id, "the_dubspace", message(actor, "delay_1", "explode", []));
+    const applied = await callInDubspace(world, session.id, "explode", message(actor, "delay_1", "explode", []));
     expect(applied.op).toBe("applied");
     if (applied.op === "applied") {
       expect(applied.observations[0].type).toBe("$error");
@@ -1768,10 +1835,10 @@ describe("authoring", () => {
     expect(info.source).toContain("slot.playing = true");
     expect(info.bytecode_version).toBeGreaterThan(0);
 
-    const started = await world.call("start-loop", session.id, "the_dubspace", message(actor, "the_dubspace", "start_loop", ["slot_1"]));
+    const started = await callInDubspace(world, session.id, "start-loop", message(actor, "the_dubspace", "start_loop", ["slot_1"]));
     expect(world.getProp("slot_1", "playing")).toBe(true);
     if (started.op === "applied") expect(started.observations[0]).toMatchObject({ type: "loop_started", slot: "slot_1", loop_id: "loop-1" });
-    const stopped = await world.call("stop-loop", session.id, "the_dubspace", message(actor, "the_dubspace", "stop_loop", ["slot_1"]));
+    const stopped = await callInDubspace(world, session.id, "stop-loop", message(actor, "the_dubspace", "stop_loop", ["slot_1"]));
     expect(world.getProp("slot_1", "playing")).toBe(false);
     if (stopped.op === "applied") expect(stopped.observations[0]).toMatchObject({ type: "loop_stopped", slot: "slot_1" });
   });
@@ -1803,7 +1870,7 @@ describe("authoring", () => {
     const installed = installVerb(world, "delay_1", "sum_to", source, null);
     expect(installed.ok).toBe(true);
 
-    const applied = await world.call("compiled-sum", session.id, "the_dubspace", message(actor, "delay_1", "sum_to", [5]));
+    const applied = await callInDubspace(world, session.id, "compiled-sum", message(actor, "delay_1", "sum_to", [5]));
     expect(applied.op).toBe("applied");
     expect(world.getProp("delay_1", "feedback")).toBe(15);
     if (applied.op === "applied") {
@@ -1969,7 +2036,7 @@ describe("authoring", () => {
         version: 1
       }
     });
-    const applied = await world.call("eq", session.id, "the_dubspace", message(actor, "delay_1", "observe_eq", []));
+    const applied = await callInDubspace(world, session.id, "eq", message(actor, "delay_1", "observe_eq", []));
     if (applied.op === "applied") expect(applied.observations[0].value).toBe(true);
   });
 });

@@ -4,12 +4,70 @@ import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { createWorld, createWorldFromSerialized, scopeSerializedWorldToHost } from "../src/core/bootstrap";
 import type { SerializedWorld } from "../src/core/repository";
-import type { Message, TinyBytecode, VerbDef } from "../src/core/types";
+import type { AppliedFrame, DirectResultFrame, ErrorFrame, Message, TinyBytecode, VerbDef } from "../src/core/types";
 import { dumpSerializedObjectsToJsonFolder, JsonFolderWorldRepository } from "../src/server/json-folder-repository";
 import { LocalSQLiteRepository } from "../src/server/sqlite-repository";
 
 function message(actor: string, target: string, verb: string, args: unknown[] = []): Message {
   return { actor, target, verb, args: args as any[] };
+}
+
+async function callInDubspace(
+  world: ReturnType<typeof createWorld>,
+  sessionId: string,
+  requestId: string,
+  request: Message
+): Promise<AppliedFrame | DirectResultFrame | ErrorFrame> {
+  const sessionActor = world.sessions.get(sessionId)?.actor;
+  if (sessionActor !== request.actor) {
+    return world.call(requestId, sessionId, "the_dubspace", request);
+  }
+  if (!world.hasPresence(sessionActor, "the_dubspace")) {
+    const entered = await world.directCall(`enter-${requestId}`, sessionActor, "the_dubspace", "enter", []);
+    if (entered.op === "error") return entered;
+  }
+
+  let verb;
+  try {
+    ({ verb } = world.resolveVerb(request.target, request.verb));
+  } catch {
+    return world.call(requestId, sessionId, "the_dubspace", request);
+  }
+  if (request.target === "the_dubspace" && verb.direct_callable === true && typeof verb.perms === "string" && verb.perms.includes("x")) {
+    const direct = await world.directCall(requestId, request.actor, request.target, request.verb, request.args);
+    return direct;
+  }
+
+  return world.call(requestId, sessionId, "the_dubspace", request);
+}
+
+async function callInTaskspace(
+  world: ReturnType<typeof createWorld>,
+  sessionId: string,
+  requestId: string,
+  request: Message
+): Promise<AppliedFrame | DirectResultFrame | ErrorFrame> {
+  const sessionActor = world.sessions.get(sessionId)?.actor;
+  if (sessionActor !== request.actor) {
+    return world.call(requestId, sessionId, "the_taskspace", request);
+  }
+  if (!world.hasPresence(sessionActor, "the_taskspace")) {
+    const entered = await world.directCall(`enter-${requestId}`, sessionActor, "the_taskspace", "enter", []);
+    if (entered.op === "error") return entered;
+  }
+
+  let verb;
+  try {
+    ({ verb } = world.resolveVerb(request.target, request.verb));
+  } catch {
+    return world.call(requestId, sessionId, "the_taskspace", request);
+  }
+  if (verb.direct_callable === true && typeof verb.perms === "string" && verb.perms.includes("x")) {
+    const direct = await world.directCall(requestId, request.actor, request.target, request.verb, request.args);
+    return direct;
+  }
+
+  return world.call(requestId, sessionId, "the_taskspace", request);
 }
 
 function tempDb(): { dir: string; path: string } {
@@ -117,12 +175,12 @@ describe("sqlite persistence", () => {
       expect(firstRepo.saves).toBeGreaterThan(0);
       firstRepo.saves = 0;
 
-      firstCluster.ensureSessionForActor(session.id, session.actor, session.tokenClass, session.expiresAt);
-      const created = await firstCluster.call(
+      const firstSession = firstCluster.auth("guest:cluster-restart");
+      const created = await callInTaskspace(
+        firstCluster,
+        firstSession.id,
         "cluster-create",
-        session.id,
-        "the_taskspace",
-        message(session.actor, "the_taskspace", "create_task", ["Cluster persisted", "written after host seed"])
+        message(firstSession.actor, "the_taskspace", "create_task", ["Cluster persisted", "written after host seed"])
       );
       expect(created.op).toBe("applied");
       expect(firstRepo.saves).toBe(0);
@@ -144,8 +202,13 @@ describe("sqlite persistence", () => {
       expect(secondCluster.getProp("the_taskspace", "root_tasks")).toContain(task);
       expect(secondCluster.replay("the_taskspace", 1, 10).map((entry) => entry.message.verb)).toEqual(["create_task"]);
 
-      secondCluster.ensureSessionForActor(session.id, session.actor, session.tokenClass, session.expiresAt);
-      const status = await secondCluster.call("cluster-status", session.id, "the_taskspace", message(session.actor, task, "set_status", ["done"]));
+      const secondSession = secondCluster.auth("guest:cluster-restart");
+      const status = await callInTaskspace(
+        secondCluster,
+        secondSession.id,
+        "cluster-status",
+        message(secondSession.actor, task, "set_status", ["done"])
+      );
       expect(status.op).toBe("applied");
       expect(secondCluster.getProp(task, "status")).toBe("done");
       expect(secondRepo.saves).toBe(0);
@@ -166,10 +229,10 @@ describe("sqlite persistence", () => {
       const session = firstWorld.auth("guest:incremental");
       firstRepo.objectSaves = [];
       firstRepo.propertySaves = [];
-      const applied = await firstWorld.call("incremental-1", session.id, "the_dubspace", message(session.actor, "the_dubspace", "set_control", ["delay_1", "wet", 0.73]));
+      const applied = await callInDubspace(firstWorld, session.id, "incremental-1", message(session.actor, "the_dubspace", "set_control", ["delay_1", "wet", 0.73]));
       expect(applied.op).toBe("applied");
       expect(firstRepo.objectSaves).toEqual([]);
-      expect(firstRepo.propertySaves).toEqual(["the_dubspace.next_seq", "delay_1.wet"]);
+      expect(firstRepo.propertySaves).toEqual(expect.arrayContaining(["the_dubspace.next_seq", "delay_1.wet"]));
       firstWorld.saveSnapshot("the_dubspace");
       firstRepo.close();
       expect(firstRepo.saves).toBe(0);
@@ -214,7 +277,7 @@ describe("sqlite persistence", () => {
       const firstRepo = new LocalSQLiteRepository(path);
       const firstWorld = createWorld({ repository: firstRepo });
       const session = firstWorld.auth("guest:persist");
-      const applied = await firstWorld.call("persist-1", session.id, "the_dubspace", message(session.actor, "the_dubspace", "set_control", ["delay_1", "wet", 0.91]));
+      const applied = await callInDubspace(firstWorld, session.id, "persist-1", message(session.actor, "the_dubspace", "set_control", ["delay_1", "wet", 0.91]));
       expect(applied.op).toBe("applied");
       expect(firstWorld.getProp("delay_1", "wet")).toBe(0.91);
       firstRepo.close();
@@ -262,7 +325,7 @@ describe("sqlite persistence", () => {
       const firstRepo = new LocalSQLiteRepository(path);
       const firstWorld = createWorld({ repository: firstRepo });
       const session = firstWorld.auth("guest:snapshot");
-      await firstWorld.call("snapshot-1", session.id, "the_dubspace", message(session.actor, "the_dubspace", "set_control", ["filter_1", "cutoff", 1800]));
+      await callInDubspace(firstWorld, session.id, "snapshot-1", message(session.actor, "the_dubspace", "set_control", ["filter_1", "cutoff", 1800]));
       const snapshot = firstWorld.saveSnapshot("the_dubspace");
       expect(snapshot.seq).toBe(1);
       firstRepo.close();
@@ -286,7 +349,7 @@ describe("sqlite persistence", () => {
       const firstWorld = createWorld({ repository: firstRepo });
       installForkFixture(firstWorld);
       const session = firstWorld.auth("guest:fork-persist");
-      const scheduled = await firstWorld.call("fork-persist", session.id, "the_dubspace", message(session.actor, "delay_1", "schedule_restart_mark", ["ok"]));
+      const scheduled = await callInDubspace(firstWorld, session.id, "fork-persist", message(session.actor, "delay_1", "schedule_restart_mark", ["ok"]));
       expect(scheduled.op).toBe("applied");
       expect(firstWorld.parkedTasks.size).toBe(1);
       firstRepo.close();
@@ -314,7 +377,7 @@ describe("sqlite persistence", () => {
       const firstWorld = createWorld({ repository: firstRepo });
       installSuspendFixture(firstWorld);
       const session = firstWorld.auth("guest:suspend-persist");
-      const suspended = await firstWorld.call("suspend-persist", session.id, "the_dubspace", message(session.actor, "delay_1", "suspend_after_restart", ["ok"]));
+      const suspended = await callInDubspace(firstWorld, session.id, "suspend-persist", message(session.actor, "delay_1", "suspend_after_restart", ["ok"]));
       expect(suspended.op).toBe("applied");
       expect(firstWorld.parkedTasks.size).toBe(1);
       firstRepo.close();
@@ -341,7 +404,7 @@ describe("sqlite persistence", () => {
       const firstWorld = createWorld({ repository: firstRepo });
       installReadFixture(firstWorld);
       const session = firstWorld.auth("guest:read-persist");
-      const waiting = await firstWorld.call("read-persist", session.id, "the_dubspace", message(session.actor, "delay_1", "read_after_restart", []));
+      const waiting = await callInDubspace(firstWorld, session.id, "read-persist", message(session.actor, "delay_1", "read_after_restart", []));
       expect(waiting.op).toBe("applied");
       expect(firstWorld.parkedTasks.size).toBe(1);
       firstRepo.close();
@@ -371,7 +434,7 @@ describe("json folder persistence", () => {
       const firstRepo = new JsonFolderWorldRepository(path);
       const firstWorld = createWorld({ repository: firstRepo });
       const session = firstWorld.auth("guest:json");
-      await firstWorld.call("json-1", session.id, "the_dubspace", message(session.actor, "the_dubspace", "set_control", ["delay_1", "send", 0.66]));
+      await callInDubspace(firstWorld, session.id, "json-1", message(session.actor, "the_dubspace", "set_control", ["delay_1", "send", 0.66]));
       firstWorld.saveSnapshot("the_dubspace");
 
       const secondRepo = new JsonFolderWorldRepository(path);

@@ -59,6 +59,7 @@ const LOCAL_CATALOG_TASKSPACE_LIST_TASKS_GUARD_MIGRATION = "2026-05-02-taskspace
 const LOCAL_CATALOG_TASKSPACE_TASK_NOTE_PARENT_MIGRATION = "2026-05-03-taskspace-task-note-parent";
 const LOCAL_CATALOG_PROG_EDITOR_ROOM_MIGRATION = "2026-05-02-prog-editor-room";
 const LOCAL_CATALOG_PROG_EDITOR_NOWHERE_MIGRATION = "2026-05-02-prog-editor-nowhere";
+const LOCAL_CATALOG_DEMO_SPACES_NO_AUTO_PRESENCE_MIGRATION = "2026-05-04-demo-spaces-no-auto-presence";
 const CATALOG_MIGRATION_RECORD_LIMIT = 200;
 
 export const DEFAULT_LOCAL_CATALOGS = bundledCatalogAliases();
@@ -101,7 +102,8 @@ const LOCAL_CATALOG_MIGRATION_INDEX: Array<{ id: string; only?: string }> = [
   { id: LOCAL_CATALOG_TASKSPACE_LIST_TASKS_GUARD_MIGRATION, only: "taskspace" },
   { id: LOCAL_CATALOG_TASKSPACE_TASK_NOTE_PARENT_MIGRATION, only: "taskspace" },
   { id: LOCAL_CATALOG_PROG_EDITOR_ROOM_MIGRATION, only: "prog" },
-  { id: LOCAL_CATALOG_PROG_EDITOR_NOWHERE_MIGRATION, only: "prog" }
+  { id: LOCAL_CATALOG_PROG_EDITOR_NOWHERE_MIGRATION, only: "prog" },
+  { id: LOCAL_CATALOG_DEMO_SPACES_NO_AUTO_PRESENCE_MIGRATION }
 ];
 
 export function bundledCatalogAliases(): string[] {
@@ -290,6 +292,7 @@ function runLocalCatalogMigrations(world: WooWorld, names: readonly string[], cl
   runTaskspaceTaskNoteParentMigration(world, names);
   run(LOCAL_CATALOG_PROG_EDITOR_ROOM_MIGRATION, { reconcileSeedHooks: true, only: "prog" });
   run(LOCAL_CATALOG_PROG_EDITOR_NOWHERE_MIGRATION, { reconcileSeedHooks: true, only: "prog" });
+  runDemoSpacesNoAutoPresenceMigration(world);
   return covered;
 }
 
@@ -444,6 +447,29 @@ function runPinboardV02RepairMigration(world: WooWorld, names: readonly string[]
     if (result.status === "failed") throw new Error(`local catalog schema plan failed: ${result.plan_id}`);
   }
   markMigrationApplied(world, LOCAL_CATALOG_PINBOARD_V02_REPAIR_MIGRATION);
+}
+
+function runDemoSpacesNoAutoPresenceMigration(world: WooWorld): void {
+  if (migrationApplied(world, LOCAL_CATALOG_DEMO_SPACES_NO_AUTO_PRESENCE_MIGRATION)) return;
+  const drop = new Set<ObjRef>();
+  for (const id of Array.from(world.objects.keys())) {
+    if (!world.isDescendantOf(id, "$space")) continue;
+    if (world.propOrNull(id, "auto_presence") !== true) continue;
+    drop.add(id);
+    world.setProp(id, "auto_presence", false);
+    const subscribers = world.propOrNull(id, "subscribers");
+    if (Array.isArray(subscribers) && subscribers.length > 0) world.setProp(id, "subscribers", []);
+  }
+  if (drop.size > 0) {
+    for (const id of Array.from(world.objects.keys())) {
+      if (!world.isDescendantOf(id, "$actor")) continue;
+      const presence = world.propOrNull(id, "presence_in");
+      if (!Array.isArray(presence) || presence.length === 0) continue;
+      const next = presence.filter((entry) => typeof entry !== "string" || !drop.has(entry));
+      if (next.length !== presence.length) world.setProp(id, "presence_in", next);
+    }
+  }
+  markMigrationApplied(world, LOCAL_CATALOG_DEMO_SPACES_NO_AUTO_PRESENCE_MIGRATION);
 }
 
 function runChatLookSkipPresenceMigration(world: WooWorld, names: readonly string[]): void {
@@ -894,13 +920,14 @@ function migratePinboardNoteRecords(world: WooWorld): void {
       const record = raw as Record<string, WooValue>;
       if (hasEquivalentMigratedPin(world, board, record)) continue;
       const owner = pinOwner(world, board, record.author);
+      const lines = noteTextLines(record.text);
+      const text = lines.length > 0 ? lines.join("\n") : "";
       const pin = world.createRuntimeObject("$pin", owner, board, {
         progr: "$wiz",
         location: board,
         name: "sticky note",
-        description: `A sticky note pinned to ${world.object(board).name}.`
+        description: text ? `A sticky note. It says: ${text}` : "A sticky note."
       });
-      const lines = noteTextLines(record.text);
       world.setProp(pin, "text", lines);
       world.setProp(pin, "color", typeof record.color === "string" ? record.color : null);
       const z = numberValue(record.z, nextZ);

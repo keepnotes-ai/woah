@@ -5,7 +5,7 @@ import { installVerb } from "../src/core/authoring";
 import { createWorld, createWorldFromSerialized, mergeHostScopedSeed, nonEmptyHostScopedWorld } from "../src/core/bootstrap";
 import { installCatalogManifest, updateCatalogManifest, type CatalogManifest as RuntimeCatalogManifest } from "../src/core/catalog-installer";
 import { bundledCatalogAliases, installLocalCatalogs, localCatalogStatuses, runHostScopedDataMigrations, runHostScopedLocalCatalogLifecycle } from "../src/core/local-catalogs";
-import type { VerbDef, WooValue } from "../src/core/types";
+import type { AppliedFrame, DirectResultFrame, ErrorFrame, Message, VerbDef, WooValue } from "../src/core/types";
 
 type CatalogManifest = {
   name: string;
@@ -37,6 +37,62 @@ function readFrontmatter(name: string): Record<string, string> {
       return [line.slice(0, index).trim(), line.slice(index + 1).trim()];
     });
   return Object.fromEntries(entries);
+}
+
+async function callInDubspace(
+  world: ReturnType<typeof createWorld>,
+  sessionId: string,
+  requestId: string,
+  request: Message
+): Promise<AppliedFrame | DirectResultFrame | ErrorFrame> {
+  const sessionActor = world.sessions.get(sessionId)?.actor;
+  if (sessionActor !== request.actor) {
+    return world.call(requestId, sessionId, "the_dubspace", request);
+  }
+  if (!world.hasPresence(sessionActor, "the_dubspace")) {
+    const entered = await world.directCall(`enter-${requestId}`, sessionActor, "the_dubspace", "enter", []);
+    if (entered.op === "error") return entered;
+  }
+
+  let verb;
+  try {
+    ({ verb } = world.resolveVerb(request.target, request.verb));
+  } catch {
+    return world.call(requestId, sessionId, "the_dubspace", request);
+  }
+  if (request.target === "the_dubspace" && verb.direct_callable === true && typeof verb.perms === "string" && verb.perms.includes("x")) {
+    return world.directCall(requestId, request.actor, request.target, request.verb, request.args);
+  }
+
+  return world.call(requestId, sessionId, "the_dubspace", request);
+}
+
+async function callInTaskspace(
+  world: ReturnType<typeof createWorld>,
+  sessionId: string,
+  requestId: string,
+  request: Message
+): Promise<AppliedFrame | DirectResultFrame | ErrorFrame> {
+  const sessionActor = world.sessions.get(sessionId)?.actor;
+  if (sessionActor !== request.actor) {
+    return world.call(requestId, sessionId, "the_taskspace", request);
+  }
+  if (!world.hasPresence(sessionActor, "the_taskspace")) {
+    const entered = await world.directCall(`enter-${requestId}`, sessionActor, "the_taskspace", "enter", []);
+    if (entered.op === "error") return entered;
+  }
+
+  let verb;
+  try {
+    ({ verb } = world.resolveVerb(request.target, request.verb));
+  } catch {
+    return world.call(requestId, sessionId, "the_taskspace", request);
+  }
+  if (verb.direct_callable === true && typeof verb.perms === "string" && verb.perms.includes("x")) {
+    return world.directCall(requestId, request.actor, request.target, request.verb, request.args);
+  }
+
+  return world.call(requestId, sessionId, "the_taskspace", request);
 }
 
 function worldVerb(world: ReturnType<typeof createWorld>, object: string, name: string) {
@@ -81,9 +137,12 @@ describe("local catalogs", () => {
 
   it("uses explicit dependency order for embedded chat", async () => {
     const chat = readManifest("chat");
+    const dubspace = readManifest("dubspace");
     const pinboard = readManifest("pinboard");
     const taskspace = readManifest("taskspace");
     expect(chat.depends).toEqual(["@local:help"]);
+    expect(dubspace.depends).toEqual(["@local:chat", "@local:demoworld"]);
+    expect(dubspace.seed_hooks).toContainEqual({ kind: "attach_feature", consumer: "the_dubspace", feature: "chat:$conversational" });
     expect(pinboard.depends).toEqual(["@local:chat", "@local:note", "@local:demoworld"]);
     expect(pinboard.seed_hooks).toContainEqual({ kind: "attach_feature", consumer: "the_pinboard", feature: "chat:$conversational" });
     expect(taskspace.depends).toEqual(["@local:chat", "@local:note"]);
@@ -404,7 +463,7 @@ describe("local catalogs", () => {
     expect(world.ownVerb("$task", "set_status")?.kind).toBe("bytecode");
 
     const session = world.auth("guest:catalog-taskspace");
-    const created = await world.call("create-task", session.id, "the_taskspace", {
+    const created = await callInTaskspace(world, session.id, "create-task", {
       actor: session.actor,
       target: "the_taskspace",
       verb: "create_task",
@@ -415,8 +474,18 @@ describe("local catalogs", () => {
     expect(world.getProp(task, "title")).toBe("Source task");
     expect(world.isDescendantOf(task, "$note")).toBe(true);
 
-    await world.call("requirement", session.id, "the_taskspace", { actor: session.actor, target: task, verb: "add_requirement", args: ["has source verbs"] });
-    const done = await world.call("done", session.id, "the_taskspace", { actor: session.actor, target: task, verb: "set_status", args: ["done"] });
+    await callInTaskspace(world, session.id, "requirement", {
+      actor: session.actor,
+      target: task,
+      verb: "add_requirement",
+      args: ["has source verbs"]
+    });
+    const done = await callInTaskspace(world, session.id, "done", {
+      actor: session.actor,
+      target: task,
+      verb: "set_status",
+      args: ["done"]
+    });
     expect(world.getProp(task, "status")).toBe("done");
     if (done.op === "applied") expect(done.observations.map((obs) => obs.type)).toContain("done_premature");
   });
@@ -446,6 +515,7 @@ describe("local catalogs", () => {
     expect(world.ownVerb("$dubspace", "set_drum_step")?.kind).toBe("bytecode");
     expect(world.ownVerb("$dubspace", "save_scene")?.kind).toBe("bytecode");
     expect(world.ownVerb("$dubspace", "enter")?.kind).toBe("bytecode");
+    expect(world.verbInfo("the_dubspace", "say").definer).toBe("$conversational");
 
     const session = world.auth("guest:catalog-dubspace");
     const actor = session.actor;
@@ -460,7 +530,7 @@ describe("local catalogs", () => {
     }
     expect(world.getProp("the_dubspace", "operators")).toEqual([actor]);
 
-    const applied = await world.call("set-control", session.id, "the_dubspace", {
+    const applied = await callInDubspace(world, session.id, "set-control", {
       actor,
       target: "the_dubspace",
       verb: "set_control",
@@ -476,16 +546,16 @@ describe("local catalogs", () => {
     }
     expect(world.getProp("delay_1", "feedback")).toBe(0.44);
 
-    await world.call("drum", session.id, "the_dubspace", { actor, target: "the_dubspace", verb: "set_drum_step", args: ["tone", 3, true] });
-    await world.call("tempo", session.id, "the_dubspace", { actor, target: "the_dubspace", verb: "set_tempo", args: [250] });
+    await callInDubspace(world, session.id, "drum", { actor, target: "the_dubspace", verb: "set_drum_step", args: ["tone", 3, true] });
+    await callInDubspace(world, session.id, "tempo", { actor, target: "the_dubspace", verb: "set_tempo", args: [250] });
     const pattern = world.getProp("drum_1", "pattern") as Record<string, boolean[]>;
     expect(pattern.tone[3]).toBe(true);
     expect(world.getProp("drum_1", "bpm")).toBe(200);
 
-    await world.call("save", session.id, "the_dubspace", { actor, target: "the_dubspace", verb: "save_scene", args: ["Source Scene"] });
-    await world.call("mutate", session.id, "the_dubspace", { actor, target: "the_dubspace", verb: "set_control", args: ["delay_1", "feedback", 0.11] });
+    await callInDubspace(world, session.id, "save", { actor, target: "the_dubspace", verb: "save_scene", args: ["Source Scene"] });
+    await callInDubspace(world, session.id, "mutate", { actor, target: "the_dubspace", verb: "set_control", args: ["delay_1", "feedback", 0.11] });
     expect(world.getProp("delay_1", "feedback")).toBe(0.11);
-    await world.call("recall", session.id, "the_dubspace", { actor, target: "the_dubspace", verb: "recall_scene", args: ["default_scene"] });
+    await callInDubspace(world, session.id, "recall", { actor, target: "the_dubspace", verb: "recall_scene", args: ["default_scene"] });
     expect(world.getProp("delay_1", "feedback")).toBe(0.44);
 
     const left = await world.directCall("dubspace-leave", actor, "the_dubspace", "leave", []);
@@ -664,6 +734,15 @@ describe("local catalogs", () => {
     expect(world.object(session.actor).location).toBe("the_deck");
     expect(world.hasPresence(session.actor, "the_pinboard")).toBe(false);
     expect(world.hasPresence(session.actor, "the_deck")).toBe(true);
+
+    const stranded = world.auth("guest:pinboard-nowhere-fallback");
+    await world.directCall("pinboard-enter-stranded", stranded.actor, "the_pinboard", "enter", []);
+    world.setProp(stranded.actor, "home", null);
+    world.setProp("the_pinboard", "mount_room", null);
+    const fallbackLeave = await world.directCall("pinboard-leave-stranded", stranded.actor, "the_pinboard", "leave", []);
+    expect(fallbackLeave.op).toBe("result");
+    expect(world.object(stranded.actor).location).toBe("$nowhere");
+    expect(world.hasPresence(stranded.actor, "the_pinboard")).toBe(false);
   });
 
   it("migrates v0.1 pinboard note records into pin objects", () => {
@@ -706,6 +785,7 @@ describe("local catalogs", () => {
     world.createObject({ id: "sticky_alpha", name: "sticky note", parent: "$pin", owner: session.actor, location: "the_hot_tub", anchor: "the_pinboard" });
     world.createObject({ id: "sticky_beta", name: "sticky note", parent: "$pin", owner: session.actor, location: "the_hot_tub", anchor: "the_pinboard" });
     world.createObject({ id: "sticky_blue", name: "sticky note", parent: "$pin", owner: session.actor, location: "the_hot_tub", anchor: "the_pinboard" });
+    world.createObject({ id: "sticky_secret", name: "private note", parent: "$pin", owner: session.actor, location: "the_hot_tub", anchor: "the_pinboard" });
     world.setProp("sticky_alpha", "name", "sticky note");
     world.setProp("sticky_beta", "name", "sticky note");
     world.setProp("sticky_blue", "name", "sticky note");
@@ -713,6 +793,10 @@ describe("local catalogs", () => {
     world.setProp("sticky_beta", "text", ["this is it"]);
     world.setProp("sticky_blue", "text", ["hello"]);
     world.setProp("sticky_blue", "color", "blue");
+    world.setProp("sticky_secret", "text", ["nuclear codes"]);
+    expect(installVerb(world, "sticky_secret", "is_readable_by", `verb :is_readable_by(actor_obj) rxd {
+  return actor_obj == this.owner;
+}`, null).ok).toBe(true);
 
     const look = await world.directCall("look-sticky-alpha", session.actor, "the_hot_tub", "command_plan", ["look sticky note: another one"]);
     expect(look.op).toBe("result");
@@ -752,6 +836,14 @@ describe("local catalogs", () => {
     expect(take.op).toBe("result");
     expect(world.object("sticky_beta").location).toBe(session.actor);
     expect(world.object("the_hot_tub").contents.has("sticky_beta")).toBe(false);
+
+    const outsider = world.auth("guest:sticky-room-note-outsider");
+    await world.directCall("enter-hot-tub-sticky-outsider", outsider.actor, "the_hot_tub", "enter", []);
+    const privateTextMatch = await world.directCall("take-private-note-text", outsider.actor, "the_hot_tub", "command_plan", ["take nuclear codes"]);
+    expect(privateTextMatch.op).toBe("result");
+    if (privateTextMatch.op === "result") {
+      expect(privateTextMatch.result).toMatchObject({ ok: false, route: "huh", target: "the_hot_tub", verb: "huh", text: "take nuclear codes" });
+    }
   });
 
   it("repairs stale pinboard v0.1 source and leftover note records", () => {
@@ -1088,6 +1180,23 @@ describe("local catalogs", () => {
     expect(world.ownVerb("$match", "parse_command")?.kind).toBe("native");
     await world.directCall("enter-first", first.actor, "the_chatroom", "enter", []);
     await world.directCall("enter-second", second.actor, "the_chatroom", "enter", []);
+    await world.directCall("enter-dubspace-for-chat-plan", first.actor, "the_dubspace", "enter", []);
+
+    const dubspaceChatPlan = await world.directCall("plan-dubspace-chat", first.actor, "the_dubspace", "command_plan", ["hello dubspace"]);
+    expect(dubspaceChatPlan.op).toBe("result");
+    if (dubspaceChatPlan.op === "result") {
+      expect(dubspaceChatPlan.result).toMatchObject({ ok: true, route: "direct", target: "the_dubspace", verb: "say", args: ["hello dubspace"] });
+    }
+
+    expect(installVerb(world, "$chatroom", "tag", `verb :tag(text) rx {
+  observe({ type: "tagged", source: this, actor: actor, text: text });
+  return text;
+}`, null).ok).toBe(true);
+    const stringArgPlan = await world.directCall("plan-string-room-verb", first.actor, "the_chatroom", "command_plan", ["tag lamp"]);
+    expect(stringArgPlan.op).toBe("result");
+    if (stringArgPlan.op === "result") {
+      expect(stringArgPlan.result).toMatchObject({ ok: true, route: "sequenced", target: "the_chatroom", verb: "tag", args: ["lamp"] });
+    }
 
     const emotePlan = await world.directCall("plan-emote", first.actor, "the_chatroom", "command_plan", [":waves"]);
     expect(emotePlan.op).toBe("result");
@@ -1116,6 +1225,14 @@ describe("local catalogs", () => {
     expect(lookMePlan.op).toBe("result");
     if (lookMePlan.op === "result") {
       expect(lookMePlan.result).toMatchObject({ ok: true, route: "direct", target: "the_chatroom", verb: "look_at", args: [first.actor] });
+      const takeLamp = await world.directCall("take-lamp-before-look-me", first.actor, "the_chatroom", "take", ["lamp"]);
+      expect(takeLamp.op).toBe("result");
+      const lookedMe = await world.directCall("look-me-command", first.actor, "the_chatroom", "look_at", [first.actor]);
+      expect(lookedMe.op).toBe("result");
+      if (lookedMe.op === "result") {
+        expect(lookedMe.observations.find((obs) => obs.type === "looked")?.text).toContain("You are carrying Brass Lamp.");
+        expect(lookedMe.result).toMatchObject({ carrying: [expect.objectContaining({ id: "the_lamp", title: "Brass Lamp" })] });
+      }
     }
 
     const prepPlan = await world.directCall("plan-long-prep", first.actor, "the_chatroom", "command_plan", ["look cock in front of me"]);
@@ -1246,6 +1363,13 @@ describe("local catalogs", () => {
     if (missingTakePlan.op === "result") {
       expect(missingTakePlan.result).toMatchObject({ ok: false, route: "huh", target: "the_chatroom", verb: "huh", text: "get whatever" });
       expect(missingTakePlan.observations).toContainEqual(expect.objectContaining({ type: "huh", source: "the_chatroom", actor: session.actor, text: "get whatever" }));
+    }
+
+    const bareDropPlan = await world.directCall("plan-drop-bare", session.actor, "the_chatroom", "command_plan", ["drop"]);
+    expect(bareDropPlan.op).toBe("result");
+    if (bareDropPlan.op === "result") {
+      expect(bareDropPlan.result).toMatchObject({ ok: false, route: "huh", target: "the_chatroom", verb: "huh", text: "drop" });
+      expect(bareDropPlan.observations).toContainEqual(expect.objectContaining({ type: "huh", source: "the_chatroom", actor: session.actor, text: "drop", reason: "Drop what?" }));
     }
 
     const takeLamp = await world.directCall("take-lamp", session.actor, "the_chatroom", "take", ["lamp"]);
@@ -1409,6 +1533,38 @@ describe("local catalogs", () => {
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-01-chat-nowhere-portables-repair");
   });
 
+  it("clears auto_presence on demo spaces and drops them from existing actor presence_in", () => {
+    const world = createWorld();
+    expect(world.getProp("the_dubspace", "auto_presence")).toBe(false);
+    expect(world.getProp("the_taskspace", "auto_presence")).toBe(false);
+
+    // Simulate a deployed world: actors auto-present in demo spaces, spaces
+    // listing those actors as subscribers, and the migration ledger missing
+    // the cleanup entry.
+    const session = world.auth("guest:auto-presence-cleanup");
+    world.setProp(session.actor, "presence_in", ["the_dubspace", "the_taskspace"]);
+    world.setProp("the_dubspace", "auto_presence", true);
+    world.setProp("the_taskspace", "auto_presence", true);
+    world.setProp("the_dubspace", "subscribers", [session.actor]);
+    world.setProp("the_taskspace", "subscribers", [session.actor]);
+    const ledger = (world.getProp("$system", "applied_migrations") as string[]).filter((id) => id !== "2026-05-04-demo-spaces-no-auto-presence");
+    world.setProp("$system", "applied_migrations", ledger);
+
+    installLocalCatalogs(world);
+
+    expect(world.getProp("the_dubspace", "auto_presence")).toBe(false);
+    expect(world.getProp("the_taskspace", "auto_presence")).toBe(false);
+    expect(world.getProp("the_dubspace", "subscribers")).toEqual([]);
+    expect(world.getProp("the_taskspace", "subscribers")).toEqual([]);
+    expect(world.getProp(session.actor, "presence_in")).toEqual([]);
+    expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-04-demo-spaces-no-auto-presence");
+
+    // Fresh auths after the migration must not pick up auto-presence either —
+    // demo spaces have no business pre-subscribing arriving agents.
+    const fresh = world.auth("guest:auto-presence-fresh");
+    expect(world.getProp(fresh.actor, "presence_in")).toEqual([]);
+  });
+
   it("repairs stale catalog tool exposure for agent-visible taskspace and dubspace verbs", () => {
     const world = createWorld();
     world.setProp("$system", "applied_migrations", [
@@ -1526,12 +1682,12 @@ describe("local catalogs", () => {
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-04-30-catalog-placement-metadata");
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-04-30-room-look-self");
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-03-taskspace-task-note-parent");
-    expect(world.getProp("the_taskspace", "auto_presence")).toBe(true);
+    expect(world.getProp("the_taskspace", "auto_presence")).toBe(false);
     expect(world.getProp("the_taskspace", "host_placement")).toBe("self");
 
     const session = world.auth("guest:migrated-catalog");
     expect((await world.directCall("enter", session.actor, "the_chatroom", "enter", [])).op).toBe("result");
-    const created = await world.call("create-task", session.id, "the_taskspace", {
+    const created = await callInTaskspace(world, session.id, "create-task", {
       actor: session.actor,
       target: "the_taskspace",
       verb: "create_task",
@@ -1539,7 +1695,7 @@ describe("local catalogs", () => {
     });
     const task = created.op === "applied" ? String(created.observations[0].task) : "";
     expect(world.isDescendantOf(task, "$note")).toBe(true);
-    const subtask = await world.call("add-subtask", session.id, "the_taskspace", {
+    const subtask = await callInTaskspace(world, session.id, "add-subtask", {
       actor: session.actor,
       target: task,
       verb: "add_subtask",
@@ -1576,7 +1732,12 @@ describe("local catalogs", () => {
     const session = world.auth("guest:catalog-repair-look");
     const deckLook = await world.directCall("deck-look-without-presence", session.actor, "the_deck", "look", []);
     expect(deckLook.op).toBe("result");
-    const list = await world.directCall("taskspace-list-guarded", session.actor, "the_taskspace", "list_tasks", []);
+    const list = await callInTaskspace(world, session.id, "taskspace-list-guarded", {
+      actor: session.actor,
+      target: "the_taskspace",
+      verb: "list_tasks",
+      args: []
+    });
     expect(list.op).toBe("result");
   });
 
@@ -1595,7 +1756,7 @@ describe("local catalogs", () => {
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-03-taskspace-task-note-parent");
 
     const session = world.auth("guest:task-note-parent");
-    const created = await world.call("task-note-parent-create", session.id, "the_taskspace", {
+    const created = await callInTaskspace(world, session.id, "task-note-parent-create", {
       actor: session.actor,
       target: "the_taskspace",
       verb: "create_task",
@@ -1666,7 +1827,7 @@ describe("local catalogs", () => {
     expect(state.spaces).toHaveProperty("the_dubspace");
     expect(state.spaces).toHaveProperty("the_taskspace");
     expect(state.spaces).toHaveProperty("the_chatroom");
-    expect((state.objects.the_dubspace as any).props.auto_presence).toBe(true);
+    expect((state.objects.the_dubspace as any).props.auto_presence).toBe(false);
     expect((state.objects.the_dubspace as any).location).toBe("the_chatroom");
     expect((state.objects.the_dubspace as any).props.operators).toEqual([]);
     expect((state.objects.slot_1 as any).props.gain).toBe(0.75);

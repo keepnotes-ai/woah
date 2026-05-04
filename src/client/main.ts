@@ -15,8 +15,8 @@ type AppState = {
   chatFeed: ChatLine[];
   chatPresent: string[];
   chatDraft: string;
-  pinboardChatDraft: string;
-  pinboardChatHeight: number;
+  spaceChatDrafts: Record<string, string>;
+  spaceChatHeights: Record<string, number>;
   observations: any[];
   observationsCollapsed: boolean;
   selectedObject: string;
@@ -91,8 +91,8 @@ const state: AppState = {
   chatFeed: [],
   chatPresent: [],
   chatDraft: "",
-  pinboardChatDraft: "",
-  pinboardChatHeight: 180,
+  spaceChatDrafts: {},
+  spaceChatHeights: {},
   observations: [],
   observationsCollapsed: true,
   selectedObject: "",
@@ -107,7 +107,8 @@ let audio: DubAudio | undefined;
 const sessionKey = "woo.session";
 const chatHistoryKey = "woo.chat.history";
 const pinboardNewColorKey = "woo.pinboard.newColor";
-const pinboardChatHeightKey = "woo.pinboard.chatHeight";
+const legacyPinboardChatHeightKey = "woo.pinboard.chatHeight";
+const spaceChatHeightsKey = "woo.spaceChat.heights";
 const chatHistoryLimit = 80;
 const drumVoices = [
   { id: "kick", label: "Kick" },
@@ -139,8 +140,8 @@ const PINBOARD_GRID_SIZE = 24;
 const PINBOARD_VIEW_ANIMATION_MS = 480;
 const PINBOARD_VIEWPORT_MIN_MS = 110;
 const PINBOARD_MAP_DEFAULT_ASPECT = 0.42;
-const PINBOARD_CHAT_MIN_HEIGHT = 96;
-const PINBOARD_CHAT_MAX_VIEWPORT_RATIO = 0.35;
+const SPACE_CHAT_MIN_HEIGHT = 96;
+const SPACE_CHAT_MAX_VIEWPORT_RATIO = 0.35;
 let reconnectDelayMs = reconnectBaseDelayMs;
 let reconnectTimer: number | undefined;
 let heartbeatTimer: number | undefined;
@@ -153,12 +154,12 @@ const pinNoteClientZ = new Map<string, number>();
 let chatHistory = loadChatHistory();
 let chatHistoryCursor = chatHistory.length;
 let chatHistoryDraft = "";
-state.pinboardChatHeight = loadPinboardChatHeight();
+state.spaceChatHeights = loadSpaceChatHeights();
 
 connect();
 window.setInterval(pruneLiveControls, 700);
 window.addEventListener("resize", () => {
-  state.pinboardChatHeight = normalizePinboardChatHeight(state.pinboardChatHeight);
+  normalizeSpaceChatHeights();
   schedulePinboardViewportPublish();
   window.requestAnimationFrame(updatePinboardMapViewports);
 });
@@ -571,6 +572,25 @@ function callWithError(space: string, target: string, verb: string, args: any[] 
   return id;
 }
 
+function actorPresentInSpace(space: string) {
+  const actor = state.actor;
+  if (!actor) return false;
+  const raw = state.world?.objects?.[space]?.props?.subscribers;
+  return Array.isArray(raw) && raw.includes(actor);
+}
+
+function ensureSpacePresence(space: string, onReady: () => void, onError?: (error: any) => void) {
+  if (!space || !canSendDirect()) {
+    onReady();
+    return;
+  }
+  if (actorPresentInSpace(space)) {
+    onReady();
+    return;
+  }
+  direct(space, "enter", [], onReady, onError);
+}
+
 function direct(target: string, verb: string, args: any[] = [], onResult?: (result: any) => void, onError?: (error: any) => void) {
   const id = crypto.randomUUID();
   if (onResult) pendingDirect.set(id, onResult);
@@ -961,6 +981,7 @@ function renderDubspace() {
   const dub = effectiveDubspace();
   const meta = state.world?.dubspaceMeta ?? {};
   const space = meta.space ? dub[meta.space] : null;
+  const spaceId = typeof meta.space === "string" ? meta.space : "";
   const operators = dubspaceOperators();
   const inSpace = Boolean(state.actor && operators.includes(state.actor));
   const slots = Array.isArray(meta.slots) ? meta.slots : [];
@@ -996,7 +1017,7 @@ function renderDubspace() {
       <button data-save-scene>Save Scene</button>
       <button data-recall-scene>Recall Scene</button>
     </section>
-    <section class="dubspace-layout">
+    <section class="dubspace-layout has-space-chat" style="--space-chat-h:${Math.round(spaceChatHeight(spaceId))}px">
       <div class="dubspace-work">
         <div class="grid">
           <article class="panel loop-console-panel">
@@ -1024,6 +1045,7 @@ function renderDubspace() {
       </div>
       ${renderDubspacePresence(operators)}
     </section>
+    ${spaceId ? renderSpaceChatPanel(spaceId) : ""}
   `;
 }
 
@@ -1089,6 +1111,7 @@ function slider(obj: string, prop: string, value: number) {
 }
 
 function bindDubspace() {
+  bindSpaceChatPanels();
   document.querySelector<HTMLButtonElement>("[data-dubspace-enter]")?.addEventListener("click", enterDubspace);
   document.querySelector<HTMLButtonElement>("[data-dubspace-leave]")?.addEventListener("click", () => leaveDubspace());
   document.querySelector<HTMLButtonElement>("[data-audio]")?.addEventListener("click", async () => {
@@ -1588,7 +1611,7 @@ function chatSystemText(observation: any): string | undefined {
 }
 
 function chatObservationSource(observation: any): string | undefined {
-  for (const key of ["source", "room", "board"]) {
+  for (const key of ["source", "room", "board", "space"]) {
     const value = observation?.[key];
     if (typeof value === "string" && value) return value;
   }
@@ -1601,7 +1624,7 @@ function pushChatLine(line: ChatLine, shouldRender = true) {
 }
 
 function currentTabHasChatPanel(): boolean {
-  return ["chat", "pinboard"].includes(state.tab);
+  return ["chat", "dubspace", "pinboard", "taskspace"].includes(state.tab);
 }
 
 function loadChatHistory(): string[] {
@@ -1624,19 +1647,51 @@ function saveChatHistory() {
   }
 }
 
-function loadPinboardChatHeight(): number {
-  return normalizePinboardChatHeight(Number(readStorage(pinboardChatHeightKey) ?? "180"));
+function loadSpaceChatHeights(): Record<string, number> {
+  const heights: Record<string, number> = {};
+  try {
+    const parsed = JSON.parse(readStorage(spaceChatHeightsKey) ?? "{}");
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      for (const [space, value] of Object.entries(parsed)) heights[space] = normalizeSpaceChatHeight(Number(value));
+    }
+  } catch {
+    // Per-space chat sizing is a UI preference only.
+  }
+  const legacyPinboardHeight = Number(readStorage(legacyPinboardChatHeightKey));
+  if (Number.isFinite(legacyPinboardHeight) && heights.the_pinboard === undefined) {
+    heights.the_pinboard = normalizeSpaceChatHeight(legacyPinboardHeight);
+  }
+  return heights;
 }
 
-function savePinboardChatHeight(value: number) {
-  const height = normalizePinboardChatHeight(value);
-  state.pinboardChatHeight = height;
-  writeStorage(pinboardChatHeightKey, String(Math.round(height)));
+function saveSpaceChatHeight(space: string, value: number) {
+  if (!space) return;
+  state.spaceChatHeights = { ...state.spaceChatHeights, [space]: normalizeSpaceChatHeight(value) };
+  writeStorage(spaceChatHeightsKey, JSON.stringify(state.spaceChatHeights));
 }
 
-function normalizePinboardChatHeight(value: number): number {
-  const max = Math.max(PINBOARD_CHAT_MIN_HEIGHT, Math.round(window.innerHeight * PINBOARD_CHAT_MAX_VIEWPORT_RATIO));
-  return clamp(Number.isFinite(value) ? value : 180, PINBOARD_CHAT_MIN_HEIGHT, max);
+function spaceChatHeight(space: string): number {
+  return normalizeSpaceChatHeight(state.spaceChatHeights[space] ?? 180);
+}
+
+function normalizeSpaceChatHeights() {
+  state.spaceChatHeights = Object.fromEntries(
+    Object.entries(state.spaceChatHeights).map(([space, height]) => [space, normalizeSpaceChatHeight(height)])
+  );
+}
+
+function normalizeSpaceChatHeight(value: number): number {
+  const max = Math.max(SPACE_CHAT_MIN_HEIGHT, Math.round(window.innerHeight * SPACE_CHAT_MAX_VIEWPORT_RATIO));
+  return clamp(Number.isFinite(value) ? value : 180, SPACE_CHAT_MIN_HEIGHT, max);
+}
+
+function spaceChatDraft(space: string): string {
+  return state.spaceChatDrafts[space] ?? "";
+}
+
+function setSpaceChatDraft(space: string, value: string) {
+  if (!space) return;
+  state.spaceChatDrafts = { ...state.spaceChatDrafts, [space]: value };
 }
 
 function rememberChatInput(text: string) {
@@ -1650,7 +1705,7 @@ function rememberChatInput(text: string) {
 
 function setChatInputValue(input: HTMLInputElement, value: string) {
   input.value = value;
-  if (input.dataset.pinboardChatInput !== undefined) state.pinboardChatDraft = value;
+  if (input.dataset.spaceChatInput !== undefined) setSpaceChatDraft(input.dataset.spaceChatSpace ?? "", value);
   else state.chatDraft = value;
   input.setSelectionRange(value.length, value.length);
 }
@@ -1815,8 +1870,8 @@ function bindChat() {
   scrollChatFeedToEnd();
 }
 
-function scrollChatFeedToEnd(selector = ".chat-feed") {
-  const feed = document.querySelector<HTMLElement>(selector);
+function scrollChatFeedToEnd(target: string | HTMLElement = ".chat-feed") {
+  const feed = typeof target === "string" ? document.querySelector<HTMLElement>(target) : target;
   if (!feed) return;
   feed.scrollTop = feed.scrollHeight;
 }
@@ -1829,9 +1884,19 @@ function focusChatInput() {
   });
 }
 
+function focusSpaceChatInput(space: string) {
+  window.requestAnimationFrame(() => {
+    const input = document.querySelector<HTMLInputElement>(`[data-space-chat-input][data-space-chat-space="${cssAttrValue(space)}"]`);
+    input?.focus();
+    if (input) input.setSelectionRange(input.value.length, input.value.length);
+  });
+}
+
 function sendChatInput(space: string, text: string) {
   if (!space) return;
-  direct(space, "command_plan", [text], (plan) => executeChatPlan(space, plan, text), receiveChatError);
+  ensureSpacePresence(space, () => {
+    direct(space, "command_plan", [text], (plan) => executeChatPlan(space, plan, text), receiveChatError);
+  }, receiveChatError);
 }
 
 function executeChatPlan(currentSpace: string, plan: any, originalText: string) {
@@ -1857,15 +1922,17 @@ function renderChatCommandResult(plan: any, result: any, originalText: string) {
   if (verb === "enter" && target === dubspaceSpace()) {
     setDubspaceOperators(result);
     state.tab = "dubspace";
-    void refresh();
+    void refresh().then(() => focusSpaceChatInput(target));
     render();
+    focusSpaceChatInput(target);
     return;
   }
   if (verb === "enter" && target === pinboardSpace()) {
     setPinboardPresent(result);
     state.tab = "pinboard";
-    void refresh();
+    void refresh().then(() => focusSpaceChatInput(target));
     render();
+    focusSpaceChatInput(target);
     return;
   }
   if (verb === "who") {
@@ -1942,7 +2009,7 @@ function renderPinboard() {
       <h1>${escapeHtml(board.name ?? "Pinboard")}</h1>
       ${inBoard ? `<button data-pinboard-leave>Leave</button>` : `<button data-pinboard-enter ${canSendDirect() ? "" : "disabled"}>Enter</button>`}
     </section>
-    <section class="pinboard-layout" style="--pinboard-chat-h:${Math.round(normalizePinboardChatHeight(state.pinboardChatHeight))}px">
+    <section class="pinboard-layout has-space-chat" style="--space-chat-h:${Math.round(spaceChatHeight(board.id))}px">
       <div class="pinboard-work">
         ${inBoard ? renderPinboardCreate(pinboard.palette) : ""}
         <div class="panel pinboard-stage-panel">
@@ -1963,25 +2030,25 @@ function renderPinboard() {
         <div data-pinboard-map-shell>${renderPinboardMap(notes, present, width, height)}</div>
       </aside>
     </section>
-    ${inBoard ? renderPinboardChatPanel(board.id) : ""}
+    ${inBoard ? renderSpaceChatPanel(board.id) : ""}
   `;
 }
 
-function renderPinboardChatPanel(boardId: string) {
-  const lines = chatLinesForSpace(boardId);
-  const height = Math.round(normalizePinboardChatHeight(state.pinboardChatHeight));
+function renderSpaceChatPanel(space: string) {
+  const lines = chatLinesForSpace(space);
+  const height = Math.round(spaceChatHeight(space));
   return `
-    <section class="panel pinboard-chat-panel" data-pinboard-chat-panel style="height:${height}px">
-      <div class="pinboard-chat-resizer" data-pinboard-chat-resizer role="separator" aria-orientation="horizontal" aria-label="Resize pinboard chat"></div>
-      <div class="pinboard-chat-head">
+    <section class="panel space-chat-panel" data-space-chat-panel data-space-chat-space="${escapeHtml(space)}" style="height:${height}px">
+      <div class="space-chat-resizer" data-space-chat-resizer role="separator" aria-orientation="horizontal" aria-label="Resize space chat"></div>
+      <div class="space-chat-head">
         <h2>Chat</h2>
-        <span>${escapeHtml(boardId)}</span>
+        <span>${escapeHtml(space)}</span>
       </div>
-      <div class="chat-feed pinboard-chat-feed" aria-live="polite">
+      <div class="chat-feed space-chat-feed" data-space-chat-feed aria-live="polite">
         ${lines.map(renderChatLine).join("") || `<div class="chat-empty">No chat events yet.</div>`}
       </div>
-      <form class="chat-form pinboard-chat-form" data-pinboard-chat-form>
-        <input data-pinboard-chat-input autocomplete="off" placeholder="say something, /me waves, look, drop note" value="${escapeHtml(state.pinboardChatDraft)}" />
+      <form class="chat-form space-chat-form" data-space-chat-form data-space-chat-space="${escapeHtml(space)}">
+        <input data-space-chat-input data-space-chat-space="${escapeHtml(space)}" autocomplete="off" placeholder="say something, /me waves, look, drop note" value="${escapeHtml(spaceChatDraft(space))}" />
         <button>Send</button>
       </form>
     </section>
@@ -2265,44 +2332,49 @@ function bindPinboard() {
   });
   bindPinboardMap();
   bindPinboardViewport();
-  bindPinboardChat();
+  bindSpaceChatPanels();
 }
 
-function bindPinboardChat() {
-  const input = document.querySelector<HTMLInputElement>("[data-pinboard-chat-input]");
+function bindSpaceChatPanels() {
+  document.querySelectorAll<HTMLElement>("[data-space-chat-panel]").forEach(bindSpaceChatPanel);
+}
+
+function bindSpaceChatPanel(panel: HTMLElement) {
+  const space = panel.dataset.spaceChatSpace ?? "";
+  const input = panel.querySelector<HTMLInputElement>("[data-space-chat-input]");
   input?.addEventListener("keydown", (event) => navigateChatHistory(event, input));
   input?.addEventListener("input", (event) => {
-    state.pinboardChatDraft = (event.currentTarget as HTMLInputElement).value;
+    setSpaceChatDraft(space, (event.currentTarget as HTMLInputElement).value);
     chatHistoryCursor = chatHistory.length;
-    chatHistoryDraft = state.pinboardChatDraft;
+    chatHistoryDraft = spaceChatDraft(space);
   });
-  document.querySelector<HTMLFormElement>("[data-pinboard-chat-form]")?.addEventListener("submit", (event) => {
+  panel.querySelector<HTMLFormElement>("[data-space-chat-form]")?.addEventListener("submit", (event) => {
     event.preventDefault();
     const text = input?.value.trim() ?? "";
     if (!text) return;
     rememberChatInput(text);
-    state.pinboardChatDraft = "";
-    sendChatInput(pinboardSpace(), text);
+    setSpaceChatDraft(space, "");
+    sendChatInput(space, text);
     if (input) {
       input.value = "";
       input.focus();
     }
   });
-  const panel = document.querySelector<HTMLElement>("[data-pinboard-chat-panel]");
   if (panel && "ResizeObserver" in window) {
     const observer = new ResizeObserver((entries) => {
       const height = entries[0]?.contentRect.height;
-      if (typeof height === "number" && Math.abs(height - state.pinboardChatHeight) > 1) savePinboardChatHeight(height);
+      if (typeof height === "number" && Math.abs(height - spaceChatHeight(space)) > 1) saveSpaceChatHeight(space, height);
     });
     observer.observe(panel);
   }
-  bindPinboardChatResize(panel);
-  scrollChatFeedToEnd(".pinboard-chat-feed");
+  bindSpaceChatResize(panel);
+  scrollChatFeedToEnd(panel.querySelector<HTMLElement>("[data-space-chat-feed]") ?? undefined);
 }
 
-function bindPinboardChatResize(panel: HTMLElement | null) {
-  const handle = document.querySelector<HTMLElement>("[data-pinboard-chat-resizer]");
+function bindSpaceChatResize(panel: HTMLElement | null) {
+  const handle = panel?.querySelector<HTMLElement>("[data-space-chat-resizer]");
   if (!panel || !handle) return;
+  const space = panel.dataset.spaceChatSpace ?? "";
   handle.addEventListener("pointerdown", (event) => {
     event.preventDefault();
     const startY = event.clientY;
@@ -2310,15 +2382,15 @@ function bindPinboardChatResize(panel: HTMLElement | null) {
     handle.setPointerCapture(event.pointerId);
     panel.classList.add("is-resizing");
     const move = (moveEvent: PointerEvent) => {
-      const height = normalizePinboardChatHeight(startHeight - (moveEvent.clientY - startY));
-      applyPinboardChatHeight(panel, height);
+      const height = normalizeSpaceChatHeight(startHeight - (moveEvent.clientY - startY));
+      applySpaceChatHeight(panel, height);
     };
     const up = (upEvent: PointerEvent) => {
       handle.releasePointerCapture(upEvent.pointerId);
       panel.classList.remove("is-resizing");
       document.removeEventListener("pointermove", move);
       document.removeEventListener("pointerup", up);
-      savePinboardChatHeight(panel.getBoundingClientRect().height);
+      saveSpaceChatHeight(space, panel.getBoundingClientRect().height);
       schedulePinboardViewportPublish();
       window.requestAnimationFrame(updatePinboardMapViewports);
     };
@@ -2327,11 +2399,12 @@ function bindPinboardChatResize(panel: HTMLElement | null) {
   });
 }
 
-function applyPinboardChatHeight(panel: HTMLElement, height: number) {
-  state.pinboardChatHeight = height;
+function applySpaceChatHeight(panel: HTMLElement, height: number) {
+  const space = panel.dataset.spaceChatSpace ?? "";
+  if (space) state.spaceChatHeights = { ...state.spaceChatHeights, [space]: height };
   const rounded = `${Math.round(height)}px`;
   panel.style.height = rounded;
-  document.querySelector<HTMLElement>(".pinboard-layout")?.style.setProperty("--pinboard-chat-h", rounded);
+  panel.parentElement instanceof HTMLElement && panel.parentElement.style.setProperty("--space-chat-h", rounded);
 }
 
 function bringPinNoteToTop(id: string) {
@@ -2811,6 +2884,7 @@ function pinboardPalette(palette: any): string[] {
 
 function renderTaskspace() {
   const taskspace = state.world?.taskspace;
+  const space = taskspaceSpace();
   const tasks = taskspace?.tasks ?? {};
   const roots = Array.isArray(taskspace?.root_tasks) ? taskspace.root_tasks : [];
   const selected = state.selectedTask ? tasks[state.selectedTask] : undefined;
@@ -2827,7 +2901,7 @@ function renderTaskspace() {
         ${taskStatuses.map((status) => renderStatusFilter(status, statusCounts[status] ?? 0)).join("")}
       </div>
     </section>
-    <section class="taskspace-layout">
+    <section class="taskspace-layout has-space-chat" style="--space-chat-h:${Math.round(spaceChatHeight(space))}px">
       <div class="panel tree">
         <div class="task-create">
           <input data-new-title placeholder="Root task title" />
@@ -2840,6 +2914,7 @@ function renderTaskspace() {
       </div>
       <div class="panel inspector">${selected ? renderTaskInspector(selected, tasks) : `<div class="empty-state">Select a task.</div>`}</div>
     </section>
+    ${space ? renderSpaceChatPanel(space) : ""}
   `;
 }
 
@@ -3016,6 +3091,7 @@ function firstMatchingTask(ids: string[], tasks: any, active: Set<string>): stri
 }
 
 function bindTaskspace() {
+  bindSpaceChatPanels();
   document.querySelectorAll<HTMLButtonElement>("[data-task-status]").forEach((button) => {
     button.addEventListener("click", () => {
       const status = button.dataset.taskStatus!;

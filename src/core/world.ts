@@ -71,6 +71,7 @@ type CommandVerbSummary = {
   name: string;
   definer?: ObjRef | null;
   direct_callable: boolean;
+  arg_spec?: Record<string, WooValue>;
 };
 
 export type CallContext = {
@@ -4759,6 +4760,7 @@ export class WooWorld {
 
   private async canSeeCommandObject(ctx: CallContext, target: ObjRef): Promise<boolean> {
     if (this.isWizard(ctx.actor)) return true;
+    if (target === ctx.caller) return true;
     const location = await this.publicCommandLocation(ctx, ctx.actor, undefined);
     return (await this.commandVisibleCandidates(ctx, ctx.actor, location)).includes(target);
   }
@@ -4908,10 +4910,10 @@ export class WooWorld {
       try {
         if (await this.remoteHostForObject(target, ctx.hostMemo)) {
           const resolved = await this.tryResolveVerbForCommand(ctx, target, name);
-          return resolved ? { name: resolved.name, definer: null, direct_callable: resolved.direct_callable } : (this.objects.has("$failed_match") ? "$failed_match" : null);
+          return resolved ? { name: resolved.name, definer: null, direct_callable: resolved.direct_callable, arg_spec: resolved.arg_spec ?? {} } : (this.objects.has("$failed_match") ? "$failed_match" : null);
         }
         const { definer, verb } = this.resolveVerb(target, name);
-        return { name: verb.name, definer, direct_callable: verb.direct_callable === true };
+        return { name: verb.name, definer, direct_callable: verb.direct_callable === true, arg_spec: verb.arg_spec ?? {} };
       } catch {
         return this.objects.has("$failed_match") ? "$failed_match" : null;
       }
@@ -4943,11 +4945,44 @@ export class WooWorld {
   }
 
   private async defaultLookSelf(ctx: CallContext): Promise<WooValue> {
+    const title = await this.titleForLook(ctx, ctx.caller, ctx.thisObj);
+    const description = this.propOrNullForActor(ctx.actor, ctx.thisObj, "description");
+    if (this.objects.has(ctx.thisObj) && this.inheritsFrom(ctx.thisObj, "$actor")) {
+      const carried = await this.carriedLookEntries(ctx);
+      return {
+        id: ctx.thisObj,
+        title,
+        description: this.actorDescriptionWithCarrying(ctx, title, typeof description === "string" ? description : "", carried),
+        carrying: carried
+      } as unknown as WooValue;
+    }
     return {
       id: ctx.thisObj,
-      title: await this.titleForLook(ctx, ctx.caller, ctx.thisObj),
-      description: this.propOrNullForActor(ctx.actor, ctx.thisObj, "description")
+      title,
+      description
     } as unknown as WooValue;
+  }
+
+  private async carriedLookEntries(ctx: CallContext): Promise<Record<string, WooValue>[]> {
+    const items = await this.objectContents(ctx.thisObj, ctx.hostMemo);
+    return await Promise.all(items.map(async (item) => ({
+      id: item,
+      title: await this.titleForLook(ctx, ctx.thisObj, item),
+      description: await this.propOrNullForActorAsync(ctx.actor, item, "description", ctx.hostMemo)
+    })));
+  }
+
+  private actorDescriptionWithCarrying(ctx: CallContext, title: string, description: string, carried: Record<string, WooValue>[]): string {
+    if (carried.length === 0) return description;
+    const names = carried.map((item) => typeof item.title === "string" && item.title ? item.title : String(item.id ?? "")).filter(Boolean);
+    const inventory = this.inventorySentence(ctx.thisObj === ctx.actor ? "You are" : `${title} is`, names);
+    return [description, inventory].filter(Boolean).join(" ");
+  }
+
+  private inventorySentence(prefix: string, names: string[]): string {
+    if (names.length === 0) return `${prefix} carrying nothing.`;
+    if (names.length === 1) return `${prefix} carrying ${names[0]}.`;
+    return `${prefix} carrying ${names.slice(0, -1).join(", ")}, and ${names.at(-1)}.`;
   }
 
   private async spaceLookSelf(ctx: CallContext): Promise<WooValue> {
@@ -5311,7 +5346,7 @@ export class WooWorld {
         } catch {
           // Matching remains available by object id/name if a custom title fails.
         }
-        this.addLocalNoteMatchNames(ctx, id, names);
+        await this.addLocalNoteMatchNames(ctx, id, names);
         const localAliases = this.propOrNull(id, "aliases");
         if (Array.isArray(localAliases)) aliases.push(...localAliases.map((item) => String(item)));
       }
@@ -5325,13 +5360,14 @@ export class WooWorld {
     return this.resolveObjectMatch(exact.length > 0 ? exact : alias.length > 0 ? alias : prefix.length > 0 ? prefix : contains);
   }
 
-  private addLocalNoteMatchNames(ctx: CallContext, id: ObjRef, names: string[]): void {
+  private async addLocalNoteMatchNames(ctx: CallContext, id: ObjRef, names: string[]): Promise<void> {
     if (!this.isDescendantOf(id, "$note")) return;
-    const color = this.propOrNull(id, "color");
+    const color = this.propOrNullForActor(ctx.actor, id, "color");
     if (typeof color === "string" && color && color !== "white") {
-      names.push(`${color} note`, `the ${color} note`, `${color} sticky note`, `the ${color} sticky note`);
+      const objectName = this.object(id).name.trim() || "note";
+      names.push(`${color} note`, `the ${color} note`, `${color} ${objectName}`, `the ${color} ${objectName}`);
     }
-    const text = this.propOrNull(id, "text");
+    const text = await this.dispatch({ ...ctx, caller: ctx.thisObj, progr: ctx.actor }, id, "text", []).catch(() => null);
     if (Array.isArray(text)) {
       for (const line of text) {
         if (typeof line === "string" && line.trim()) names.push(line.trim());

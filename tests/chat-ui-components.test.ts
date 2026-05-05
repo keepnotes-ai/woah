@@ -106,6 +106,7 @@ describe("chat catalog UI components", () => {
     document.body.append(element);
 
     expect(element.dataset.spaceChatSpace).toBe("the_pinboard");
+    expect(element.style.height).toBe("280px");
     expect(element.querySelector<HTMLInputElement>("[data-space-chat-input]")?.dataset.spaceChatSpace).toBe("the_pinboard");
 
     let detail: Record<string, unknown> | undefined;

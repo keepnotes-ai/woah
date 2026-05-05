@@ -846,7 +846,7 @@ input[type="range"] {
   grid-template-columns: minmax(0, 1fr) 230px;
   gap: 1rem;
   align-items: stretch;
-  height: calc(100dvh - 5.25rem - var(--space-chat-h, 180px) - 0.8rem);
+  height: calc(100dvh - 5.25rem - var(--space-chat-h, 280px) - 0.8rem);
   min-height: 0;
 }
 
@@ -860,7 +860,7 @@ input[type="range"] {
   height: calc(100dvh - 5.25rem);
   min-height: 0;
   display: grid;
-  grid-template-rows: minmax(420px, calc(100dvh - 5.25rem - var(--space-chat-h, 180px) - 0.8rem)) auto;
+  grid-template-rows: minmax(0, 1fr) var(--space-chat-h, 280px);
   gap: 0.8rem;
   overflow: hidden;
 }
@@ -923,9 +923,9 @@ input[type="range"] {
 
 .space-chat-panel {
   position: relative;
-  height: var(--space-chat-h, 180px);
-  min-height: 96px;
-  max-height: 35vh;
+  height: var(--space-chat-h, 280px);
+  min-height: 220px;
+  max-height: 45vh;
   overflow: hidden;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
@@ -1009,7 +1009,7 @@ input[type="range"] {
 
 .pinboard-layout:not(.has-space-chat) .pinboard-stage-panel {
   min-height: 0;
-  height: calc(100dvh - 5.25rem - var(--space-chat-h, 180px) - 0.8rem - 2.85rem - 0.25rem);
+  height: calc(100dvh - 5.25rem - var(--space-chat-h, 280px) - 0.8rem - 2.85rem - 0.25rem);
 }
 
 [data-pinboard-map-shell] {

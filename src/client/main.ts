@@ -55,6 +55,12 @@ function bundledSeedRef(manifest: any, classRef: string): string {
   return String(manifest?.seed_hooks?.find((hook: any) => hook?.kind === "create_instance" && hook?.class === classRef)?.as ?? "");
 }
 
+function bundledSeedRefs(manifest: any, classRef: string): string[] {
+  return (manifest?.seed_hooks ?? [])
+    .filter((hook: any) => hook?.kind === "create_instance" && hook?.class === classRef && typeof hook.as === "string")
+    .map((hook: any) => String(hook.as));
+}
+
 type RenderFocusSnapshot = {
   tab: AppState["tab"];
   selector: string;
@@ -184,8 +190,9 @@ const PINBOARD_GRID_SIZE = 24;
 const PINBOARD_VIEW_ANIMATION_MS = 480;
 const PINBOARD_VIEWPORT_MIN_MS = 110;
 const PINBOARD_MAP_DEFAULT_ASPECT = 0.42;
-const SPACE_CHAT_MIN_HEIGHT = 96;
-const SPACE_CHAT_MAX_VIEWPORT_RATIO = 0.35;
+const SPACE_CHAT_DEFAULT_HEIGHT = 280;
+const SPACE_CHAT_MIN_HEIGHT = 220;
+const SPACE_CHAT_MAX_VIEWPORT_RATIO = 0.45;
 const TAB_FROM_VIEW: Record<string, AppState["tab"]> = {
   chat: "chat",
   dubspace: "dubspace",
@@ -289,7 +296,7 @@ function connect() {
         }
       }
       forgetLiveControls(observations);
-      for (const observation of observations) if (isControlChangedObservation(observation)) receiveControlChangedObservation(observation);
+      if (observations.some((observation: any) => isDubspaceStateObservation(observation))) syncDubspaceProjectionEffects();
       rememberTaskObservations(observations, typeof frame.id === "string" ? frame.id : undefined);
       for (const observation of observations) if (isChatObservation(observation)) receiveChatEvent(observation, false);
       state.observations.unshift({ seq: frame.seq, space: frame.space, observations, message: frame.message });
@@ -1090,6 +1097,31 @@ function objectView(world: any, id: string | undefined) {
   return { id, name: obj.name ?? id, owner: obj.owner, parent: obj.parent, location: obj.location, props: obj.props ?? {} };
 }
 
+function projectedObjectView(id: string | undefined) {
+  if (!id) return null;
+  const projected = ui.observe(id);
+  if (projected) {
+    return {
+      id,
+      name: projected.name ?? id,
+      owner: projected.owner,
+      parent: projected.parent,
+      location: projected.location,
+      props: { ...(projected.props ?? {}) }
+    };
+  }
+  const fallback = state.world?.dubspace?.[id] ?? objectView(state.world, id);
+  if (!fallback) return null;
+  return {
+    id,
+    name: fallback.name ?? id,
+    owner: fallback.owner,
+    parent: fallback.parent,
+    location: fallback.location,
+    props: { ...(fallback.props ?? {}) }
+  };
+}
+
 function objectName(world: any, id: string) {
   return String(world.objects?.[id]?.name ?? id);
 }
@@ -1097,7 +1129,10 @@ function objectName(world: any, id: string) {
 function buildDubspaceMeta(world: any) {
   const catalog = installedCatalog(world, "dubspace");
   const space = firstObjectByParent(world, catalogClass(catalog, "$dubspace")) ?? installedCatalogSeed(world, "dubspace", bundledToolSeeds.dubspace);
-  const byClass = (localName: string) => objectsByParent(world, catalogClass(catalog, localName), space);
+  const byClass = (localName: string) => {
+    const ids = objectsByParent(world, catalogClass(catalog, localName), space);
+    return ids.length > 0 ? ids : bundledSeedRefs(dubspaceManifest, localName);
+  };
   return {
     space,
     slots: byClass("$loop_slot"),
@@ -1110,8 +1145,17 @@ function buildDubspaceMeta(world: any) {
 }
 
 function projectDubspace(world: any, meta: any) {
-  const ids = [meta.space, ...(meta.slots ?? []), meta.channel, meta.filter, meta.delay, meta.drum, meta.scene].filter(Boolean);
+  const ids = dubspaceObjectIds(meta);
   return Object.fromEntries(ids.map((id: string) => [id, objectView(world, id)]).filter(([, view]) => view));
+}
+
+function dubspaceObjectIds(meta: any): string[] {
+  return [meta?.space, ...(Array.isArray(meta?.slots) ? meta.slots : []), meta?.channel, meta?.filter, meta?.delay, meta?.drum, meta?.scene]
+    .filter((id): id is string => typeof id === "string" && Boolean(id));
+}
+
+function projectedDubspace(meta: any = state.world?.dubspaceMeta ?? {}) {
+  return Object.fromEntries(dubspaceObjectIds(meta).map((id: string) => [id, projectedObjectView(id)]).filter(([, view]) => view));
 }
 
 function buildTaskspaceMeta(world: any) {
@@ -1280,7 +1324,7 @@ function chatRoom() {
 }
 
 function defaultChatRoom() {
-  if (scopedProjectionEnabled) return String(state.scopedProjection?.here?.id ?? "");
+  if (scopedProjectionEnabled) return String(state.scopedProjection?.here?.id ?? bundledDefaultChatRoom ?? "");
   return String(state.world?.chatMeta?.defaultRoom ?? "");
 }
 
@@ -1288,7 +1332,8 @@ function activeChatRoom() {
   const room = chatRoom();
   if (room) return room;
   const route = startupRoute ?? parseLocationRoute(location.pathname, location.search);
-  return state.tab === "chat" && route?.objectId === bundledDefaultChatRoom ? route.objectId : "";
+  if (state.tab === "chat" && route?.objectId === bundledDefaultChatRoom) return route.objectId;
+  return state.tab === "chat" ? defaultChatRoom() : "";
 }
 
 function call(space: string, target: string, verb: string, args: unknown[] = [], options?: ProjectionCallOptions) {
@@ -1378,7 +1423,8 @@ function liveKey(target: string, name: string) {
 }
 
 function effectiveDubspace() {
-  const base = state.world?.dubspace ?? {};
+  ui.prune();
+  const base = projectedDubspace();
   const copy: Record<string, any> = Object.fromEntries(
     Object.entries(base).map(([id, obj]: [string, any]) => [
       id,
@@ -1388,11 +1434,6 @@ function effectiveDubspace() {
       }
     ])
   );
-  ui.prune();
-  for (const id of Object.keys(copy)) {
-    const projected = ui.observe(id);
-    if (projected) copy[id].props = { ...copy[id].props, ...projected.props };
-  }
   for (const [slot, cue] of Object.entries(state.cueSlots)) {
     if (cue && copy[slot]) copy[slot].props.playing = state.cuePlaying[slot] === true;
   }
@@ -1412,6 +1453,42 @@ function sendPreviewControl(target: string, name: string, value: any) {
   directThrottle.set(key, Date.now());
   const space = dubspaceSpace();
   if (space) direct(space, "preview_control", [target, name, value]);
+}
+
+function dubspaceOptimisticProps(target: string, props: Record<string, unknown>, id = `${target}:${Object.keys(props).sort().join(",")}`): ProjectionCallOptions | undefined {
+  if (!target || Object.keys(props).length === 0) return undefined;
+  return {
+    optimistic: {
+      id: `dubspace:${id}`,
+      patches: [{ subject: target, props }],
+      reconcile: "drop_on_applied"
+    }
+  };
+}
+
+function patchDubspaceProjectionProps(target: string, props: Record<string, unknown>) {
+  if (!target || Object.keys(props).length === 0) return;
+  ui.applyCanonical([{ subject: target, props }]);
+  if (state.world?.objects?.[target]?.props) Object.assign(state.world.objects[target].props, props);
+  if (state.world?.dubspace?.[target]?.props) Object.assign(state.world.dubspace[target].props, props);
+}
+
+function callDubspaceMutation(verb: string, args: unknown[], options?: ProjectionCallOptions) {
+  const space = dubspaceSpace();
+  if (!space) return "";
+  const id = call(space, space, verb, args, options);
+  audio?.sync(effectiveDubspace(), state.clockOffset);
+  if (state.tab === "dubspace") render();
+  return id;
+}
+
+function patternWithStep(rawPattern: any, voice: string, step: number, enabled: boolean) {
+  // Used for local optimistic drum-button patches. Since dubspace 0.2.4,
+  // server `drum_step_changed` observations carry the full pattern snapshot.
+  const pattern = normalizePattern(rawPattern);
+  if (!pattern[voice] || step < 0 || step >= pattern[voice].length) return pattern;
+  pattern[voice] = pattern[voice].map((value, index) => index === step ? enabled : value);
+  return pattern;
 }
 
 function setCueControl(target: string, name: string, value: any) {
@@ -1500,9 +1577,9 @@ function receiveLiveEvent(observation: any) {
     receiveChatEvent(observation);
     return;
   }
-  if (isControlChangedObservation(observation)) {
-    receiveControlChangedObservation(observation);
-    scheduleRefresh();
+  if (isDubspaceStateObservation(observation)) {
+    syncDubspaceProjectionEffects(observation);
+    if (!scopedProjectionEnabled && String(observation?.type ?? "") === "control_changed") scheduleRefresh();
     return;
   }
   if (observation?.type === "gesture_progress") {
@@ -1524,19 +1601,27 @@ function receiveLiveControl(observation: any) {
   audio?.sync(effectiveDubspace(), state.clockOffset);
 }
 
-function isControlChangedObservation(observation: any) {
-  return String(observation?.type ?? "") === "control_changed";
+function isDubspaceStateObservation(observation: any) {
+  return [
+    "control_changed",
+    "loop_started",
+    "loop_stopped",
+    "tempo_changed",
+    "transport_started",
+    "transport_stopped",
+    "drum_step_changed",
+    "scene_recalled"
+  ].includes(String(observation?.type ?? ""));
 }
 
-function receiveControlChangedObservation(observation: any) {
-  const target = String(observation.target ?? "");
-  const name = String(observation.name ?? "");
-  if (target && name) {
-    if (state.world?.objects?.[target]?.props) state.world.objects[target].props[name] = observation.value;
-    if (state.world?.dubspace?.[target]?.props) state.world.dubspace[target].props[name] = observation.value;
+function syncDubspaceProjectionEffects(observation?: any) {
+  if (String(observation?.type ?? "") === "control_changed") {
+    const target = String(observation.target ?? "");
+    const name = String(observation.name ?? "");
+    const input = findControlInput(target, name);
+    const projected = target && name ? projectedObjectView(target)?.props?.[name] : undefined;
+    if (input && document.activeElement !== input) setControlInputValue(input, projected ?? observation.value);
   }
-  const input = findControlInput(String(observation.target), String(observation.name));
-  if (input && document.activeElement !== input) setControlInputValue(input, observation.value);
   audio?.sync(effectiveDubspace(), state.clockOffset);
 }
 
@@ -1884,7 +1969,7 @@ function renderDubspacePresence(operators: string[]) {
 
 function dubspaceOperators(): string[] {
   const space = dubspaceSpace();
-  const raw = space ? state.world?.dubspace?.[space]?.props?.operators : [];
+  const raw = space ? projectedObjectView(space)?.props?.operators : [];
   return Array.isArray(raw) ? raw.map(String) : [];
 }
 
@@ -1906,7 +1991,7 @@ function renderFilterStrip(filter: any) {
 function renderLoopStrip(id: string, index: number, dub: any) {
   const slot = dub[id]?.props ?? {};
   const cue = state.cueSlots[id] === true;
-  const serverPlaying = state.world?.dubspace?.[id]?.props?.playing === true;
+  const serverPlaying = projectedObjectView(id)?.props?.playing === true;
   const buttonPlaying = cue ? state.cuePlaying[id] === true : serverPlaying;
   const freq = slot.freq ?? defaultLoopFreq(index);
   const pitch = loopPitch(freq);
@@ -1959,8 +2044,7 @@ function bindDubspace() {
         render();
         return;
       }
-      const space = dubspaceSpace();
-      if (space) call(space, space, playing ? "stop_loop" : "start_loop", [slot]);
+      callDubspaceMutation(playing ? "stop_loop" : "start_loop", [slot], dubspaceOptimisticProps(slot, { playing: !playing }, `${slot}:playing`));
     });
   });
   document.querySelectorAll<HTMLButtonElement>("[data-cue-slot]").forEach((button) => {
@@ -1999,24 +2083,30 @@ function bindDubspace() {
         return;
       }
       const space = dubspaceSpace();
-      if (space) call(space, space, "set_control", [target, name, value]);
+      if (space) call(space, space, "set_control", [target, name, value], dubspaceOptimisticProps(target, { [name]: value }, `${target}:${name}`));
     });
   });
   document.querySelectorAll<HTMLElement>("[data-pitch-dial]").forEach((dial) => bindPitchDial(dial));
   document.querySelector<HTMLButtonElement>("[data-transport]")?.addEventListener("click", (event) => {
     const mode = (event.currentTarget as HTMLButtonElement).dataset.transport;
-    const space = dubspaceSpace();
-    if (space) call(space, space, mode === "stop" ? "stop_transport" : "start_transport", []);
+    const drum = state.world?.dubspaceMeta?.drum ?? "";
+    const props = mode === "stop"
+      ? { playing: false }
+      : { playing: true, started_at: Date.now() + state.clockOffset };
+    callDubspaceMutation(mode === "stop" ? "stop_transport" : "start_transport", [], dubspaceOptimisticProps(drum, props, `${drum}:transport`));
   });
   document.querySelector<HTMLInputElement>("[data-tempo]")?.addEventListener("change", (event) => {
-    const space = dubspaceSpace();
-    if (space) call(space, space, "set_tempo", [Number((event.currentTarget as HTMLInputElement).value)]);
+    const bpm = Number((event.currentTarget as HTMLInputElement).value);
+    const drum = state.world?.dubspaceMeta?.drum ?? "";
+    callDubspaceMutation("set_tempo", [bpm], dubspaceOptimisticProps(drum, { bpm }, `${drum}:bpm`));
   });
   document.querySelectorAll<HTMLButtonElement>("[data-step]").forEach((button) => {
     button.addEventListener("click", () => {
       const [voice, step] = button.dataset.step!.split(":");
-      const space = dubspaceSpace();
-      if (space) call(space, space, "set_drum_step", [voice, Number(step), button.dataset.enabled !== "true"]);
+      const enabled = button.dataset.enabled !== "true";
+      const drum = state.world?.dubspaceMeta?.drum ?? "";
+      const pattern = patternWithStep(projectedObjectView(drum)?.props?.pattern, voice, Number(step), enabled);
+      callDubspaceMutation("set_drum_step", [voice, Number(step), enabled], dubspaceOptimisticProps(drum, { pattern }, `${drum}:pattern`));
     });
   });
   document.querySelector<HTMLButtonElement>("[data-save-scene]")?.addEventListener("click", () => {
@@ -2035,7 +2125,7 @@ function enterDubspace() {
   if (!space || !canSendDirect()) return;
   direct(space, "enter", [], (result) => {
     setDubspaceOperators(result);
-    void ensureScopedOverlayForTab("dubspace", { force: true }).then(() => {
+    void ensureScopedOverlayForTab("dubspace").then(() => {
       if (state.tab === "dubspace") render();
     });
     requestSpaceChatFocus(space);
@@ -2055,7 +2145,7 @@ function leaveDubspace(done?: () => void) {
   direct(space, "leave", [], (result) => {
     setDubspaceOperators(result);
     done?.();
-    void ensureScopedOverlayForTab("dubspace", { force: true });
+    void ensureScopedOverlayForTab("dubspace");
     if (state.tab === "dubspace") render();
   });
 }
@@ -2067,25 +2157,22 @@ function setDubspaceOperators(result: any) {
     : Array.isArray(result?.operators)
       ? result.operators
       : [];
-  if (!space || !state.world?.dubspace?.[space]) return;
-  state.world.dubspace[space].props.operators = operators.map(String);
-  if (state.world.objects?.[space]?.props) state.world.objects[space].props.operators = state.world.dubspace[space].props.operators;
+  if (!space) return;
+  patchDubspaceProjectionProps(space, { operators: operators.map(String) });
 }
 
 function addDubspaceOperator(actor: string | undefined) {
   const space = dubspaceSpace();
-  if (!actor || !space || !state.world?.dubspace?.[space]) return;
+  if (!actor || !space) return;
   const operators = dubspaceOperators();
   if (operators.includes(actor)) return;
-  state.world.dubspace[space].props.operators = [...operators, actor];
-  if (state.world.objects?.[space]?.props) state.world.objects[space].props.operators = state.world.dubspace[space].props.operators;
+  patchDubspaceProjectionProps(space, { operators: [...operators, actor] });
 }
 
 function removeDubspaceOperator(actor: string | undefined) {
   const space = dubspaceSpace();
-  if (!actor || !space || !state.world?.dubspace?.[space]) return;
-  state.world.dubspace[space].props.operators = dubspaceOperators().filter((item) => item !== actor);
-  if (state.world.objects?.[space]?.props) state.world.objects[space].props.operators = state.world.dubspace[space].props.operators;
+  if (!actor || !space) return;
+  patchDubspaceProjectionProps(space, { operators: dubspaceOperators().filter((item) => item !== actor) });
 }
 
 function bindPitchDial(dial: HTMLElement) {
@@ -2633,7 +2720,7 @@ function saveSpaceChatHeight(space: string, value: number) {
 }
 
 function spaceChatHeight(space: string): number {
-  return normalizeSpaceChatHeight(state.spaceChatHeights[space] ?? 180);
+  return normalizeSpaceChatHeight(state.spaceChatHeights[space] ?? SPACE_CHAT_DEFAULT_HEIGHT);
 }
 
 function normalizeSpaceChatHeights() {
@@ -2644,7 +2731,7 @@ function normalizeSpaceChatHeights() {
 
 function normalizeSpaceChatHeight(value: number): number {
   const max = Math.max(SPACE_CHAT_MIN_HEIGHT, Math.round(window.innerHeight * SPACE_CHAT_MAX_VIEWPORT_RATIO));
-  return clamp(Number.isFinite(value) ? value : 180, SPACE_CHAT_MIN_HEIGHT, max);
+  return clamp(Number.isFinite(value) ? value : SPACE_CHAT_DEFAULT_HEIGHT, SPACE_CHAT_MIN_HEIGHT, max);
 }
 
 function spaceChatDraft(space: string): string {
@@ -2922,12 +3009,25 @@ function executeChatPlan(currentSpace: string, plan: any, originalText: string) 
   if (!target || !verb) return;
   if (route === "sequenced") {
     const space = String(plan.space ?? currentSpace);
-    if (space) callWithError(space, target, verb, args, receiveChatError);
+    const options = chatPlanProjectionOptions(plan);
+    if (space) callWithError(space, target, verb, args, receiveChatError, options);
+    if (options && state.tab === "dubspace") render();
     return;
   }
   if (route === "direct") {
     direct(target, verb, args, (result) => renderChatCommandResult(plan, result, originalText), receiveChatError);
   }
+}
+
+function chatPlanProjectionOptions(plan: any): ProjectionCallOptions | undefined {
+  const target = String(plan?.target ?? "");
+  const verb = String(plan?.verb ?? "");
+  if (target === dubspaceSpace() && verb === "set_tempo") {
+    const bpm = clamp(Math.round(Number(plan?.args?.[0])), 60, 200);
+    const drum = state.world?.dubspaceMeta?.drum ?? "";
+    if (drum && Number.isFinite(bpm)) return dubspaceOptimisticProps(drum, { bpm }, `${drum}:bpm`);
+  }
+  return undefined;
 }
 
 function renderChatCommandResult(plan: any, result: any, originalText: string) {
@@ -2937,7 +3037,7 @@ function renderChatCommandResult(plan: any, result: any, originalText: string) {
   if (verb === "enter" && target === dubspaceSpace()) {
     setDubspaceOperators(result);
     setTab("dubspace", { mode: "push", leaveCurrent: false });
-    void ensureScopedOverlayForTab("dubspace", { force: true });
+    void ensureScopedOverlayForTab("dubspace");
     if (!scopedProjectionEnabled) void refresh().then(() => requestSpaceChatFocus(target));
     requestSpaceChatFocus(target);
     return;
@@ -2972,6 +3072,14 @@ function renderChatCommandResult(plan: any, result: any, originalText: string) {
   }
   if (verb === "look") {
     applyLookResult(result);
+    return;
+  }
+  if (verb === "on_say_to" && target) {
+    const cutoff = Number(result);
+    if (Number.isFinite(cutoff)) {
+      patchDubspaceProjectionProps(target, { cutoff });
+      syncDubspaceProjectionEffects({ type: "control_changed", target, name: "cutoff", value: cutoff });
+    }
     return;
   }
   if (result && typeof result === "object" && typeof result.room === "string") {
@@ -3433,14 +3541,6 @@ function bindSpaceChatPanel(panel: HTMLElement & WooElement & { data?: SpaceChat
     height: Math.round(spaceChatHeight(space))
   }, () => panel.scrollFeedToEnd?.());
   bindSpaceChatComponentEvents(panel);
-  if ("ResizeObserver" in window && panel.dataset.spaceChatResizeObserved !== "true") {
-    panel.dataset.spaceChatResizeObserved = "true";
-    const observer = new ResizeObserver((entries) => {
-      const height = entries[0]?.contentRect.height;
-      if (typeof height === "number" && Math.abs(height - spaceChatHeight(space)) > 1) saveSpaceChatHeight(space, height);
-    });
-    observer.observe(panel);
-  }
   bindSpaceChatResize(panel);
 }
 

@@ -142,7 +142,25 @@ test("tool tabs load scoped overlays without /api/state", async ({ page }) => {
 
   await page.getByRole("button", { name: "Dubspace" }).click();
   await expect(page.locator(".toolbar h1")).toHaveText("Dubspace", { timeout: 5_000 });
+  try {
+    await page.getByRole("button", { name: "Enter" }).click({ timeout: 1_000 });
+  } catch {
+    // Already at the controls.
+  }
   await expect(page.getByRole("button", { name: "Leave" })).toBeVisible();
+  await expect(page.locator("[data-space-chat-input]")).toBeVisible();
+  const dubspaceMiniChat = page.locator("woo-space-chat-panel[data-space-chat-panel]");
+  const initialMiniChatHeight = await dubspaceMiniChat.evaluate((element) => element.getBoundingClientRect().height);
+  expect(initialMiniChatHeight).toBeGreaterThanOrEqual(220);
+  await page.locator('[aria-label="Filter cutoff"]').evaluate((element) => {
+    const input = element as HTMLInputElement;
+    input.value = "640";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await expect(page.locator('[aria-label="Filter cutoff"]')).toHaveValue("640");
+  const postFilterMiniChatHeight = await dubspaceMiniChat.evaluate((element) => element.getBoundingClientRect().height);
+  expect(postFilterMiniChatHeight).toBeGreaterThanOrEqual(initialMiniChatHeight - 1);
 
   await page.getByRole("button", { name: "Pinboard" }).click();
   await expect(page.locator(".pinboard-stage")).toBeVisible({ timeout: 5_000 });
@@ -601,6 +619,7 @@ test("dubspace controls advertise operators to the living room", async ({ browse
 test("chat command enters dubspace UI", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator(".actor")).not.toHaveText("connecting...", { timeout: 5_000 });
+  await expect(page.getByRole("button", { name: "Enter" })).toBeVisible();
   const actor = (await page.locator(".actor").textContent())?.trim() ?? "";
 
   await page.getByRole("button", { name: "Enter" }).click();

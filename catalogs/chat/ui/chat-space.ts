@@ -145,7 +145,7 @@ export class WooSpaceChatPanelElement extends HTMLElement {
     space: "",
     lines: [],
     draft: "",
-    height: 180
+    height: 280
   };
 
   set data(value: SpaceChatPanelData) {

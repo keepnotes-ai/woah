@@ -10,6 +10,7 @@ The sections below distinguish three flavors of pending item:
 
 ## random stuff to do
 
+- command plan is not well layered, should be able to pass(), why so heavy
 - "enter" just re-enters, which shouldn't be a thing
 - chat transparency isn't really working
 - better enter/leave messages; and for dubspace/pinboard/etc

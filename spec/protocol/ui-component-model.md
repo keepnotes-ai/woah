@@ -1191,6 +1191,13 @@ layer. A stale `/api/state` response can update the canonical base, but active
 live-preview or pending optimistic patches continue to win until they are
 reconciled, superseded, or expired.
 
+Some direct calls return server-confirmed state without writing a sequenced log
+entry. The framework may fold those authoritative direct results into the
+canonical snapshot layer with an explicit canonical patch operation. That
+operation is not an optimistic or live-preview update: it is treated as
+server-confirmed state, persists across later scoped-snapshot ingestion, and
+clears overlapping live or optimistic fields.
+
 Optimistic patches use this shape:
 
 ```ts

@@ -109,6 +109,20 @@ describe("client UI framework projection", () => {
     expect(ui.observe("filter_1")?.props.cutoff).toBe(500);
   });
 
+  it("can fold direct authoritative patches into canonical projection", () => {
+    const ui = createWooClientFramework();
+    ui.ingestSnapshot("overlay:dubspace:the_dubspace", [
+      { id: "filter_1", name: "filter", props: { cutoff: 1000 } }
+    ]);
+
+    ui.ingestLiveObservation({ type: "gesture_progress", target: "filter_1", name: "cutoff", value: 750 });
+    expect(ui.observe("filter_1")?.props.cutoff).toBe(750);
+
+    ui.applyCanonical([{ subject: "filter_1", props: { cutoff: 500 } }]);
+    ui.prune(Date.now() + 2_000);
+    expect(ui.observe("filter_1")?.props.cutoff).toBe(500);
+  });
+
   it("keeps independent live fields on separate coalesced layers", () => {
     const ui = createWooClientFramework();
     ui.ingestWorld({
@@ -141,6 +155,41 @@ describe("client UI framework projection", () => {
     });
 
     expect(ui.observe("delay_1")?.props).toMatchObject({ feedback: 0.4, wet: 0.6 });
+  });
+
+  it("reduces dubspace control observations into object props", () => {
+    const ui = createWooClientFramework();
+    ui.ingestSnapshot("overlay:dubspace:the_dubspace", [
+      { id: "slot_1", name: "Slot 1", props: { playing: false } },
+      { id: "drum_1", name: "Drum", props: { playing: false, bpm: 118, pattern: { tone: [false, false, false, false, false, false, false, false] } } },
+      { id: "delay_1", name: "Delay", props: { feedback: 0.2 } }
+    ]);
+
+    ui.ingestAppliedFrame({
+      op: "applied",
+      seq: 12,
+      space: "the_dubspace",
+      observations: [
+        { type: "loop_started", slot: "slot_1", loop_id: "slot_1" },
+        { type: "tempo_changed", target: "drum_1", bpm: 140 },
+        { type: "drum_step_changed", target: "drum_1", voice: "tone", step: 3, enabled: true, pattern: { tone: [false, false, false, true, false, false, false, false] } },
+        { type: "transport_started", target: "drum_1", started_at: 1234, bpm: 140 }
+      ]
+    });
+
+    expect(ui.observe("slot_1")?.props.playing).toBe(true);
+    expect(ui.observe("drum_1")?.props).toMatchObject({ playing: true, bpm: 140, started_at: 1234 });
+    expect((ui.observe("drum_1")?.props.pattern as any).tone[3]).toBe(true);
+
+    ui.ingestAppliedFrame({
+      op: "applied",
+      seq: 13,
+      space: "the_dubspace",
+      observations: [{ type: "scene_recalled", scene: "default_scene", controls: { delay_1: { feedback: 0.7 }, slot_1: { playing: false } } }]
+    });
+
+    expect(ui.observe("delay_1")?.props.feedback).toBe(0.7);
+    expect(ui.observe("slot_1")?.props.playing).toBe(false);
   });
 
   it("ingests scoped snapshots without clearing unrelated scopes", () => {

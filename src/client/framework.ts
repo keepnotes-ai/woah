@@ -431,6 +431,23 @@ export class ClientProjection {
     this.notify(changed);
   }
 
+  // Authoritative direct-call results can confirm state outside the sequenced
+  // log. Fold those patches into canonical projection so they survive later
+  // scoped-snapshot ingestion while still clearing overlapping live/optimistic
+  // layers.
+  applyCanonical(patches: ProjectionPatch[]) {
+    const changed = new Set<string>();
+    for (const patch of patches) {
+      const subject = String(patch.subject ?? "");
+      if (!subject) continue;
+      this.patchCanonical(subject, patch);
+      clearPatchFieldsFromLayers(this.live, patch);
+      clearPatchFieldsFromLayers(this.optimistic, patch);
+      changed.add(subject);
+    }
+    this.notify(changed);
+  }
+
   applyLive(id: string, patches: ProjectionPatch[], expiresMs = LIVE_TTL_MS): number {
     return this.applyTimedLayer(this.live, id, patches, expiresMs);
   }
@@ -676,6 +693,10 @@ export class WooClientFramework {
     this.projection.applyOptimisticCall(callId, options);
   }
 
+  applyCanonical(patches: ProjectionPatch[]) {
+    this.projection.applyCanonical(patches);
+  }
+
   completeOptimisticCall(callId: string) {
     this.projection.completeOptimisticCall(callId);
   }
@@ -718,6 +739,80 @@ export function registerCoreObservationHandlers(registry: ObservationRegistry) {
       const name = String(obs.name ?? "");
       if (!target || !name) return;
       draft.patchObjectProps(target, { [name]: obs.value });
+    }
+  });
+  registry.observation({
+    types: ["loop_started"],
+    route: "both",
+    reduce: (draft, envelope) => {
+      const slot = String(envelope.observation.slot ?? "");
+      if (slot) draft.patchObjectProps(slot, { playing: true });
+    }
+  });
+  registry.observation({
+    types: ["loop_stopped"],
+    route: "both",
+    reduce: (draft, envelope) => {
+      const slot = String(envelope.observation.slot ?? "");
+      if (slot) draft.patchObjectProps(slot, { playing: false });
+    }
+  });
+  registry.observation({
+    types: ["tempo_changed"],
+    route: "both",
+    reduce: (draft, envelope) => {
+      const obs = envelope.observation;
+      const target = String(obs.target ?? "");
+      const bpm = Number(obs.bpm);
+      if (target && Number.isFinite(bpm)) draft.patchObjectProps(target, { bpm });
+    }
+  });
+  registry.observation({
+    types: ["transport_started"],
+    route: "both",
+    reduce: (draft, envelope) => {
+      const obs = envelope.observation;
+      const target = String(obs.target ?? "");
+      if (!target) return;
+      const props: Record<string, unknown> = { playing: true };
+      const startedAt = Number(obs.started_at);
+      const bpm = Number(obs.bpm);
+      if (Number.isFinite(startedAt)) props.started_at = startedAt;
+      if (Number.isFinite(bpm)) props.bpm = bpm;
+      draft.patchObjectProps(target, props);
+    }
+  });
+  registry.observation({
+    types: ["transport_stopped"],
+    route: "both",
+    reduce: (draft, envelope) => {
+      const target = String(envelope.observation.target ?? "");
+      if (target) draft.patchObjectProps(target, { playing: false });
+    }
+  });
+  registry.observation({
+    types: ["drum_step_changed"],
+    route: "both",
+    reduce: (draft, envelope) => {
+      const obs = envelope.observation;
+      const target = String(obs.target ?? "");
+      const pattern = obs.pattern;
+      // Dubspace 0.2.4 made the full pattern snapshot the observation
+      // contract; older logs that only carry voice/step/enabled cannot be
+      // safely reconstructed inside a deterministic reducer.
+      if (target && pattern && typeof pattern === "object" && !Array.isArray(pattern)) draft.patchObjectProps(target, { pattern });
+    }
+  });
+  registry.observation({
+    types: ["scene_recalled"],
+    route: "both",
+    reduce: (draft, envelope) => {
+      const controls = envelope.observation.controls;
+      if (!controls || typeof controls !== "object" || Array.isArray(controls)) return;
+      for (const [target, props] of Object.entries(controls)) {
+        if (!props || typeof props !== "object" || Array.isArray(props)) continue;
+        draft.patchObjectProps(target, props as Record<string, unknown>);
+      }
     }
   });
   registry.observation({

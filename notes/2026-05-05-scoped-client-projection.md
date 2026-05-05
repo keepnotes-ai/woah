@@ -607,13 +607,20 @@ Status: initial overlay-snapshot bridge implemented.
 - Dubspace `control_changed` observations now update the local compatibility
   object/control projection before syncing audio, so typed commands such as
   `filter 500` do not wait for a later UI gesture to become visible.
+- Dubspace rendering/audio now reads control state through the framework
+  projection (`ui.observe`) instead of treating `state.world.dubspace` as the
+  canonical object map. Loop, transport, tempo, drum-step, and scene-recall
+  observations reduce into object props, and UI gestures attach optimistic
+  patches where the component can predict the result.
 - Playwright blocks `/api/state` while opening dubspace, pinboard, and
   taskspace, proving ordinary tool-tab navigation is now on scoped overlays.
 
 Open after this slice: the current renderers still consume a compatibility
-world assembled from scoped snapshots. Full Phase 4 still needs native
-framework reads for each renderer and proper observation reducers for task
-creation/movement, pin add/delete/text edits, and all dubspace control changes.
+world assembled from scoped snapshots. Dubspace still uses compatibility
+metadata for object ids and layout assembly, but its control state no longer
+depends on the compatibility object map. Full Phase 4 still needs native
+framework reads for pinboard/taskspace renderers and proper observation
+reducers for task creation/movement and pin add/delete/text edits.
 Bundled demo object ids are used only as a transitional route allowlist; custom
 installed worlds need a runtime scoped-route feed before their object URLs can
 default to scoped mode. The `leave` path still has a small `markLeftChatRoom`
@@ -621,7 +628,7 @@ helper parallel to `applyScopedMoveResult`; once leave verbs return a scoped
 snapshot or explicit `$nowhere` location, that should collapse into the same
 move-result path.
 
-- Migrate dubspace controls/audio to `ui.observe`.
+- Finish dubspace by moving object-id/frame assembly out of `state.world`.
 - Migrate pinboard rendering to generic projection state.
 - Migrate taskspace to overlay snapshot plus observation reducers.
 - Migrate mini-chat/current-room UI to `here` and observation reducers.

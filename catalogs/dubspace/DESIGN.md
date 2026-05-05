@@ -74,9 +74,26 @@ Slider motion has two layers — two routes for the same control surface:
 
 The preview layer exists so continuous gestures feel live without filling the `$space` log with every pointer sample. It is the same control surface called via a different route, not a second source of truth.
 
+Every tab observing the dubspace applies these projected control changes to its
+local audio engine. That is intentional shared-mix behavior: a non-originating
+operator hears loop, transport, scene, and control changes when the room state
+changes.
+
 All Dubspace verbs are catalog-authored Woo source. `:set_control` uses dynamic
 property access (`target.(name) = value`); scenes snapshot the demo's seeded
 controls explicitly from the catalog rather than through core-native handlers.
+
+## Command Surface
+
+The dubspace has a specialized `:command_plan` for control-room shortcuts such
+as `filter 500`, `bpm 144`, `out`, and `say ...`. It must still preserve the
+shared chat directed-speech syntax from `$conversational`: backtick speech such
+as `` `filter 500 `` lowers to `filter_1:on_say_to("500")`, matching the plain
+`filter 500` shortcut instead of echoing the line as room speech. `` `bpm 144 ``
+and `bpm 144` both lower to the sequenced `the_dubspace:set_tempo(144)` path so
+tempo changes remain replayable. BPM command shortcuts accept only integer
+values in the UI tempo range, 60 through 200; the lower-level `:set_tempo`
+verb remains tolerant and clamps direct callers.
 
 ## Observation Schemas
 
@@ -91,8 +108,8 @@ Each observation the dubspace emits has a defined payload shape. UI and agents c
 | `loop_stopped` | `{slot: obj}` | `:stop_loop` applied. |
 | `control_changed` | `{target: obj, name: str, value: any}` | `:set_control` applied. |
 | `scene_saved` | `{scene: obj, name: str}` | `:save_scene` applied. |
-| `scene_recalled` | `{scene: obj}` | `:recall_scene` applied. |
-| `drum_step_changed` | `{target: obj, voice: str, step: int, enabled: bool}` | `:set_drum_step` applied. |
+| `scene_recalled` | `{scene: obj, controls: map}` | `:recall_scene` applied. `controls` is the full scene control snapshot, keyed by control object; it is intentionally not a delta. |
+| `drum_step_changed` | `{target: obj, voice: str, step: int, enabled: bool, pattern: map}` | `:set_drum_step` applied. `pattern` is the resulting full drum pattern. |
 | `tempo_changed` | `{target: obj, bpm: int}` | `:set_tempo` applied. |
 | `transport_started` | `{target: obj, started_at: int, bpm: int}` | `:start_transport` applied. |
 | `transport_stopped` | `{target: obj}` | `:stop_transport` applied. |

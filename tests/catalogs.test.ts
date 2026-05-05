@@ -552,6 +552,18 @@ describe("local catalogs", () => {
     if (filterPlan.op === "result") {
       expect(filterPlan.result).toMatchObject({ ok: true, route: "direct", target: "filter_1", verb: "on_say_to", args: ["500"] });
     }
+    const directedFilterPlan = await world.directCall("dubspace-directed-filter-plan", actor, "the_dubspace", "command_plan", ["`filter 650"]);
+    expect(directedFilterPlan.op).toBe("result");
+    if (directedFilterPlan.op === "result") {
+      expect(directedFilterPlan.result).toMatchObject({ ok: true, route: "direct", target: "filter_1", verb: "on_say_to", args: ["650"] });
+    }
+    const directedFiltered = await world.directCall("dubspace-directed-filter", actor, "filter_1", "on_say_to", ["650"]);
+    expect(directedFiltered.op).toBe("result");
+    if (directedFiltered.op === "result") {
+      expect(directedFiltered.observations).toContainEqual(expect.objectContaining({ type: "control_changed", target: "filter_1", name: "cutoff", value: 650 }));
+    }
+    expect(world.getProp("filter_1", "cutoff")).toBe(650);
+
     const filtered = await world.directCall("dubspace-filter", actor, "filter_1", "on_say_to", ["500"]);
     expect(filtered.op).toBe("result");
     if (filtered.op === "result") {
@@ -559,7 +571,44 @@ describe("local catalogs", () => {
     }
     expect(world.getProp("filter_1", "cutoff")).toBe(500);
 
-    await callInDubspace(world, session.id, "drum", { actor, target: "the_dubspace", verb: "set_drum_step", args: ["tone", 3, true] });
+    const bpmPlan = await world.directCall("dubspace-bpm-plan", actor, "the_dubspace", "command_plan", ["bpm 142"]);
+    expect(bpmPlan.op).toBe("result");
+    if (bpmPlan.op === "result") {
+      expect(bpmPlan.result).toMatchObject({ ok: true, route: "sequenced", space: "the_dubspace", target: "the_dubspace", verb: "set_tempo", args: [142] });
+    }
+    const directedBpmPlan = await world.directCall("dubspace-directed-bpm-plan", actor, "the_dubspace", "command_plan", ["`bpm 143"]);
+    expect(directedBpmPlan.op).toBe("result");
+    if (directedBpmPlan.op === "result") {
+      expect(directedBpmPlan.result).toMatchObject({ ok: true, route: "sequenced", space: "the_dubspace", target: "the_dubspace", verb: "set_tempo", args: [143] });
+    }
+    const zeroBpmPlan = await world.directCall("dubspace-zero-bpm-plan", actor, "the_dubspace", "command_plan", ["bpm 0"]);
+    expect(zeroBpmPlan.op).toBe("result");
+    if (zeroBpmPlan.op === "result") {
+      expect(zeroBpmPlan.result).toMatchObject({ ok: false, route: "huh", error: "BPM must be between 60 and 200." });
+    }
+    const directedZeroBpmPlan = await world.directCall("dubspace-directed-zero-bpm-plan", actor, "the_dubspace", "command_plan", ["`bpm 0"]);
+    expect(directedZeroBpmPlan.op).toBe("result");
+    if (directedZeroBpmPlan.op === "result") {
+      expect(directedZeroBpmPlan.result).toMatchObject({ ok: false, route: "huh", error: "BPM must be between 60 and 200." });
+    }
+    const badBpmPlan = await world.directCall("dubspace-bad-bpm-plan", actor, "the_dubspace", "command_plan", ["bpm abc"]);
+    expect(badBpmPlan.op).toBe("result");
+    if (badBpmPlan.op === "result") {
+      expect(badBpmPlan.result).toMatchObject({ ok: false, route: "huh", error: "BPM expects digits." });
+    }
+    const bpmChanged = await callInDubspace(world, session.id, "bpm", { actor, target: "the_dubspace", verb: "set_tempo", args: [142] });
+    expect(bpmChanged.op).toBe("applied");
+    if (bpmChanged.op === "applied") {
+      expect(bpmChanged.observations[0]).toMatchObject({ type: "tempo_changed", target: "drum_1", bpm: 142 });
+    }
+    expect(world.getProp("drum_1", "bpm")).toBe(142);
+
+    const drumChanged = await callInDubspace(world, session.id, "drum", { actor, target: "the_dubspace", verb: "set_drum_step", args: ["tone", 3, true] });
+    expect(drumChanged.op).toBe("applied");
+    if (drumChanged.op === "applied") {
+      expect(drumChanged.observations[0]).toMatchObject({ type: "drum_step_changed", target: "drum_1", voice: "tone", step: 3, enabled: true });
+      expect((drumChanged.observations[0] as any).pattern.tone[3]).toBe(true);
+    }
     await callInDubspace(world, session.id, "tempo", { actor, target: "the_dubspace", verb: "set_tempo", args: [250] });
     const pattern = world.getProp("drum_1", "pattern") as Record<string, boolean[]>;
     expect(pattern.tone[3]).toBe(true);
@@ -568,7 +617,9 @@ describe("local catalogs", () => {
     await callInDubspace(world, session.id, "save", { actor, target: "the_dubspace", verb: "save_scene", args: ["Source Scene"] });
     await callInDubspace(world, session.id, "mutate", { actor, target: "the_dubspace", verb: "set_control", args: ["delay_1", "feedback", 0.11] });
     expect(world.getProp("delay_1", "feedback")).toBe(0.11);
-    await callInDubspace(world, session.id, "recall", { actor, target: "the_dubspace", verb: "recall_scene", args: ["default_scene"] });
+    const recalled = await callInDubspace(world, session.id, "recall", { actor, target: "the_dubspace", verb: "recall_scene", args: ["default_scene"] });
+    expect(recalled.op).toBe("applied");
+    if (recalled.op === "applied") expect(recalled.observations[0]).toMatchObject({ type: "scene_recalled", scene: "default_scene", controls: { delay_1: { feedback: 0.44 } } });
     expect(world.getProp("delay_1", "feedback")).toBe(0.44);
 
     const outPlan = await world.directCall("dubspace-out-plan", actor, "the_dubspace", "command_plan", ["out"]);

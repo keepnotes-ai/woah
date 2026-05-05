@@ -28,6 +28,7 @@ type AppState = {
   selectedTask?: string;
   taskExpanded: Record<string, boolean>;
   taskStatusFilter: Record<string, boolean>;
+  scopedProjectionSmoke?: { me?: any; catalogs?: any; error?: string };
   pinboardNewText: string;
   pinboardNewColor: string;
   pinboardView: PinboardView;
@@ -116,6 +117,7 @@ const chatHistoryKey = "woo.chat.history";
 const pinboardNewColorKey = "woo.pinboard.newColor";
 const legacyPinboardChatHeightKey = "woo.pinboard.chatHeight";
 const spaceChatHeightsKey = "woo.spaceChat.heights";
+const scopedProjectionSmokeEnabled = new URLSearchParams(location.search).has("scopedProjectionSmoke");
 const chatHistoryLimit = 80;
 const drumVoices = [
   { id: "kick", label: "Kick" },
@@ -205,6 +207,7 @@ function connect() {
     const frame = JSON.parse(event.data);
     if (frame.op === "pong") {
       lastPongAt = Date.now();
+      if (typeof frame.server_time === "number") state.clockOffset = frame.server_time - Date.now();
       return;
     }
     if (frame.op === "session") {
@@ -614,6 +617,7 @@ async function refresh() {
   if (!state.selectedObject || !state.world.objects?.[state.selectedObject]) state.selectedObject = defaultSelectedObject();
   state.clockOffset = Number(state.world.server_time ?? Date.now()) - Date.now();
   state.chatPresent = Array.isArray(state.world?.chat?.present) ? state.world.chat.present : state.chatPresent;
+  if (scopedProjectionSmokeEnabled) await refreshScopedProjectionSmoke();
   syncTaskSelection();
   if (!routeInitialized) {
     routeInitialized = true;
@@ -629,6 +633,23 @@ async function refresh() {
   audio?.sync(effectiveDubspace(), state.clockOffset);
   hydratePinboardNotesTextIfNeeded(state.world?.pinboard);
   render();
+}
+
+async function refreshScopedProjectionSmoke() {
+  try {
+    const [meResponse, catalogsResponse] = await Promise.all([
+      fetch("/api/me", { headers: authHeaders() }),
+      fetch("/api/catalogs/ui", { headers: authHeaders() })
+    ]);
+    if (!meResponse.ok) throw new Error(`/api/me ${meResponse.status}`);
+    if (!catalogsResponse.ok) throw new Error(`/api/catalogs/ui ${catalogsResponse.status}`);
+    state.scopedProjectionSmoke = {
+      me: await meResponse.json(),
+      catalogs: await catalogsResponse.json()
+    };
+  } catch (err) {
+    state.scopedProjectionSmoke = { error: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 // Debounced refresh used by the live event paths. Each applied/task/replay
@@ -1621,8 +1642,13 @@ function leaveDubspace(done?: () => void) {
 
 function setDubspaceOperators(result: any) {
   const space = dubspaceSpace();
-  if (!Array.isArray(result) || !space || !state.world?.dubspace?.[space]) return;
-  state.world.dubspace[space].props.operators = result.map(String);
+  const operators = Array.isArray(result)
+    ? result
+    : Array.isArray(result?.operators)
+      ? result.operators
+      : [];
+  if (!space || !state.world?.dubspace?.[space]) return;
+  state.world.dubspace[space].props.operators = operators.map(String);
   if (state.world.objects?.[space]?.props) state.world.objects[space].props.operators = state.world.dubspace[space].props.operators;
 }
 
@@ -3417,13 +3443,20 @@ function leavePinboard(done?: () => void) {
 }
 
 function setPinboardPresent(result: any) {
-  if (!Array.isArray(result) || !state.world?.pinboard) return;
-  state.world.pinboard.present = result.map(String);
+  const present = Array.isArray(result)
+    ? result
+    : Array.isArray(result?.present)
+      ? result.present
+      : Array.isArray(result?.present_actors)
+        ? result.present_actors
+        : [];
+  if (!state.world?.pinboard) return;
+  state.world.pinboard.present = present.map(String);
   const board = state.world.pinboard.board;
   if (board?.props) board.props.subscribers = state.world.pinboard.present;
-  const present = new Set(state.world.pinboard.present);
+  const presentActors = new Set(state.world.pinboard.present);
   for (const actor of Object.keys(state.pinboardViewports)) {
-    if (!present.has(actor)) removePinboardViewport(actor);
+    if (!presentActors.has(actor)) removePinboardViewport(actor);
   }
 }
 
@@ -3768,6 +3801,9 @@ function bindTaskspace() {
 function renderIde() {
   const objects = Object.keys(state.world?.objects ?? {}).sort();
   const installTarget = state.selectedObject || defaultSelectedObject();
+  const scopedSmoke = scopedProjectionSmokeEnabled
+    ? `<div class="panel"><h2>Scoped projection smoke</h2><pre>${escapeHtml(JSON.stringify(state.scopedProjectionSmoke ?? {}, null, 2))}</pre></div>`
+    : "";
   return `
     <section class="toolbar">
       <h1>IDE</h1>
@@ -3787,6 +3823,7 @@ function renderIde() {
         <pre>${escapeHtml(JSON.stringify(state.compileResult ?? {}, null, 2))}</pre>
       </div>
     </section>
+    ${scopedSmoke}
   `;
 }
 

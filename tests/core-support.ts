@@ -1,5 +1,5 @@
 import { createWorld } from "../src/core/bootstrap";
-import type { CallContext, HostBridge, HostObjectSummary, HostOperationMemo, MoveObjectResult, WooWorld } from "../src/core/world";
+import type { CallContext, HostBridge, HostObjectSummary, HostOperationMemo, MoveObjectResult, RoomSnapshot, ScopedObjectSummary, WooWorld } from "../src/core/world";
 import type { AppliedFrame, DirectResultFrame, ErrorFrame, Message, ObjRef, TinyBytecode, VerbDef, WooValue } from "../src/core/types";
 
 export function message(actor: string, target: string, verb: string, args: unknown[] = []): Message {
@@ -113,6 +113,7 @@ export class LocalHostBridge implements HostBridge {
   readonly getPropCalls = new Map<string, number>();
   readonly describeCalls = new Map<string, number>();
   readonly describeManyCalls: ObjRef[][] = [];
+  readonly objectSummaryManyCalls: ObjRef[][] = [];
   readonly isaCalls = new Map<string, number>();
 
   constructor(
@@ -131,6 +132,27 @@ export class LocalHostBridge implements HostBridge {
       this.getPropCalls.set(key, (this.getPropCalls.get(key) ?? 0) + 1);
       return await this.worldFor(objRef).getPropChecked(progr, objRef, name, memo);
     };
+    if (!memo) return await read();
+    return await memoizeTestOperation(memo.reads, key, read);
+  }
+
+  async objectSummary(readActor: ObjRef, objRef: ObjRef, memo?: HostOperationMemo): Promise<ScopedObjectSummary> {
+    const key = `summary:${readActor}:${objRef}`;
+    const read = async () => await this.worldFor(objRef).scopedObjectSummary(readActor, objRef, memo);
+    if (!memo) return await read();
+    return await memoizeTestOperation(memo.reads, key, read);
+  }
+
+  async objectSummaries(readActor: ObjRef, objRefs: ObjRef[], memo?: HostOperationMemo): Promise<Record<ObjRef, ScopedObjectSummary>> {
+    this.objectSummaryManyCalls.push([...objRefs]);
+    const out: Record<ObjRef, ScopedObjectSummary> = {};
+    for (const objRef of objRefs) out[objRef] = await this.objectSummary(readActor, objRef, memo);
+    return out;
+  }
+
+  async roomSnapshot(readActor: ObjRef, room: ObjRef, sessionId?: string | null, memo?: HostOperationMemo): Promise<RoomSnapshot> {
+    const key = `room-snapshot:${readActor}:${room}:${sessionId ?? ""}`;
+    const read = async () => await this.worldFor(room).roomSnapshotForActor(readActor, room, sessionId ?? null, memo);
     if (!memo) return await read();
     return await memoizeTestOperation(memo.reads, key, read);
   }

@@ -52,7 +52,7 @@ import { signInternalRequest, verifyInternalRequest } from "./internal-auth";
 
 // Re-import WooWorld type. Note `import type` must reach the world module
 // without dragging Node-only deps into the Worker bundle.
-import type { CallContext, DeferredHostEffect, HostBridge, HostObjectSummary, HostOperationMemo, MoveObjectResult, WooWorld } from "../core/world";
+import type { CallContext, DeferredHostEffect, HostBridge, HostObjectSummary, HostOperationMemo, MoveObjectResult, RoomSnapshot, ScopedObjectSummary, WooWorld } from "../core/world";
 
 export interface Env {
   WOO: DurableObjectNamespace;
@@ -218,7 +218,7 @@ export class PersistentObjectDO {
         if ("raw" in protocol) {
           return jsonResponse({ error: { code: "E_NOT_IMPLEMENTED", message: "raw REST response not supported on CF Worker" } }, 501);
         }
-        return jsonResponse(protocol.body, protocol.status);
+        return jsonResponse(protocol.body, protocol.status, protocol.headers);
       }
 
       return jsonResponse({ error: { code: "E_OBJNF", message: `no route for ${request.method} ${pathname}` } }, 404);
@@ -462,6 +462,68 @@ export class PersistentObjectDO {
           return response.value;
         };
         if (memo) return await memoizeHostOperation(memo.reads, `prop:${progr}:${objRef}:${name}`, read);
+        return await read();
+      },
+      objectSummary: async (readActor, objRef, memo) => {
+        const read = async (): Promise<ScopedObjectSummary> => {
+          const host = await hostForObject(objRef, memo);
+          if (!host || host === localHost) return await world.scopedObjectSummary(readActor, objRef, memo);
+          return await this.forwardInternalChecked<ScopedObjectSummary>(
+            host,
+            "/__internal/object-summary",
+            { read_actor: readActor, obj: objRef }
+          );
+        };
+        if (memo) return await memoizeHostOperation(memo.reads, `summary:${readActor}:${objRef}`, read);
+        return await read();
+      },
+      objectSummaries: async (readActor, objRefs, memo) => {
+        const out: Record<ObjRef, ScopedObjectSummary> = {};
+        const missingByHost = new Map<string, ObjRef[]>();
+        for (const objRef of objRefs) {
+          const key = `summary:${readActor}:${objRef}`;
+          const cached = memo?.reads.get(key) as Promise<ScopedObjectSummary> | undefined;
+          if (cached) {
+            out[objRef] = await cached;
+            continue;
+          }
+          const host = await hostForObject(objRef, memo);
+          if (!host || host === localHost) {
+            const summary = await world.scopedObjectSummary(readActor, objRef, memo);
+            out[objRef] = summary;
+            if (memo) memo.reads.set(key, Promise.resolve(summary));
+            continue;
+          }
+          const list = missingByHost.get(host) ?? [];
+          list.push(objRef);
+          missingByHost.set(host, list);
+        }
+        await Promise.all(Array.from(missingByHost, async ([host, ids]) => {
+          const response = await this.forwardInternalChecked<{ objects: Record<ObjRef, ScopedObjectSummary> }>(
+            host,
+            "/__internal/object-summaries",
+            { read_actor: readActor, ids }
+          );
+          for (const id of ids) {
+            const summary = response.objects?.[id];
+            if (!summary) continue;
+            out[id] = summary;
+            if (memo) memo.reads.set(`summary:${readActor}:${id}`, Promise.resolve(summary));
+          }
+        }));
+        return out;
+      },
+      roomSnapshot: async (readActor, room, sessionId, memo) => {
+        const read = async (): Promise<RoomSnapshot> => {
+          const host = await hostForObject(room, memo);
+          if (!host || host === localHost) return await world.roomSnapshotForActor(readActor, room, sessionId ?? null, memo);
+          return await this.forwardInternalChecked<RoomSnapshot>(
+            host,
+            "/__internal/room-snapshot",
+            { read_actor: readActor, room, session_id: sessionId ?? null }
+          );
+        };
+        if (memo) return await memoizeHostOperation(memo.reads, `room-snapshot:${readActor}:${room}:${sessionId ?? ""}`, read);
         return await read();
       },
       describeObject: async (nameActor, readActor, objRef, memo) => {
@@ -1067,6 +1129,25 @@ export class PersistentObjectDO {
         const obj = String(body.obj ?? "") as ObjRef;
         const name = String(body.name ?? "");
         return jsonResponse({ value: await world.getPropChecked(progr, obj, name) });
+      }
+
+      if (request.method === "POST" && pathname === "/__internal/object-summary") {
+        const readActor = String(body.read_actor ?? "") as ObjRef;
+        const obj = String(body.obj ?? "") as ObjRef;
+        return jsonResponse(await world.scopedObjectSummary(readActor, obj));
+      }
+
+      if (request.method === "POST" && pathname === "/__internal/object-summaries") {
+        const readActor = String(body.read_actor ?? "") as ObjRef;
+        const ids = Array.isArray(body.ids) ? body.ids.filter((item): item is ObjRef => typeof item === "string") : [];
+        return jsonResponse({ objects: await world.scopedObjectSummaries(readActor, ids) });
+      }
+
+      if (request.method === "POST" && pathname === "/__internal/room-snapshot") {
+        const readActor = String(body.read_actor ?? "") as ObjRef;
+        const room = String(body.room ?? "") as ObjRef;
+        const sessionId = typeof body.session_id === "string" ? body.session_id : null;
+        return jsonResponse(await world.roomSnapshotForActor(readActor, room, sessionId));
       }
 
       if (request.method === "POST" && pathname === "/__internal/remote-describe") {
@@ -1740,10 +1821,11 @@ function workerRestRequest(request: Request, pathname: string): RestProtocolRequ
   };
 }
 
-function jsonResponse(body: unknown, status = 200): Response {
+function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
+  if (status === 304) return new Response(null, { status, headers });
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8" }
+    headers: { "content-type": "application/json; charset=utf-8", ...headers }
   });
 }
 

@@ -39,6 +39,13 @@ canonical scoped snapshot
 All production UI reads should go through that effective projection. Raw
 snapshot objects are inputs to the projection, not a component API.
 
+Layering is per field, not per subject. A read of `control.props.cutoff`
+returns the highest-priority non-expired layer that defines `props.cutoff`; a
+live cutoff preview must not shadow a sequenced rename of the same control.
+Within a layer family, the same optimistic id replaces itself. Distinct
+optimistic ids that write the same field use last-write-wins by application
+time; distinct fields merge.
+
 ## Current status
 
 The cross-host session-record gap has been closed: call envelopes and Directory
@@ -67,6 +74,7 @@ Return shape:
 ```ts
 type MeSnapshot = {
   server_time: number;
+  cursor: ProjectionCursor;
   self: ObjectSummary;
   session: {
     id: string;
@@ -84,11 +92,49 @@ type MeSnapshot = {
 cross-host `here` reads must route to the current room's host. It must not scan
 or serialize the full world.
 
+### Stream-snapshot binding
+
+`/api/me` is also the reconnect anchor. It must return a cursor that binds the
+snapshot to the sequenced observation stream:
+
+```ts
+type ProjectionCursor = {
+  spaces: Record<ObjRef, { next_seq: number }>;
+  overlays?: Record<string, { subject: ObjRef; surface: string; next_seq?: number }>;
+  live: { resumable: false };
+};
+```
+
+The cursor covers the union of the session's `current_location`, the resolved
+`here.id`, and every restored overlay subject. Each `next_seq` is the first
+sequenced frame the client should request after applying the snapshot. Cursor
+metadata is system-scoped, not an actor property read. An actor may be entitled
+to receive/replay observations from a space even when that space's internal
+`next_seq` property is not readable as an ordinary property. Overlay snapshots
+that are backed by a sequenced space must carry the same kind of cursor.
+Live/non-sequenced frames are lossy in v1; reconnect recovery reasserts durable
+live-derived state by rehydrating `/api/me` and any restored overlay snapshots.
+Preview-only state may disappear across reconnect.
+
+The WS reconnect path should eventually accept the client's last cursor during
+auth/connect. If the server can replay the gap, it may reply `{ resumed: true }`
+and skip `/api/me`; otherwise the client must full-hydrate with `/api/me` and
+then replay from the returned cursor. Until that handshake exists, reconnect
+always hydrates and then replays from the cursor.
+
 ### `GET /api/catalogs/ui`
 
 Returns installed catalog UI metadata only: aliases, catalog names, versions,
 UI manifests, module entries, and integrity metadata. It should be version or
-ETag cacheable. Catalog UI code loading remains separate from actor state.
+ETag cacheable and should honor `If-None-Match` with `304`. Catalog UI code
+loading remains separate from actor state.
+Phase 1 exposes bundled/local catalog UI only. Remote catalog UI needs a signed
+module URL and integrity policy before it can appear here.
+
+The endpoint may include installed-catalog `objects` and `seeds` maps for
+resolution/debugging, but browser code should not choose runtime subjects from
+these seed ids. Component/frame selection should use the routed subject and its
+class/features.
 
 The existing catalog endpoints can remain for wizard/admin/catalog-management
 flows; this endpoint is the ordinary browser boot path.
@@ -97,8 +143,12 @@ flows; this endpoint is the ordinary browser boot path.
 
 `$room:enter`, `$exit:move`, and equivalent mounted-space entry verbs should
 return a self-contained room update. Preserve `room` as the room id for
-backward compatibility; add `here` as the snapshot and retire
-`look_deferred`.
+backward compatibility; add `here` as the snapshot. During the compatibility
+window, direct results are recognized as movement-shaped only when they are an
+object map with `room: ObjRef` and `here_request: true`; an unrelated verb that
+happens to return a `room` field should not trigger snapshot enrichment.
+`look_deferred` is legacy and remains only for old clients. Retire it once old
+clients are gone.
 
 ```ts
 type MoveResult = {
@@ -112,6 +162,11 @@ type MoveResult = {
 The client should atomically replace `state.here` and ingest the `here`
 objects into the projection from this result. There should be no follow-up
 `:look` round trip in the normal move path.
+
+For cross-host moves, the returned `here` snapshot must be reconciled with the
+move result, even if host effects are still deferred. If the presented session's
+current location resolves to the returned `here.id`, the moving actor must be
+present in `here.present_actors` before the client renders the move result.
 
 ### `RoomSnapshot`
 
@@ -145,6 +200,7 @@ type ObjectSummary = {
   id: ObjRef;
   name: string;
   parent?: ObjRef | null;
+  ancestors: ObjRef[]; // root -> immediate parent
   features?: ObjRef[];
   owner?: ObjRef;
   location?: ObjRef | null;
@@ -158,6 +214,47 @@ type ObjectSummary = {
 Properties are permission-filtered. Summary fields used only for matching or
 frame resolution should be intentionally included by the snapshot builder, not
 discovered by arbitrary client object reads.
+
+`ancestors` is required for client-side frame/component resolution. The client
+must not recover class distance by reading `state.world.objects[parent]`.
+
+### Snapshot permissions
+
+Snapshot builders are not verbs. They use the presented session actor as the
+read principal and apply ordinary property read permissions:
+
+- readable properties carry their value;
+- unreadable properties are present as `null` when included in `props`;
+- wizard/bypass sessions get the same bypass they get for property reads;
+- object summary reads are direct projection reads and do not run
+  acceptable/enterfunc-style hooks.
+
+Observations remain audience-filtered by the server; snapshot permissions only
+describe the initial/reconnect projection.
+
+Identity fields in `ScopedObjectSummary` (`id`, `name`, `parent`, `ancestors`,
+`features`, `owner`, `location`) are intentionally summary fields rather than
+ordinary property reads. v1 treats them as public once the object is in the
+reader's scoped projection. The access-control boundary is whether the object
+appears in `self`, `here`, `inventory`, or an overlay snapshot.
+
+### Snapshot construction cost
+
+Room and inventory snapshots must not become N remote calls per visible object.
+Phase 1 includes a bulk summary host RPC:
+
+```text
+POST /__internal/object-summaries { read_actor, ids[] }
+```
+
+Snapshot builders group refs by host and request one summary batch per remote
+host. The same path is used for `here.present_actors`, `here.contents`, exits
+that point at remote objects, and `inventory`. Host bridges must support scoped
+object summaries; falling back to plain `describeObject` is not sufficient
+because summaries need `ancestors` for client frame resolution. A gateway-side
+summary cache keyed by object id plus a version signal (`modified`, feature
+version, or a future explicit summary version) is a follow-up optimization; it
+must be invalidated by renamed/described/feature-changed observations.
 
 ### Overlay snapshots
 
@@ -225,10 +322,18 @@ Audit targets:
 - dubspace `control_changed`, `gesture_progress`, transport/loop events:
   update dubspace overlay/control projections.
 - task create/status/claim/close: update taskspace overlay projections.
+- `$error`: surface the error through the surface that issued the call. Chat
+  input commands show the error in the chat panel; overlay verbs show it in the
+  overlay. Reducers must not silently drop sequenced `$error` observations.
 
 Observations that name out-of-scope objects should include display summaries
 when the UI needs names. The client should not chase arbitrary refs through a
 global object map.
+
+When a call result contains a replacement snapshot, such as `MoveResult.here`,
+the framework ingests that snapshot before running reducers for observations
+from the same frame. Reducers must tolerate observations whose subject is no
+longer the current `here` or whose destination has not been mounted.
 
 ## Client model
 
@@ -258,6 +363,23 @@ Equivalent overlay loads use:
 ```ts
 ui.ingestSnapshot({ scope: "overlay:pinboard:<id>", objects });
 ```
+
+### Feature spaces vs `here`
+
+`session.current_location` is the acting location for verbs. `here` is the
+primary room context for the shell and room chat. When the current location is
+a feature/tool space mounted inside another room, the client resolves `here` to
+the nearest containing space whose class chain includes `$room`/`$chatroom` and
+loads the feature space as an overlay. In that case `session.current_location`
+and `here.id` intentionally diverge.
+
+Chat input binds to the active surface's space, not blindly to `here.id`.
+Examples:
+
+- ordinary room view: active surface is `here`, so chat sends to `here.id`;
+- pinboard overlay: main tool commands go to the pinboard, while the embedded
+  room chat component can explicitly bind to the pinboard's chat space or to
+  the parent room depending on the frame declaration.
 
 `ClientProjection.ingestWorld()` can remain temporarily for compatibility, but
 the new API should be `ingestSnapshot()`. Snapshot ingestion must only replace
@@ -364,11 +486,40 @@ Replacement rules:
 
 - Add snapshot builders for `ObjectSummary`, `RoomSnapshot`, inventory, and
   overlay subjects.
-- Add `/api/me`.
+- Add `/api/me` with cursor/watermark.
 - Add `/api/catalogs/ui`.
 - Add `here` to movement/entry results while keeping `room` and
   `look_deferred` for old clients.
 - Add tests for `/api/me`, room snapshot shape, and move-result `here`.
+- Add a minimal debug/smoke consumer that can hydrate `/api/me` behind a flag.
+  This prevents the server shape from landing without any client pressure.
+
+Phase 1 closeout risks to carry forward:
+
+- Default `npm test` can be a misleading signal under current load because the
+  repository has many per-test 5s timeouts. The Phase 1 work verified cleanly
+  with capped workers and a larger timeout:
+  `npx vitest run tests --pool=threads --testTimeout=30000 --maxWorkers=1`.
+  This mitigation belongs in config/scripts for the default release gate;
+  longer-term, split/retime the slow tests.
+- The production SPA still has the old global-state path: `/api/state`,
+  `scheduleRefresh()`, `build*Meta()` scans, `ensureSpacePresence()`, and many
+  `state.world.objects` reads. Phase 1 adds the scoped API but does not remove
+  the bounce/snap-back class of bugs until Phase 3/5 switch production reads.
+- Frame resolution now has enough data in scoped summaries (`ancestors`), but
+  current client frame/class-distance code still reads the global object map.
+  Phase 2/3 must move frame resolution to scoped summaries before `/api/state`
+  can leave the production path.
+- Optimistic/live/sequenced reconciliation must be per-field, not per-subject.
+  A live dubspace gesture must not shadow an unrelated sequenced rename, and a
+  stale snapshot must not erase an optimistic pin move.
+- Feature-space routing remains easy to confuse: `here` is the containing room,
+  while the active surface may be `the_pinboard`, `the_dubspace`, or another
+  feature space. Chat inputs and mini-chats should target the active surface's
+  declared space; ordinary room chat targets `here.id`.
+- Room snapshots with remote contents or present actors are real cross-host
+  work. Phase 1 has bulk summary RPC coverage, but future phases should watch
+  cache/invalidation strategy before making scoped snapshots frequent.
 
 ### Phase 2: framework projection completion
 
@@ -381,6 +532,9 @@ Replacement rules:
 ### Phase 3: client scoped-state flag
 
 - Add a client flag that boots from `/api/me`.
+- Include the client's last cursor in the WS connect/auth path; if the server
+  can replay the gap it may resume without `/api/me`, otherwise the client full
+  hydrates and replays from the new cursor.
 - Render chat/current room from `state.here`.
 - Replace move handling with atomic `state.here = result.here`.
 - Keep `/api/state` fallback available during this phase.
@@ -405,7 +559,11 @@ Replacement rules:
 Server tests:
 
 - `/api/me` returns only self/session/here/inventory and not global objects.
+- `/api/me` returns `cursor.spaces[here.id].next_seq` and object summaries
+  include `ancestors`.
 - `/api/me` routes current room snapshots cross-host.
+- `/api/me` batches remote object summaries for present actors, contents, and
+  inventory.
 - chatroom -> deck -> hot tub move result includes `here` and correct
   `entered.origin`.
 - stale cross-host presence cannot make `/api/me.session.current_location`
@@ -421,6 +579,8 @@ Framework/client tests:
   pending state.
 - move result replaces `here` atomically and does not call `/api/state`.
 - reconnect calls `/api/me`, ingests scoped snapshots, and replays gaps.
+- `/api/me` + WS race: observations emitted after the snapshot cursor are
+  replayed exactly once, with no missing or duplicate state.
 
 Regression tests:
 
@@ -438,6 +598,8 @@ itself. It changes browser state shape and REST response additions.
 Compatibility requirements:
 
 - Keep `/api/state` until the SPA no longer depends on it.
+- After Phase 5, gate `/api/state` as wizard/debug-only or replace it with
+  paged IDE/object-browser APIs.
 - Keep `room` in move results.
 - Keep `look_deferred` until the old client path is removed.
 - Additive `/api/me` and `/api/catalogs/ui` routes should not break agents or
@@ -452,9 +614,13 @@ migration table in `AGENTS.md`.
 ## Done when
 
 - Normal SPA boot does not call `/api/state`.
+- `/api/me` provides cursor/watermark data and object `ancestors` sufficient
+  for replay and frame resolution without a global object map.
 - Applied/task/replay/live frames do not schedule global state refreshes.
 - The current room UI is driven by `session.current_location` and `here`, not
   by scanning all rooms for `subscribers`.
+- Chat input targets the active surface's declared space, with ordinary room
+  chat using `here.id`.
 - Move/enter results hydrate `here` without a follow-up `:look`.
 - Dubspace controls, pinboard notes, taskspace items, and chat room UI all read
   through the framework effective projection.
@@ -463,4 +629,3 @@ migration table in `AGENTS.md`.
 - `/api/state` is legacy/debug-only.
 - Tests cover the server snapshots, projection layering, and the known
   snap-back/bounce regressions.
-

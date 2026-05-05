@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it, vi } from "vitest";
 import { createWorld } from "../../src/core/bootstrap";
 import type { Message, ObjRef, TinyBytecode, VerbDef, WooValue } from "../../src/core/types";
-import type { CallContext, HostBridge, MoveObjectResult, WooWorld } from "../../src/core/world";
+import type { CallContext, HostBridge, MoveObjectResult, RoomSnapshot, ScopedObjectSummary, WooWorld } from "../../src/core/world";
 import { CFObjectRepository } from "../../src/worker/cf-repository";
 import { DirectoryDO } from "../../src/worker/directory-do";
 import worker from "../../src/worker/index";
@@ -191,6 +191,20 @@ class FakeHostBridge implements HostBridge {
 
   async getPropChecked(progr: ObjRef, objRef: ObjRef, name: string): Promise<WooValue> {
     return await this.worldFor(objRef).getPropChecked(progr, objRef, name);
+  }
+
+  async objectSummary(readActor: ObjRef, objRef: ObjRef): Promise<ScopedObjectSummary> {
+    return await this.worldFor(objRef).scopedObjectSummary(readActor, objRef);
+  }
+
+  async objectSummaries(readActor: ObjRef, objRefs: ObjRef[]): Promise<Record<ObjRef, ScopedObjectSummary>> {
+    const out: Record<ObjRef, ScopedObjectSummary> = {};
+    for (const objRef of objRefs) out[objRef] = await this.objectSummary(readActor, objRef);
+    return out;
+  }
+
+  async roomSnapshot(readActor: ObjRef, room: ObjRef, sessionId?: string | null): Promise<RoomSnapshot> {
+    return await this.worldFor(room).roomSnapshotForActor(readActor, room, sessionId ?? null);
   }
 
   async describeObject(_nameActor: ObjRef, readActor: ObjRef, objRef: ObjRef): Promise<{ name: WooValue | null; description: WooValue | null; aliases: WooValue | null }> {

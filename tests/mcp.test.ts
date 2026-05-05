@@ -5,7 +5,7 @@ import { McpHost, type McpTool } from "../src/mcp/host";
 import { McpGateway } from "../src/mcp/gateway";
 import { buildServerInstructions, createMcpServer } from "../src/mcp/server";
 import type { Observation, ObjRef, RemoteToolDescriptor, VerbDef, WooValue } from "../src/core/types";
-import type { CallContext, HostBridge, MoveObjectResult, WooWorld } from "../src/core/world";
+import type { CallContext, HostBridge, MoveObjectResult, RoomSnapshot, ScopedObjectSummary, WooWorld } from "../src/core/world";
 
 function bootstrapWorld() {
   return createWorld();
@@ -51,6 +51,20 @@ class RemoteToolBridge implements HostBridge {
 
   async isDescendantOf(objRef: ObjRef, ancestorRef: ObjRef): Promise<boolean> {
     return await this.worldFor(objRef).isDescendantOfChecked(objRef, ancestorRef);
+  }
+
+  async objectSummary(readActor: ObjRef, objRef: ObjRef): Promise<ScopedObjectSummary> {
+    return await this.worldFor(objRef).scopedObjectSummary(readActor, objRef);
+  }
+
+  async objectSummaries(readActor: ObjRef, objRefs: ObjRef[]): Promise<Record<ObjRef, ScopedObjectSummary>> {
+    const out: Record<ObjRef, ScopedObjectSummary> = {};
+    for (const objRef of objRefs) out[objRef] = await this.objectSummary(readActor, objRef);
+    return out;
+  }
+
+  async roomSnapshot(readActor: ObjRef, room: ObjRef, sessionId?: string | null): Promise<RoomSnapshot> {
+    return await this.worldFor(room).roomSnapshotForActor(readActor, room, sessionId ?? null);
   }
 
   async dispatch(ctx: CallContext, target: ObjRef, verbName: string, args: WooValue[], startAt?: ObjRef | null): Promise<WooValue> {

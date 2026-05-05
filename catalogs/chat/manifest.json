@@ -1,6 +1,6 @@
 {
   "name": "chat",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "spec_version": "v1",
   "description": "Foundational chat primitives: $conversational feature, $match scaffolding, sentinel match objects, $room/$exit geography, $chatroom template class, and the $portable/$furniture base classes other catalogs build on. No instances seeded — install @local:demoworld for the bundled Living Room demo.",
   "license": "MIT",
@@ -472,7 +472,7 @@
               "who"
             ]
           },
-          "source": "verb :move(who) rxd { if (who != actor) { raise { code: \"E_PERM\", message: \"exits only move the invoking actor\", value: who }; } let source = this.source; let dest = this.dest; if (this.nogo_msg) { tell(who, this.nogo_msg); if (this.onogo_msg) { source:announce_all_but([who], who.name + \" \" + this.onogo_msg); } return this.nogo_msg; } if (!dest) { let msg = \"You can't go that way.\"; tell(who, msg); return msg; } if (this.leave_msg) { tell(who, this.leave_msg); } moveto(who, dest); let left_text = who.name + \" \" + this.oleave_msg; observe_to_space(source, { type: \"left\", actor: who, room: source, destination: dest, exit: this.name, text: left_text, ts: now() }); if (this.arrive_msg) { tell(who, this.arrive_msg); } let entered_text = who.name + \" \" + this.oarrive_msg; observe_to_space(dest, { type: \"entered\", actor: who, room: dest, origin: source, exit: this.name, text: entered_text, ts: now() }); return { room: dest, from: source, exit: this.name, look_deferred: true }; }"
+          "source": "verb :move(who) rxd { if (who != actor) { raise { code: \"E_PERM\", message: \"exits only move the invoking actor\", value: who }; } let source = this.source; let dest = this.dest; if (this.nogo_msg) { tell(who, this.nogo_msg); if (this.onogo_msg) { source:announce_all_but([who], who.name + \" \" + this.onogo_msg); } return this.nogo_msg; } if (!dest) { let msg = \"You can't go that way.\"; tell(who, msg); return msg; } if (this.leave_msg) { tell(who, this.leave_msg); } moveto(who, dest); let left_text = who.name + \" \" + this.oleave_msg; observe_to_space(source, { type: \"left\", actor: who, room: source, destination: dest, exit: this.name, text: left_text, ts: now() }); if (this.arrive_msg) { tell(who, this.arrive_msg); } let entered_text = who.name + \" \" + this.oarrive_msg; observe_to_space(dest, { type: \"entered\", actor: who, room: dest, origin: source, exit: this.name, text: entered_text, ts: now() }); return { room: dest, from: source, exit: this.name, here_request: true, look_deferred: true }; }"
         },
         {
           "name": "announce_msg",
@@ -709,7 +709,7 @@
               "actor?"
             ]
           },
-          "source": "verb :enter(who) rxd { let old = location(actor); if (old != null && old != this && old != $nowhere) { try { observe_to_space(old, { type: \"left\", actor: actor, room: old, destination: this, text: actor.name + \" left.\", ts: now() }); } except err { } } moveto(actor, this); observe_to_space(this, { type: \"entered\", actor: actor, room: this, origin: old, text: actor.name + \" entered.\", ts: now() }); return { room: this, present_actors: this.subscribers, look_deferred: true }; }"
+          "source": "verb :enter(who) rxd { let old = location(actor); if (old != null && old != this && old != $nowhere) { try { observe_to_space(old, { type: \"left\", actor: actor, room: old, destination: this, text: actor.name + \" left.\", ts: now() }); } except err { } } moveto(actor, this); observe_to_space(this, { type: \"entered\", actor: actor, room: this, origin: old, text: actor.name + \" entered.\", ts: now() }); return { room: this, present_actors: this.subscribers, here_request: true, look_deferred: true }; }"
         },
         {
           "name": "leave",

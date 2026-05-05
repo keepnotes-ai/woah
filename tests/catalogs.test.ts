@@ -524,7 +524,7 @@ describe("local catalogs", () => {
     const entered = await world.directCall("dubspace-enter", actor, "the_dubspace", "enter", []);
     expect(entered.op).toBe("result");
     if (entered.op === "result") {
-      expect(entered.result).toEqual([actor]);
+      expect(entered.result).toMatchObject({ room: "the_dubspace", operators: [actor], look_deferred: true });
       expect(entered.observations.map((obs) => obs.type)).toEqual(["dubspace_entered", "dubspace_activity"]);
       expect(entered.observations[0]).toMatchObject({ text: `${actorName} steps up to Dubspace.` });
       expect(entered.observations[1]).toMatchObject({ source: "the_chatroom", space: "the_dubspace", actor });

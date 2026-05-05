@@ -19,6 +19,8 @@ The two wire formats target the same model. WebSocket is the right shape for cli
 POST  /api/auth
 DELETE /api/session
 GET   /api/state
+GET   /api/me
+GET   /api/catalogs/ui
 GET   /api/objects/{id-or-name}
 GET   /api/objects/{id-or-name}/properties/{name}
 POST  /api/objects/{id-or-name}/calls/{verb}
@@ -26,7 +28,7 @@ GET   /api/objects/{id-or-name}/log?from=N&limit=M
 GET   /api/objects/{id-or-name}/stream
 ```
 
-Eight endpoints. Everything is an object; identifiers are object refs,
+Ten endpoints. Everything is an object; identifiers are object refs,
 corenames, or implementation-local object ids.
 
 ---
@@ -74,6 +76,38 @@ routes must fail closed through the normal session validation path.
 projection's object graph may include compatibility presence mirrors, but
 clients that need to know where this tab/tool session is should read
 `session.current_location`.
+
+`GET /api/me` returns the scoped browser projection for the presented session:
+`{ server_time, cursor, self, session, here, inventory }`. It is the ordinary
+client-boot and reconnect endpoint. It MUST NOT serialize the full world object
+map. `cursor.spaces[space].next_seq` is the first sequenced frame to request
+after applying the snapshot. Cursor spaces are the union of
+`session.current_location`, `here.id`, and every overlay subject. Cursor
+metadata is a system-scoped read, not a user property read; an actor may be
+entitled to replay observations from a space whose internal `next_seq` property
+is not readable by that actor. A space appears in the cursor only when it
+exposes a numeric `next_seq`; live-only state is reasserted by hydration rather
+than replay. `session.current_location` is the acting location for the
+presented session; `here` is a shallow, actor-filtered room snapshot for that
+location or `null`. Object summaries include `ancestors` so clients can resolve
+UI frames without reading a global class graph. Distributed implementations
+route `here` reads to the host that owns the current room.
+
+Object summary `props` are actor-filtered by property read permissions. Identity
+fields (`id`, `name`, `parent`, `ancestors`, `features`, `owner`, `location`)
+are summary fields, not ordinary property reads; v1 treats them as public to a
+client that is already entitled to receive the object summary. Access control
+is therefore on whether the object is in the scoped projection, not on masking
+individual identity fields.
+
+`GET /api/catalogs/ui` returns installed catalog UI declarations and module
+metadata only. It is cacheable by catalog version/ETag and is separate from
+actor/session state. Implementations SHOULD return an `ETag`, honor
+`If-None-Match` with `304`, and include a revalidation cache policy. v1 exposes
+bundled/local catalog UI only; remote catalog UI requires a separate module URL
+and integrity policy. `objects` and `seeds` entries are catalog-install metadata
+for resolution/debugging and are not a stable contract for choosing runtime
+subjects.
 
 Credentialed auth extends the vocabulary per [auth.md §A3](../identity/auth.md#a3-token-vocabulary-extended): `bearer:<jwt>`, `apikey:<id>:<secret>`, `oauth_code:<provider>:<code>`, `recovery:<token>`. Bearer tokens use `Authorization: Bearer <jwt>` with signature/claims validation. The endpoint shape is unchanged; only the accepted vocabulary expands.
 
@@ -130,6 +164,19 @@ In both cases:
 - `actor` defaults to `$me`. Wizards may pass a different actor (logged); regular callers presenting an actor different from their session's binding get `403 E_PERM`.
 - `id` is a client-chosen correlation token; idempotent retry returns the same response within the cache window (5 min, per [wire.md §17.4](wire.md#174-the-applied-push-model)).
 - `body` is an optional map carrying additional named arguments per the verb's `arg_spec`.
+
+Direct movement/entry verbs that return an object-shaped `{ room, here_request:
+true, ... }` result also include `here`, a shallow room snapshot in the same
+shape as `/api/me.here`. Older clients may continue to use `room` and
+`look_deferred`; scoped clients can hydrate the destination without a follow-up
+`:look` call. `look_deferred` is legacy and does not itself request snapshot
+enrichment.
+
+When move execution defers cross-host presence writes, the returned `here`
+snapshot must still include the moving actor if the presented session's current
+location resolves to that `here` room. Implementations may satisfy this by
+flushing the relevant host effects before reading the snapshot, or by patching
+the actor into the move-result snapshot deterministically.
 
 **Pre-sequence vs sequenced errors.** REST distinguishes the two cases [space.md §S3](../semantics/space.md#s3-failure-rules-normative) requires:
 

@@ -11,6 +11,8 @@ export default defineConfig({
     port: 5173
   },
   test: {
-    pool: "threads"
+    pool: "threads",
+    testTimeout: 30_000,
+    maxWorkers: 1
   }
 });

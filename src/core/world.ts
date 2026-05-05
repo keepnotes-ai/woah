@@ -112,6 +112,9 @@ export type HostBridge = {
   localHost: string;
   hostForObject(id: ObjRef, memo?: HostOperationMemo): string | null | Promise<string | null>;
   getPropChecked(progr: ObjRef, objRef: ObjRef, name: string, memo?: HostOperationMemo): Promise<WooValue>;
+  objectSummary(readActor: ObjRef, objRef: ObjRef, memo?: HostOperationMemo): Promise<ScopedObjectSummary>;
+  objectSummaries(readActor: ObjRef, objRefs: ObjRef[], memo?: HostOperationMemo): Promise<Record<ObjRef, ScopedObjectSummary>>;
+  roomSnapshot(readActor: ObjRef, room: ObjRef, sessionId?: string | null, memo?: HostOperationMemo): Promise<RoomSnapshot>;
   describeObject?(nameActor: ObjRef, readActor: ObjRef, objRef: ObjRef, memo?: HostOperationMemo): Promise<HostObjectSummary>;
   describeObjects?(nameActor: ObjRef, readActor: ObjRef, objRefs: ObjRef[], memo?: HostOperationMemo): Promise<Record<ObjRef, HostObjectSummary>>;
   resolveVerb?(target: ObjRef, verbName: string, memo?: HostOperationMemo): Promise<CommandVerbSummary | null>;
@@ -161,6 +164,56 @@ export type WorldSnapshot = {
   catalogs: { installed: WooValue[] };
   object_routes: Array<{ id: ObjRef; host: string; anchor: ObjRef | null }>;
   objects: Record<string, unknown>;
+};
+
+export type ScopedObjectSummary = {
+  id: ObjRef;
+  name: string;
+  parent?: ObjRef | null;
+  ancestors: ObjRef[];
+  features?: ObjRef[];
+  owner?: ObjRef;
+  location?: ObjRef | null;
+  aliases?: string[];
+  description?: WooValue | null;
+  props?: Record<string, WooValue>;
+  catalogState?: Record<string, Record<string, WooValue>>;
+};
+
+export type RoomSnapshot = {
+  id: ObjRef;
+  name: string;
+  parent?: ObjRef | null;
+  features?: ObjRef[];
+  description?: WooValue | null;
+  exits: Array<{
+    id: ObjRef;
+    name: string;
+    aliases?: string[];
+    direction?: string;
+    dest?: ObjRef | null;
+  }>;
+  present_actors: ScopedObjectSummary[];
+  contents: ScopedObjectSummary[];
+  props?: Record<string, WooValue>;
+};
+
+export type MeSnapshot = {
+  server_time: number;
+  cursor: {
+    spaces: Record<ObjRef, { next_seq: number }>;
+    live: { resumable: false };
+  };
+  self: ScopedObjectSummary;
+  session: {
+    id: string;
+    actor: ObjRef;
+    current_location: ObjRef | null;
+    all_locations: ObjRef[];
+  };
+  here: RoomSnapshot | null;
+  inventory: ScopedObjectSummary[];
+  overlays?: Record<string, { subject: ObjRef; surface: string; restore?: boolean }>;
 };
 
 const DEFAULT_OBJECT_HOST = "world";
@@ -1356,6 +1409,7 @@ export class WooWorld {
       if (options.deferHostEffect) {
         for (const effect of deferredHostEffects) options.deferHostEffect(effect);
       }
+      result = await this.enrichScopedMoveResult(dispatchCtx, result);
       // Cross-host bridge stashes authoritative audience info on ctx; prefer
       // it over recomputing locally where the local subscriber/presence view
       // for self-hosted spaces is stale.
@@ -1378,6 +1432,32 @@ export class WooWorld {
       this.recordMetric({ kind: "direct_call", target, verb: verbName, audience: null, observations: 0, ms: Date.now() - startedAt, status: "error", error: error.code });
       return { op: "error", id: frameId, error };
     }
+  }
+
+  private async enrichScopedMoveResult(ctx: CallContext, result: WooValue): Promise<WooValue> {
+    if (!result || typeof result !== "object" || Array.isArray(result)) return result;
+    const map = result as Record<string, WooValue>;
+    if (map.here !== undefined || map.here_request !== true || typeof map.room !== "string") return result;
+    const memo = ctx.hostMemo ?? createHostOperationMemo();
+    const hereLocation = await this.primaryRoomForLocation(map.room, memo);
+    if (!hereLocation) return result;
+    const here = await this.roomSnapshotForActor(ctx.actor, hereLocation, ctx.session, memo);
+    return {
+      ...map,
+      here: await this.includeMovingActorInHere(ctx, here, memo)
+    };
+  }
+
+  private async includeMovingActorInHere(ctx: CallContext, here: RoomSnapshot, memo: HostOperationMemo): Promise<RoomSnapshot> {
+    if (!ctx.session || here.present_actors.some((actor) => actor.id === ctx.actor)) return here;
+    const currentLocation = this.currentLocationForSession(ctx.session);
+    if (!currentLocation) return here;
+    const currentHere = await this.primaryRoomForLocation(currentLocation, memo);
+    if (currentHere !== here.id) return here;
+    return {
+      ...here,
+      present_actors: [...here.present_actors, await this.scopedObjectSummary(ctx.actor, ctx.actor, memo)]
+    };
   }
 
   replay(space: ObjRef, from: number, limit: number): SpaceLogEntry[] {
@@ -1618,6 +1698,126 @@ export class WooWorld {
     };
   }
 
+  async meSnapshot(session: Session): Promise<MeSnapshot> {
+    const memo = createHostOperationMemo();
+    const currentLocation = this.currentLocationForSession(session.id);
+    const hereLocation = currentLocation ? await this.primaryRoomForLocation(currentLocation, memo) : null;
+    const inventoryRefs = await this.objectContents(session.actor, memo);
+    const inventory = await this.scopedObjectSummaries(session.actor, inventoryRefs, memo);
+    const overlays = currentLocation && hereLocation && currentLocation !== hereLocation
+      ? { current_location: { subject: currentLocation, surface: "default", restore: true } }
+      : undefined;
+    const cursorSpaces = [
+      currentLocation,
+      hereLocation,
+      ...Object.values(overlays ?? {}).map((overlay) => overlay.subject)
+    ].filter((item): item is ObjRef => typeof item === "string");
+    return {
+      server_time: Date.now(),
+      cursor: await this.projectionCursor(cursorSpaces, memo),
+      self: await this.scopedObjectSummary(session.actor, session.actor, memo),
+      session: {
+        id: session.id,
+        actor: session.actor,
+        current_location: currentLocation,
+        all_locations: this.allLocationsForActor(session.actor)
+      },
+      here: hereLocation ? await this.roomSnapshotForActor(session.actor, hereLocation, session.id, memo) : null,
+      inventory: inventoryRefs.map((id) => inventory[id]).filter((item): item is ScopedObjectSummary => item !== undefined),
+      overlays
+    };
+  }
+
+  async roomSnapshotForActor(actor: ObjRef, room: ObjRef, sessionId: string | null = null, memo: HostOperationMemo = createHostOperationMemo()): Promise<RoomSnapshot> {
+    if (await this.remoteHostForObject(room, memo)) {
+      if (!this.hostBridge?.roomSnapshot) throw wooError("E_INTERNAL", "remote host bridge room snapshots unavailable");
+      return await this.hostBridge.roomSnapshot(actor, room, sessionId, memo);
+    }
+
+    const roomSummary = await this.scopedObjectSummary(actor, room, memo);
+    const presentRefs = await this.chatPresentAsync(room, actor);
+    const contentRefs = (await this.objectContents(room, memo)).filter((item) => !this.isActorForLook(item, presentRefs));
+    const exits = await this.exitSummariesForRoom(actor, room, memo);
+    const present = await this.scopedObjectSummaries(actor, presentRefs, memo);
+    const contents = await this.scopedObjectSummaries(actor, contentRefs, memo);
+    return {
+      id: room,
+      name: roomSummary.name,
+      parent: roomSummary.parent,
+      features: roomSummary.features,
+      description: roomSummary.description,
+      exits,
+      present_actors: presentRefs.map((id) => present[id]).filter((item): item is ScopedObjectSummary => item !== undefined),
+      contents: contentRefs.map((id) => contents[id]).filter((item): item is ScopedObjectSummary => item !== undefined),
+      props: roomSummary.props
+    };
+  }
+
+  async scopedObjectSummaries(actor: ObjRef, objRefs: ObjRef[], memo: HostOperationMemo = createHostOperationMemo()): Promise<Record<ObjRef, ScopedObjectSummary>> {
+    const out: Record<ObjRef, ScopedObjectSummary> = {};
+    const remoteByHost = new Map<string, ObjRef[]>();
+    for (const objRef of objRefs) {
+      const host = await this.remoteHostForObject(objRef, memo);
+      if (!host) {
+        out[objRef] = this.localScopedObjectSummary(actor, objRef);
+        continue;
+      }
+      const list = remoteByHost.get(host) ?? [];
+      list.push(objRef);
+      remoteByHost.set(host, list);
+    }
+    if (remoteByHost.size === 0) return out;
+    if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge object summaries unavailable");
+    await Promise.all(Array.from(remoteByHost.values()).map(async (ids) => {
+      Object.assign(out, await this.hostBridge!.objectSummaries(actor, ids, memo));
+    }));
+    return out;
+  }
+
+  async scopedObjectSummary(actor: ObjRef, objRef: ObjRef, memo: HostOperationMemo = createHostOperationMemo()): Promise<ScopedObjectSummary> {
+    if (await this.remoteHostForObject(objRef, memo)) {
+      if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge object summaries unavailable");
+      return await this.hostBridge.objectSummary(actor, objRef, memo);
+    }
+    return this.localScopedObjectSummary(actor, objRef);
+  }
+
+  private async projectionCursor(spaces: ObjRef[], memo: HostOperationMemo): Promise<MeSnapshot["cursor"]> {
+    const cursor: MeSnapshot["cursor"] = { spaces: {}, live: { resumable: false } };
+    for (const space of Array.from(new Set(spaces))) {
+      const nextSeq = await this.cursorNextSeq(space, memo);
+      if (typeof nextSeq === "number" && Number.isFinite(nextSeq)) cursor.spaces[space] = { next_seq: nextSeq };
+    }
+    return cursor;
+  }
+
+  private async cursorNextSeq(space: ObjRef, memo: HostOperationMemo): Promise<WooValue | null> {
+    try {
+      if (await this.remoteHostForObject(space, memo)) {
+        if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+        return await this.hostBridge.getPropChecked("$wiz", space, "next_seq", memo);
+      }
+      return this.getProp(space, "next_seq");
+    } catch {
+      return null;
+    }
+  }
+
+  private async primaryRoomForLocation(location: ObjRef, memo: HostOperationMemo): Promise<ObjRef | null> {
+    let current: ObjRef | null = location;
+    let fallbackSpace: ObjRef | null = null;
+    const seen = new Set<ObjRef>();
+    while (current && !seen.has(current)) {
+      seen.add(current);
+      if (fallbackSpace === null && await this.spaceLikeOrRemote(current, memo)) fallbackSpace = current;
+      if (await this.isDescendantOfChecked(current, "$room", memo)) return current;
+      const parentLocation = await this.objectLocationChecked(current, memo);
+      if (!parentLocation || parentLocation === current) break;
+      current = parentLocation;
+    }
+    return fallbackSpace;
+  }
+
   objectRoutes(): Array<{ id: ObjRef; host: string; anchor: ObjRef | null }> {
     const selfHosted = new Set<ObjRef>();
     for (const id of this.objects.keys()) {
@@ -1652,6 +1852,65 @@ export class WooWorld {
       props[String(name)] = actor ? this.propOrNullForActor(actor, id, String(name)) : this.propOrNull(id, String(name));
     }
     return { ...described, props };
+  }
+
+  private localScopedObjectSummary(actor: ObjRef, objRef: ObjRef): ScopedObjectSummary {
+    const obj = this.object(objRef);
+    const props: Record<string, WooValue> = {};
+    for (const name of this.properties(objRef)) props[String(name)] = this.propOrNullForActor(actor, objRef, String(name));
+    const aliases = props.aliases;
+    return {
+      id: obj.id,
+      name: obj.name,
+      parent: obj.parent,
+      ancestors: this.ancestorsOf(objRef),
+      features: this.safeFeatureList(objRef),
+      owner: obj.owner,
+      location: obj.location,
+      aliases: Array.isArray(aliases) ? aliases.filter((item): item is string => typeof item === "string") : undefined,
+      description: props.description ?? null,
+      props
+    };
+  }
+
+  private safeFeatureList(objRef: ObjRef): ObjRef[] {
+    try {
+      if (!this.canCarryFeatures(objRef)) return [];
+      return this.featureList(objRef);
+    } catch {
+      return [];
+    }
+  }
+
+  private ancestorsOf(objRef: ObjRef): ObjRef[] {
+    const ancestors: ObjRef[] = [];
+    let current = this.object(objRef).parent;
+    const seen = new Set<ObjRef>();
+    while (current && !seen.has(current)) {
+      ancestors.push(current);
+      seen.add(current);
+      current = this.object(current).parent;
+    }
+    return ancestors.reverse();
+  }
+
+  private async exitSummariesForRoom(actor: ObjRef, room: ObjRef, memo: HostOperationMemo): Promise<RoomSnapshot["exits"]> {
+    const raw = await this.propOrNullForActorAsync(actor, room, "exits", memo);
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+    const entries = Object.entries(raw as Record<string, WooValue>)
+      .filter((entry): entry is [string, ObjRef] => typeof entry[1] === "string")
+      .sort(([a], [b]) => a.localeCompare(b));
+    return await Promise.all(entries.map(async ([direction, exit]) => {
+      const summary = await this.scopedObjectSummary(actor, exit, memo);
+      const dest = await this.propOrNullForActorAsync(actor, exit, "dest", memo);
+      return {
+        id: exit,
+        name: summary.name,
+        aliases: summary.aliases,
+        direction,
+        dest: typeof dest === "string" ? dest : null
+      };
+    }));
   }
 
   async builderCreateObject(actor: ObjRef, parentRef: ObjRef, opts: WooValue, surfaceClass: ObjRef): Promise<WooValue> {
@@ -5369,9 +5628,9 @@ export class WooWorld {
     const stale: ObjRef[] = [];
     await Promise.all(subscribers.map(async (actor) => {
       const remote = await this.remoteHostForObject(actor, memo);
-      const locations = remote
-        ? await this.hostBridge?.actorSessionLocations?.(actor, memo) ?? []
-        : this.allLocationsForActor(actor);
+      const localLocations = this.allLocationsForActor(actor);
+      const remoteLocations = remote ? await this.hostBridge?.actorSessionLocations?.(actor, memo) ?? [] : [];
+      const locations = remote ? Array.from(new Set([...localLocations, ...remoteLocations])) : localLocations;
       if (locations.includes(space)) kept.push(actor);
       else stale.push(actor);
     }));

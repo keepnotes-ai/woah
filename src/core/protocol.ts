@@ -11,7 +11,7 @@ import {
   type Observation,
   type WooValue
 } from "./types";
-import { localCatalogStatuses } from "./local-catalogs";
+import { localCatalogStatuses, localCatalogUiIndex } from "./local-catalogs";
 import { normalizeError, type DirectCallOptions, type ParkedTaskRun, type WooWorld } from "./world";
 
 const MAX_WS_FRAME_BYTES = 256 * 1024;
@@ -26,7 +26,7 @@ export type RestProtocolRequest = {
 
 export type RestProtocolResult =
   | { handled: false }
-  | { handled: true; status: number; body: unknown }
+  | { handled: true; status: number; body: unknown; headers?: Record<string, string> }
   | { handled: true; raw: true };
 
 export type RestProtocolHost = {
@@ -72,6 +72,11 @@ export async function handleRestProtocolRequest(request: RestProtocolRequest, ho
       return jsonProtocol(withSessionProjection(await host.state(session.actor), world, session));
     }
 
+    if (request.method === "GET" && request.pathname === "/api/me") {
+      const session = host.requireSession(request);
+      return jsonProtocol(await world.meSnapshot(session));
+    }
+
     if (request.method === "DELETE" && request.pathname === "/api/session") {
       const session = host.requireSession(request);
       world.endSession(session.id);
@@ -112,6 +117,11 @@ export async function handleRestProtocolRequest(request: RestProtocolRequest, ho
     if (request.method === "GET" && request.pathname === "/api/catalogs") {
       const session = host.requireSession(request);
       return jsonProtocol({ ...world.state(session.actor).catalogs, local: localCatalogStatuses(world) });
+    }
+
+    if (request.method === "GET" && request.pathname === "/api/catalogs/ui") {
+      host.requireSession(request);
+      return catalogUiProtocol(request, world);
     }
 
     if (request.method === "GET" && request.pathname === "/api/object") {
@@ -295,8 +305,29 @@ export function statusForError(error: ErrorValue): number {
   }
 }
 
-function jsonProtocol(body: unknown, status = 200): RestProtocolResult {
-  return { handled: true, status, body };
+function jsonProtocol(body: unknown, status = 200, headers?: Record<string, string>): RestProtocolResult {
+  return { handled: true, status, body, headers };
+}
+
+function catalogUiProtocol(request: RestProtocolRequest, world: WooWorld): RestProtocolResult {
+  const body = localCatalogUiIndex(world);
+  const payload = JSON.stringify(body);
+  const etag = `"catalog-ui-${stableHash(payload)}"`;
+  const headers = {
+    "etag": etag,
+    "cache-control": "max-age=60, must-revalidate"
+  };
+  if (request.header("if-none-match") === etag) return jsonProtocol(null, 304, headers);
+  return jsonProtocol(body, 200, headers);
+}
+
+function stableHash(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 function errorProtocol(error: ErrorValue): RestProtocolResult {
@@ -389,7 +420,7 @@ export async function handleWsProtocolFrame<Connection>(
     }
 
     if (op === "ping") {
-      host.send(connection, { op: "pong" });
+      host.send(connection, { op: "pong", server_time: Date.now() });
       return;
     }
 

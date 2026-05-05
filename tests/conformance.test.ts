@@ -6,7 +6,7 @@ import { compileVerb, installVerb } from "../src/core/authoring";
 import { createWorld } from "../src/core/bootstrap";
 import { InMemoryObjectRepository } from "../src/core/repository";
 import type { AppliedFrame, DirectResultFrame, ErrorFrame, Message, ObjRef, TinyBytecode, VerbDef, WooValue } from "../src/core/types";
-import type { CallContext, DeferredHostEffect, HostBridge, MoveObjectResult, WooWorld } from "../src/core/world";
+import type { CallContext, DeferredHostEffect, HostBridge, MoveObjectResult, RoomSnapshot, ScopedObjectSummary, WooWorld } from "../src/core/world";
 import { LocalSQLiteRepository } from "../src/server/sqlite-repository";
 
 type Harness = {
@@ -153,6 +153,20 @@ class LocalHostBridge implements HostBridge {
 
   async getPropChecked(progr: ObjRef, objRef: ObjRef, name: string): Promise<WooValue> {
     return await this.worldFor(objRef).getPropChecked(progr, objRef, name);
+  }
+
+  async objectSummary(readActor: ObjRef, objRef: ObjRef): Promise<ScopedObjectSummary> {
+    return await this.worldFor(objRef).scopedObjectSummary(readActor, objRef);
+  }
+
+  async objectSummaries(readActor: ObjRef, objRefs: ObjRef[]): Promise<Record<ObjRef, ScopedObjectSummary>> {
+    const out: Record<ObjRef, ScopedObjectSummary> = {};
+    for (const objRef of objRefs) out[objRef] = await this.objectSummary(readActor, objRef);
+    return out;
+  }
+
+  async roomSnapshot(readActor: ObjRef, room: ObjRef, sessionId?: string | null): Promise<RoomSnapshot> {
+    return await this.worldFor(room).roomSnapshotForActor(readActor, room, sessionId ?? null);
   }
 
   async describeObject(_nameActor: ObjRef, readActor: ObjRef, objRef: ObjRef): Promise<{ name: WooValue | null; description: WooValue | null; aliases: WooValue | null }> {

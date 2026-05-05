@@ -85,7 +85,7 @@ const server = http.createServer(async (req, res) => {
     });
     if (protocol.handled) {
       if ("raw" in protocol) return;
-      return json(res, protocol.body, protocol.status);
+      return json(res, protocol.body, protocol.status, protocol.headers);
     }
     if (req.method === "POST" && url.pathname === "/api/compile") {
       if (!authoringEnabled()) return json(res, { error: wooError("E_PERM", "authoring endpoints are disabled") }, 403);
@@ -446,9 +446,14 @@ function nodeRestRequest(req: http.IncomingMessage, pathname: string): RestProto
   };
 }
 
-function json(res: http.ServerResponse, body: unknown, status = 200): void {
+function json(res: http.ServerResponse, body: unknown, status = 200, headers: Record<string, string> = {}): void {
   res.statusCode = status;
   res.setHeader("content-type", "application/json; charset=utf-8");
+  for (const [name, value] of Object.entries(headers)) res.setHeader(name, value);
+  if (status === 304) {
+    res.end();
+    return;
+  }
   res.end(JSON.stringify(body, null, 2));
 }
 

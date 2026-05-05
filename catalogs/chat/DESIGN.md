@@ -214,8 +214,10 @@ aliases; duplicate alias claims are catalog errors during seed/repair.
 
 Unlike LambdaCore's `$room:enterfunc`, movement does not automatically render
 the destination room inside the same server turn. `$exit:move()` returns
-`look_deferred: true` with the destination room. Clients and agents should
-follow a successful movement result by calling `:look()` on that room.
+`here_request: true` and legacy `look_deferred: true` with the destination
+room. Scoped clients consume the enriched `here` snapshot; old clients and
+agents can still follow a successful movement result by calling `:look()` on
+that room.
 
 The room's chat behavior still comes from `$conversational`; exits and carrying are room mechanics, not feature mechanics.
 

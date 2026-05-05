@@ -254,6 +254,32 @@ export function localCatalogStatuses(world: WooWorld, names: readonly string[] =
   });
 }
 
+export function localCatalogUiIndex(world: WooWorld): { catalogs: WooValue[] } {
+  if (!world.objects.has("$catalog_registry")) return { catalogs: [] };
+  const raw = world.propOrNull("$catalog_registry", "installed_catalogs");
+  if (!Array.isArray(raw)) return { catalogs: [] };
+  const catalogs: WooValue[] = [];
+  for (const record of raw) {
+    if (!record || typeof record !== "object" || Array.isArray(record)) continue;
+    const item = record as Record<string, WooValue>;
+    // Phase 1 exposes only bundled/local UI manifests. Remote taps need a
+    // signed module URL and integrity policy before they can appear here.
+    if (item.tap !== "@local" || typeof item.catalog !== "string") continue;
+    const manifest = LOCAL_CATALOGS.get(item.catalog);
+    const ui = (manifest as (CatalogManifest & { ui?: WooValue }) | undefined)?.ui;
+    if (!manifest || !ui) continue;
+    catalogs.push({
+      alias: typeof item.alias === "string" ? item.alias : item.catalog,
+      catalog: item.catalog,
+      version: typeof item.version === "string" ? item.version : manifest.version,
+      objects: item.objects && typeof item.objects === "object" && !Array.isArray(item.objects) ? item.objects : {},
+      seeds: item.seeds && typeof item.seeds === "object" && !Array.isArray(item.seeds) ? item.seeds : {},
+      ui
+    });
+  }
+  return { catalogs };
+}
+
 export function runHostScopedLocalCatalogLifecycle(world: WooWorld, host = "host", options: { freshSeed?: boolean } = {}): void {
   runHostScopedSchemaPlans(world, host, options.freshSeed === true);
   runHostScopedDataMigrations(world, host);

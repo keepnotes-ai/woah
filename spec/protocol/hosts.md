@@ -220,9 +220,10 @@ through `observe_to_space(destination_room, ...)`. If those calls require actor
 presence or object-location writes on another host, the runtime returns generic
 deferred effects (`actor_presence`, `space_subscriber`, `move_object`) to the
 origin host and applies them after the open cross-host behavior turn unwinds.
-The result carries `look_deferred: true`; the client or agent asks the
-destination room for `:look()` in a separate direct call so destination-room
-composition runs on the destination host.
+The result carries `here_request: true` and legacy `look_deferred: true`.
+Scoped clients receive an enriched `here` snapshot; old clients or agents may
+still ask the destination room for `:look()` in a separate direct call so
+destination-room composition runs on the destination host.
 
 #### 3.5.6 Observability and conformance
 

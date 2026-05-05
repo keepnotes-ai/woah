@@ -424,10 +424,9 @@ All direct-callable (rxd). Observations are live-only by route per [chat DESIGN.
 leave/arrival text to `who`, calls `moveto(who, dest)`, and emits `left` /
 `entered` observations to the source and destination rooms. The core `moveto`
 path updates the calling session's current location and session presence.
-It returns `{room: dest, from: source, exit, look_deferred: true}`. Unlike
-LambdaCore's `$room:enterfunc`, the server turn does not also render
-`dest:look_self()`; clients and agents that want the destination description
-must follow movement with `dest:look()`.
+It returns `{room: dest, from: source, exit, here_request: true,
+look_deferred: true}`. Unlike LambdaCore's `$room:enterfunc`, legacy clients
+that do not consume `here` must follow movement with `dest:look()`.
 
 For v1, `this.exits` is still a map for fast lookup, but exit aliases are
 declared on the `$exit` object. Local seed/repair expands the room map from

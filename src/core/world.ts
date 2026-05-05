@@ -1013,10 +1013,23 @@ export class WooWorld {
     id: string,
     actor: ObjRef,
     tokenClass: Session["tokenClass"] = "bearer",
-    expiresAt?: number
+    expiresAt?: number,
+    currentLocation?: ObjRef | null
   ): Session {
     const existing = this.sessions.get(id);
-    if (existing) return existing;
+    if (existing) {
+      let changed = false;
+      if (Number.isFinite(expiresAt) && expiresAt !== undefined && expiresAt > existing.expiresAt) {
+        existing.expiresAt = expiresAt;
+        changed = true;
+      }
+      if (currentLocation && existing.currentLocation !== currentLocation) {
+        existing.currentLocation = currentLocation;
+        changed = true;
+      }
+      if (changed) this.persistSession(existing);
+      return existing;
+    }
     this.object(actor);
     const now = Date.now();
     const session: Session = {
@@ -1026,7 +1039,7 @@ export class WooWorld {
       expiresAt: expiresAt ?? now + this.sessionTtl(tokenClass),
       lastDetachAt: null,
       tokenClass,
-      currentLocation: this.initialSessionLocation(actor),
+      currentLocation: currentLocation ?? this.initialSessionLocation(actor),
       attachedSockets: new Set(),
       lastInputAt: now
     };

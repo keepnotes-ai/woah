@@ -510,6 +510,12 @@ describe("CFObjectRepository production-shape coverage", () => {
       const goDeck = await post("/api/objects/the_chatroom/calls/southeast", { args: [] }, session);
       expect(goDeck.status).toBe(200);
       expect(goDeck.body.result).toMatchObject({ room: "the_deck", from: "the_chatroom", look_deferred: true });
+      expect(goDeck.body.observations).toContainEqual(expect.objectContaining({ type: "entered", room: "the_deck", origin: "the_chatroom" }));
+      const deckState = await worker.fetch(new Request("https://woo.test/api/state", {
+        headers: { authorization: `Session ${session}` }
+      }), env, {});
+      expect(deckState.ok).toBe(true);
+      expect((await deckState.json() as Record<string, any>).session?.current_location).toBe("the_deck");
 
       const takeTowel = await post("/api/objects/the_deck/calls/take", { args: ["towel"] }, session);
       expect(takeTowel.status).toBe(200);
@@ -519,6 +525,12 @@ describe("CFObjectRepository production-shape coverage", () => {
       const enterTub = await post("/api/objects/the_hot_tub/calls/enter", { args: [] }, session);
       expect(enterTub.status).toBe(200);
       expect(enterTub.body.result).toMatchObject({ room: "the_hot_tub", look_deferred: true });
+      expect(enterTub.body.observations).toContainEqual(expect.objectContaining({ type: "entered", room: "the_hot_tub", origin: "the_deck" }));
+      const tubState = await worker.fetch(new Request("https://woo.test/api/state", {
+        headers: { authorization: `Session ${session}` }
+      }), env, {});
+      expect(tubState.ok).toBe(true);
+      expect((await tubState.json() as Record<string, any>).session?.current_location).toBe("the_hot_tub");
 
       const dropTowel = await post("/api/objects/the_hot_tub/calls/drop", { args: ["towel"] }, session);
       expect(dropTowel.status).toBe(200);

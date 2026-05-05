@@ -549,7 +549,7 @@ Unresolvable identifiers → `404 E_OBJNF`.
 
 ### R11.3 Auth at the edge
 
-The Worker validates `Authorization: Session <id>` against the Sessions surface (a singleton SessionsDO or per-player session table — see R11.4). Successful resolution yields `{actor, expires_at}`. The actor + correlation_id flow into the DO RPC envelope.
+The Worker validates `Authorization: Session <id>` against the Sessions surface (a singleton SessionsDO or per-player session table — see R11.4). Successful resolution yields `{actor, expires_at, current_location}`. The actor, current session location, and correlation id flow into the DO RPC envelope.
 
 Token classes (`guest:`, `session:`, `bearer:`, `apikey:`) are validated here. Rejected tokens return `400 E_INVARG` or `401 E_NOSESSION` without ever touching DOs.
 
@@ -562,6 +562,8 @@ Two reasonable shapes; pick at impl time, not at spec time:
 **Option B: SessionsDO singleton** holds all sessions. Simpler indexing, hot DO.
 
 Lean: **Option A with embedded player ULID**. Avoids a singleton bottleneck and matches identity.md's "session is per-actor."
+
+The Directory's session routing row is a routing cache, not the canonical session record, but it mirrors `current_location` so object-routed REST calls can seed the target host's session record before dispatch. WebSocket and internal host-to-host calls carry the same value in the forwarded call body/context.
 
 ---
 

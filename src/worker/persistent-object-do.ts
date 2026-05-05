@@ -748,11 +748,15 @@ export class PersistentObjectDO {
   };
 
   private serializedCallContext(ctx: CallContext): Record<string, unknown> {
+    const session = ctx.session ? ctx.world.sessions.get(ctx.session) : undefined;
     return {
       space: ctx.space,
-        seq: ctx.seq,
-        session: ctx.session,
-        actor: ctx.actor,
+      seq: ctx.seq,
+      session: ctx.session,
+      session_current_location: session?.currentLocation ?? null,
+      session_expires_at: session?.expiresAt ?? null,
+      session_token_class: session?.tokenClass ?? null,
+      actor: ctx.actor,
       player: ctx.player,
       caller: ctx.caller,
       callerPerms: ctx.callerPerms,
@@ -987,7 +991,8 @@ export class PersistentObjectDO {
           String(body.session_id ?? ""),
           String(body.actor ?? "") as ObjRef,
           Number(body.expires_at ?? 0),
-          body.token_class
+          body.token_class,
+          typeof body.current_location === "string" ? body.current_location as ObjRef : undefined
         );
         const raw = body.message && typeof body.message === "object" && !Array.isArray(body.message)
           ? body.message as Record<string, unknown>
@@ -1010,7 +1015,8 @@ export class PersistentObjectDO {
           String(body.session_id ?? ""),
           String(body.actor ?? "") as ObjRef,
           Number(body.expires_at ?? 0),
-          body.token_class
+          body.token_class,
+          typeof body.current_location === "string" ? body.current_location as ObjRef : undefined
         );
         const deferredHostEffects: DeferredHostEffect[] = [];
         const result = await world.directCall(
@@ -1030,7 +1036,8 @@ export class PersistentObjectDO {
           String(body.session_id ?? ""),
           String(body.actor ?? "") as ObjRef,
           Number(body.expires_at ?? 0),
-          body.token_class
+          body.token_class,
+          typeof body.current_location === "string" ? body.current_location as ObjRef : undefined
         );
         const space = String(body.space ?? "") as ObjRef;
         if (!world.hasPresence(session.actor, space)) throw wooError("E_PERM", `${session.actor} is not present in ${space}`);
@@ -1100,16 +1107,27 @@ export class PersistentObjectDO {
         const player = String(rawCtx.player ?? actor) as ObjRef;
         if (actor) this.ensureInternalActor(world, actor);
         if (player) this.ensureInternalActor(world, player);
+        const sessionId = typeof rawCtx.session === "string" ? rawCtx.session : null;
+        if (sessionId && actor) {
+          this.ensureInternalSession(
+            world,
+            sessionId,
+            actor,
+            Number(rawCtx.session_expires_at ?? 0),
+            rawCtx.session_token_class,
+            typeof rawCtx.session_current_location === "string" ? rawCtx.session_current_location as ObjRef : undefined
+          );
+        }
         const message = rawCtx.message && typeof rawCtx.message === "object" && !Array.isArray(rawCtx.message)
           ? rawCtx.message as Message
           : { actor, target, verb, args };
         const deferredHostEffects: DeferredHostEffect[] = [];
         const ctx: CallContext = {
-            world,
-            space: String(rawCtx.space ?? "#-1") as ObjRef,
-            seq: Number(rawCtx.seq ?? -1),
-            session: typeof rawCtx.session === "string" ? rawCtx.session : null,
-            actor,
+          world,
+          space: String(rawCtx.space ?? "#-1") as ObjRef,
+          seq: Number(rawCtx.seq ?? -1),
+          session: sessionId,
+          actor,
           player,
           caller: String(rawCtx.caller ?? "#-1") as ObjRef,
           callerPerms: String(rawCtx.callerPerms ?? rawCtx.progr ?? actor) as ObjRef,
@@ -1219,12 +1237,13 @@ export class PersistentObjectDO {
     sessionId: string,
     actor: ObjRef,
     expiresAt: number,
-    rawTokenClass: unknown
+    rawTokenClass: unknown,
+    currentLocation?: ObjRef | null
   ): Session {
     if (!sessionId || !actor) throw wooError("E_NOSESSION", "internal forwarded call requires session and actor");
     this.ensureInternalActor(world, actor);
     const tokenClass: Session["tokenClass"] = rawTokenClass === "guest" || rawTokenClass === "apikey" ? rawTokenClass : "bearer";
-    return world.ensureSessionForActor(sessionId, actor, tokenClass, Number.isFinite(expiresAt) && expiresAt > 0 ? expiresAt : undefined);
+    return world.ensureSessionForActor(sessionId, actor, tokenClass, Number.isFinite(expiresAt) && expiresAt > 0 ? expiresAt : undefined, currentLocation);
   }
 
   private ensureInternalActor(world: WooWorld, actor: ObjRef): void {
@@ -1254,7 +1273,8 @@ export class PersistentObjectDO {
           session_id: session.id,
           actor: session.actor,
           expires_at: session.expiresAt,
-          token_class: session.tokenClass
+          token_class: session.tokenClass,
+          current_location: session.currentLocation
         })
       }));
       await this.env.DIRECTORY.get(id).fetch(request);
@@ -1275,7 +1295,8 @@ export class PersistentObjectDO {
         internalSession,
         internalActor as ObjRef,
         Number(request.headers.get("x-woo-internal-expires-at") ?? 0),
-        request.headers.get("x-woo-internal-token-class")
+        request.headers.get("x-woo-internal-token-class"),
+        request.headers.get("x-woo-internal-current-location") as ObjRef | null
       );
     }
     const header = request.headers.get("authorization") ?? "";
@@ -1548,6 +1569,7 @@ export class PersistentObjectDO {
       actor: session.actor,
       expires_at: local?.expiresAt ?? Date.now() + 5 * 60_000,
       token_class: local?.tokenClass ?? "bearer",
+      current_location: local?.currentLocation ?? null,
       ...extra
     };
   }

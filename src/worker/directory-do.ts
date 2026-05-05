@@ -13,6 +13,7 @@ type SessionRoute = {
   actor: ObjRef;
   expires_at: number;
   token_class: Session["tokenClass"];
+  current_location: ObjRef | null;
   updated_at: number;
 };
 
@@ -68,6 +69,7 @@ export class DirectoryDO {
           actor: String(body.actor ?? "") as ObjRef,
           expires_at: Number(body.expires_at ?? 0),
           token_class: body.token_class === "guest" || body.token_class === "apikey" ? body.token_class : "bearer",
+          current_location: typeof body.current_location === "string" ? body.current_location as ObjRef : null,
           updated_at: Date.now()
         });
         return json({ ok: true });
@@ -100,6 +102,7 @@ export class DirectoryDO {
         actor TEXT NOT NULL,
         expires_at INTEGER NOT NULL,
         token_class TEXT NOT NULL,
+        current_location TEXT,
         updated_at INTEGER NOT NULL
       )`,
       `CREATE TABLE IF NOT EXISTS directory_meta (
@@ -109,6 +112,7 @@ export class DirectoryDO {
     ]) {
       this.state.storage.sql.exec(stmt);
     }
+    this.ensureColumn("session_route", "current_location", "TEXT");
   }
 
   private registerObject(id: ObjRef, host: string, anchor: ObjRef | null): void {
@@ -139,11 +143,12 @@ export class DirectoryDO {
   private registerSession(session: SessionRoute): void {
     if (!session.session_id || !session.actor || !Number.isFinite(session.expires_at)) return;
     this.state.storage.sql.exec(
-      "INSERT OR REPLACE INTO session_route(session_id, actor, expires_at, token_class, updated_at) VALUES (?, ?, ?, ?, ?)",
+      "INSERT OR REPLACE INTO session_route(session_id, actor, expires_at, token_class, current_location, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
       session.session_id,
       session.actor,
       session.expires_at,
       session.token_class,
+      session.current_location,
       Date.now()
     );
   }
@@ -151,7 +156,7 @@ export class DirectoryDO {
   private resolveSession(sessionId: string): SessionRoute | null {
     if (!sessionId) return null;
     const row = firstRow(this.state.storage.sql.exec(
-      "SELECT session_id, actor, expires_at, token_class, updated_at FROM session_route WHERE session_id = ?",
+      "SELECT session_id, actor, expires_at, token_class, current_location, updated_at FROM session_route WHERE session_id = ?",
       sessionId
     ));
     if (!row) return null;
@@ -165,8 +170,18 @@ export class DirectoryDO {
       actor: String(row.actor),
       expires_at: expiresAt,
       token_class: row.token_class === "guest" || row.token_class === "apikey" ? row.token_class : "bearer",
+      current_location: typeof row.current_location === "string" ? row.current_location as ObjRef : null,
       updated_at: Number(row.updated_at)
     };
+  }
+
+  private ensureColumn(table: string, column: string, definition: string): void {
+    if (this.tableColumns(table).has(column)) return;
+    this.state.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+
+  private tableColumns(table: string): Set<string> {
+    return new Set([...this.state.storage.sql.exec(`PRAGMA table_info(${table})`)].map((row) => String(row.name)));
   }
 
   private countRows(table: string): number {

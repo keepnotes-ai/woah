@@ -49,7 +49,7 @@ export default {
       const routed = await withDirectorySession(env, request);
       const response = await forwardToHost(env, host, routed);
       if (host !== WORLD_HOST && request.method === "POST" && objectRoute.rest[0] === "calls") {
-        await broadcastRoutedCall(env, response.clone(), host);
+        await broadcastRoutedCall(env, request, response.clone(), host);
       }
       return response;
     }
@@ -125,6 +125,7 @@ async function withDirectorySession(env: Env, request: Request): Promise<Request
   headers.set("x-woo-internal-actor", session.actor);
   headers.set("x-woo-internal-expires-at", String(session.expires_at));
   headers.set("x-woo-internal-token-class", session.token_class);
+  if (session.current_location) headers.set("x-woo-internal-current-location", session.current_location);
   return new Request(request, { headers });
 }
 
@@ -137,7 +138,8 @@ async function registerAuthResponse(env: Env, response: Response): Promise<void>
       session_id: body.session,
       actor: body.actor,
       expires_at: Number(body.expires_at ?? Date.now() + 5 * 60_000),
-      token_class: body.token_class === "guest" || body.token_class === "apikey" ? body.token_class : "bearer"
+      token_class: body.token_class === "guest" || body.token_class === "apikey" ? body.token_class : "bearer",
+      current_location: typeof body.current_location === "string" ? body.current_location : null
     });
     await directoryPost(env, "/register-objects", {
       routes: [{ id: body.actor, host: WORLD_HOST, anchor: null }]
@@ -149,10 +151,11 @@ async function registerAuthResponse(env: Env, response: Response): Promise<void>
   }
 }
 
-async function broadcastRoutedCall(env: Env, response: Response, host: string): Promise<void> {
+async function broadcastRoutedCall(env: Env, request: Request, response: Response, host: string): Promise<void> {
   if (!response.ok) return;
   try {
     const body = await response.json() as Record<string, unknown>;
+    await registerSessionLocationFromCall(env, request, body);
     if (body.op === "applied") {
       await registerObjectsFromApplied(env, body, host);
       await forwardToHost(env, WORLD_HOST, new Request(`${INTERNAL_ORIGIN}/__internal/broadcast-applied`, {
@@ -180,6 +183,22 @@ async function broadcastRoutedCall(env: Env, response: Response, host: string): 
   }
 }
 
+async function registerSessionLocationFromCall(env: Env, request: Request, body: Record<string, unknown>): Promise<void> {
+  const result = body.result;
+  if (!result || typeof result !== "object" || Array.isArray(result)) return;
+  const room = (result as Record<string, unknown>).room;
+  if (typeof room !== "string" || !room) return;
+  const session = await resolveRequestSession(env, request);
+  if (!session) return;
+  await directoryPost(env, "/register-session", {
+    session_id: session.session_id,
+    actor: session.actor,
+    expires_at: session.expires_at,
+    token_class: session.token_class,
+    current_location: room
+  });
+}
+
 async function registerObjectsFromApplied(env: Env, _frame: Record<string, unknown>, host: string): Promise<void> {
   const id = env.WOO.idFromName(host);
   const request = await signInternalRequest(env, new Request(`${INTERNAL_ORIGIN}/__internal/object-routes`, {
@@ -199,7 +218,7 @@ async function registerObjectsFromApplied(env: Env, _frame: Record<string, unkno
   if (routes.length > 0) await directoryPost(env, "/register-objects", { routes });
 }
 
-async function resolveRequestSession(env: Env, request: Request): Promise<{ session_id: string; actor: string; expires_at: number; token_class: string } | null> {
+async function resolveRequestSession(env: Env, request: Request): Promise<{ session_id: string; actor: string; expires_at: number; token_class: string; current_location?: string | null } | null> {
   const header = request.headers.get("authorization") ?? "";
   const match = /^Session\s+(.+)$/i.exec(header.trim());
   if (!match) return null;
@@ -213,7 +232,8 @@ async function resolveRequestSession(env: Env, request: Request): Promise<{ sess
       session_id: record.session_id,
       actor: record.actor,
       expires_at: Number(record.expires_at ?? 0),
-      token_class: typeof record.token_class === "string" ? record.token_class : "bearer"
+      token_class: typeof record.token_class === "string" ? record.token_class : "bearer",
+      current_location: typeof record.current_location === "string" ? record.current_location : null
     };
   } catch {
     return null;

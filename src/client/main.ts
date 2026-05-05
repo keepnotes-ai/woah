@@ -34,6 +34,11 @@ type AppState = {
   compileResult?: any;
 };
 
+type ChatRoomPin = {
+  room: string;
+  expiresAt: number;
+};
+
 type RouteLocation = {
   objectId: string;
   view?: string;
@@ -103,6 +108,7 @@ const state: AppState = {
 
 let audio: DubAudio | undefined;
 const ui = createWooClientFramework();
+let chatRoomPin: ChatRoomPin | null = null;
 const bundledDefaultChatRoom = String((demoworldManifest as any).seed_hooks?.find((hook: any) => hook?.kind === "create_instance" && hook?.class === "$chatroom")?.as ?? "");
 const sessionKey = "woo.session";
 const chatHistoryKey = "woo.chat.history";
@@ -211,12 +217,7 @@ function connect() {
         render();
       }
       requestReplay(socket);
-      // Auto-enter the default chat room once per session: a freshly auth'd
-      // guest otherwise lands on the chat tab "in the room" only because the
-      // SPA was reading a possibly-stale subscribers projection. The current
-      // session location is authoritative; ensureSpacePresence is idempotent
-      // so an already-present actor (session resume) makes this a no-op.
-      ensureSpacePresence(chatRoom(), () => render(), () => render());
+      if (shouldAutoEnterDefaultChatRoom()) ensureSpacePresence(chatRoom(), () => render(), () => render());
     }
     if (frame.op === "applied") {
       if (typeof frame.id === "string") pendingFrameErrors.delete(frame.id);
@@ -838,10 +839,13 @@ function buildChatMeta(world: any) {
   const chat = installedCatalog(world, "chat");
   const demo = installedCatalog(world, "demoworld");
   const rooms = objectsByParent(world, catalogClass(chat, "$chatroom"));
+  const pinned = chatRoomPin && chatRoomPin.expiresAt > Date.now() && rooms.includes(chatRoomPin.room) ? chatRoomPin.room : undefined;
+  if (chatRoomPin && !pinned) chatRoomPin = null;
+  const currentLocation = typeof world?.session?.current_location === "string" && rooms.includes(world.session.current_location) ? world.session.current_location : undefined;
   const occupied = rooms.find((id) => Array.isArray(world.objects?.[id]?.props?.subscribers) && world.objects[id].props.subscribers.includes(state.actor));
   const seededEntry = Object.values(demo?.seeds ?? {}).find((id) => typeof id === "string" && rooms.includes(id));
   const defaultRoom = seededEntry ?? rooms[0];
-  const current = occupied ?? seededEntry ?? rooms[0];
+  const current = pinned ?? currentLocation ?? occupied ?? seededEntry ?? rooms[0];
   return { room: current, rooms, defaultRoom };
 }
 
@@ -912,6 +916,16 @@ function actorPresentInSpace(space: string) {
   if (!actor) return false;
   if (state.world?.session?.current_location === space) return true;
   return actorPresenceList(actor).includes(space);
+}
+
+function shouldAutoEnterDefaultChatRoom() {
+  const location = state.world?.session?.current_location;
+  if (typeof location === "string" && location && location !== "$nowhere") {
+    const room = chatRoom();
+    const subscribers = state.world?.objects?.[room]?.props?.subscribers;
+    return Boolean(room && location === room && state.actor && Array.isArray(subscribers) && !subscribers.includes(state.actor));
+  }
+  return actorPresenceList(state.actor ?? "").length === 0;
 }
 
 function ensureSpacePresence(space: string, onReady: () => void, onError?: (error: any) => void) {
@@ -2164,6 +2178,7 @@ function setChatPresent(result: any) {
 }
 
 function setCurrentChatRoom(room: string) {
+  if (room) chatRoomPin = { room, expiresAt: Date.now() + 2_500 };
   if (state.world?.chatMeta) {
     state.world.chatMeta.room = room;
     state.world.chat = projectChat(state.world, state.world.chatMeta);

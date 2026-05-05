@@ -1,6 +1,6 @@
 {
   "name": "chat",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "spec_version": "v1",
   "description": "Foundational chat primitives: $conversational feature, $match scaffolding, sentinel match objects, $room/$exit geography, $chatroom template class, and the $portable/$furniture base classes other catalogs build on. No instances seeded — install @local:demoworld for the bundled Living Room demo.",
   "license": "MIT",
@@ -539,7 +539,7 @@
               "text"
             ]
           },
-          "source": "verb :say_to(recipient, text) rxd { if (!text) { raise { code: \"E_INVARG\", message: \"say_to requires text\" }; } observe({ type: \"said_to\", actor: actor, to: recipient, text: text, ts: now() }); return true; }"
+          "source": "verb :say_to(recipient, text) rxd { if (!text) { raise { code: \"E_INVARG\", message: \"say_to requires text\" }; } if (recipient != null && recipient != this && recipient != actor && !isa(recipient, $player)) { let matched = $match:match_verb(\"on_say_to\", recipient); if (typeof(matched) == \"map\") { return recipient:on_say_to(text); } } observe({ type: \"said_to\", actor: actor, to: recipient, text: text, ts: now() }); return true; }"
         },
         {
           "name": "say_as",

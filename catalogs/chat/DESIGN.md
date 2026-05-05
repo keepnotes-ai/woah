@@ -66,7 +66,7 @@ A feature object (per [features.md](../../spec/semantics/features.md)) carrying 
 | Verb | Args | Purpose |
 |---|---|---|
 | `:say(text)` | str | Public utterance. Emits `said {actor, text}` to subscribers (live; not stored). |
-| `:say_to(recipient, text)` | obj, str | Directed public utterance from backtick syntax. Emits `said_to`. |
+| `:say_to(recipient, text)` | obj, str | Directed public utterance from backtick syntax (`` `recipient text ``). For player recipients, emits `said_to` to the room (directed but in-room speech). For non-player recipients that define `:on_say_to(text)`, dispatches to `recipient:on_say_to(text)` so the object can interpret the utterance as a command (e.g. `` `filter 500 `` calls `filter_1:on_say_to("500")`). The hook name is distinct from `$player:tell` so the LambdaMOO output contract on players is not overloaded. |
 | `:say_as(style, text)` | str, str | Styled public utterance from `[style] text`. Emits `said_as`. |
 | `:emote(text)` | str | Third-person action. Emits `emoted {actor, text}`. |
 | `:pose(text)` / `:quote(text)` / `:self(text)` | str | Small LambdaCore-flavored speech forms for `]`, `|`, and `<`. |

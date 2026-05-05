@@ -390,6 +390,7 @@ All direct-callable (rxd). Observations are live-only by route per [chat DESIGN.
 | Verb | Args | Purpose |
 |---|---|---|
 | `:say(text)` | str | Emits `said`. |
+| `:say_to(recipient, text)` | obj, str | Backtick-form directed public utterance (`` `recipient text ``). For player recipients, emits `said_to` (in-room directed speech). For non-player recipients defining `:on_say_to(text)`, dispatches there so the object can interpret the utterance as a command (e.g. `` `filter 500 `` calls `filter_1:on_say_to("500")`). The hook is named distinctly from `$player:tell` (B5.1) so the LambdaMOO output contract is not overloaded. |
 | `:emote(text)` | str | Emits `emoted`. |
 | `:tell(recipient, text)` | obj, str | Emits `told` to `recipient`. |
 | `:look()` | — | Thin chat command wrapper over `this:look_at(this)`. |

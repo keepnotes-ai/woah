@@ -1,6 +1,6 @@
 {
   "name": "dubspace",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "spec_version": "v1",
   "description": "Shared dub-mix sound space demo objects.",
   "license": "MIT",
@@ -81,7 +81,18 @@
           "perms": "rw"
         }
       ],
-      "verbs": []
+      "verbs": [
+        {
+          "name": "on_say_to",
+          "perms": "rxd",
+          "direct_callable": true,
+          "tool_exposed": true,
+          "arg_spec": {
+            "args": ["text"]
+          },
+          "source": "verb :on_say_to(text) rxd { let raw = str_trim(to_string(text)); if (!raw) { raise { code: \"E_INVARG\", message: \"filter expects a number (Hz)\" }; } let requested = to_int(raw); if (requested == 0 && raw != \"0\") { raise { code: \"E_INVARG\", message: \"filter expects digits\", value: raw }; } let value = requested; if (value < 20) { value = 20; } if (value > 20000) { value = 20000; } this.cutoff = to_float(value); let msg = \"Filter cutoff set to \" + to_string(value) + \" Hz.\"; if (value != requested) { msg = \"Filter cutoff clamped to \" + to_string(value) + \" Hz (from \" + to_string(requested) + \").\"; } tell(actor, msg); observe({ type: \"control_changed\", target: this, name: \"cutoff\", value: this.cutoff, actor: actor, ts: now() }); return this.cutoff; }"
+        }
+      ]
     },
     {
       "local_name": "$delay",

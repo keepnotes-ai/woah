@@ -4928,17 +4928,26 @@ export class WooWorld {
   private async canSeeCommandObject(ctx: CallContext, target: ObjRef): Promise<boolean> {
     if (this.isWizard(ctx.actor)) return true;
     if (target === ctx.caller) return true;
-    // When the verb is running on a $space (the chat planner's command_plan
-    // runs `this:object_command_plan(cmd, text)` on the room), trust the room
-    // to introspect its own contents. publicCommandLocation reads
+    // When the *caller* of this introspection is a $space (e.g. the chat
+    // planner's command_plan running on a room, then invoking
+    // `$match:match_verb` from inside `:say_to`), trust that space to
+    // introspect its own contents and anchored objects. We check `ctx.caller`,
+    // not `ctx.thisObj`, because `ctx.thisObj` is whatever object holds the
+    // current verb (`$match` for match_verb). publicCommandLocation reads
     // actor.location via a cross-host RPC that can transiently fail or return
     // null during cold-start, leaving commandVisibleCandidates empty even
-    // though the target is in the room. The room asking "does this thing in
-    // my contents have this verb" doesn't leak info beyond what the room
-    // already knows.
-    if (this.objects.has(ctx.thisObj) && this.inheritsFrom(ctx.thisObj, "$space")) {
-      const here = await this.objectContents(ctx.thisObj, ctx.hostMemo).catch(() => [] as ObjRef[]);
+    // though the target is reachable from the calling space.
+    const caller = ctx.caller;
+    if (typeof caller === "string" && caller && this.objects.has(caller) && this.inheritsFrom(caller, "$space")) {
+      const here = await this.objectContents(caller, ctx.hostMemo).catch(() => [] as ObjRef[]);
       if (here.includes(target)) return true;
+      // Symmetric check: if the target claims this space as its location or
+      // anchor, allow even when the space's contents Set is out of sync
+      // (cross-host mirror lag, or partial migration).
+      const targetLocation = await this.propOrNullForActorAsync(ctx.progr, target, "location", ctx.hostMemo);
+      if (targetLocation === caller) return true;
+      const targetAnchor = await this.propOrNullForActorAsync(ctx.progr, target, "anchor", ctx.hostMemo);
+      if (targetAnchor === caller) return true;
     }
     const location = await this.publicCommandLocation(ctx, ctx.actor, undefined);
     return (await this.commandVisibleCandidates(ctx, ctx.actor, location)).includes(target);

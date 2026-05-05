@@ -33,6 +33,7 @@ A **catalog** is a directory in a public GitHub repository (or in the deployment
 - `README.md` with YAML frontmatter (name, version, spec_version, license, description, depends).
 - `manifest.json` — the JSON-format export of the catalog's classes, verbs, schemas, features, and seed hooks.
 - Optional `agent_manifest.json` — MCP/OpenAPI tool descriptions (see §CT11).
+- Optional browser UI modules and declarations in `manifest.json`'s `ui` field, following [protocol/ui-component-model.md](../protocol/ui-component-model.md).
 
 Spec ships **source**, not bytecode. The manifest carries DSL source for every verb; the importing world recompiles in its own spec version. This avoids cross-spec-version bytecode portability problems entirely.
 
@@ -518,19 +519,31 @@ Strongly typed verb signatures (return types, raised errors, named-arg shapes) w
 
 ---
 
-## CT12. Catalog UI (placeholder)
+## CT12. Catalog UI
 
-A catalog may eventually ship **UI components alongside its code** — control surfaces for its classes, dashboards, custom renderers for the observations it emits. The dubspace catalog's mixer panel, the taskspace catalog's Kanban view, a chat catalog's transcript renderer — all natural extensions of "the things this catalog provides."
+A catalog may ship **UI components alongside its code** — control surfaces for
+its classes, dashboards, frame declarations, custom renderers, and observation
+handlers for the observations it emits. The dubspace catalog's mixer panel,
+the taskspace catalog's Kanban view, a pinboard catalog's spatial board, and a
+chat catalog's transcript renderer are natural extensions of "the things this
+catalog provides."
 
-**Status: not specified.** woo does not yet have a production UI framework (see [LATER.md "object-defined UI components"](../../LATER.md)); the bundled client `src/client/main.ts` is hand-rolled per-demo. Until a framework lands — likely a feature class like `$ui_renderable` with `:ui_hint()` returning a layout-and-binding payload, possibly emitting A2UI — the UI story belongs to the bundled client, not the catalog.
+**Status: draft.** The browser client framework is specified in
+[protocol/ui-component-model.md](../protocol/ui-component-model.md). It defines
+the `manifest.json` `ui` extension, executable ESM UI modules, the Web
+Component ABI, declarative frames, item renderers, observation normalization,
+projection reducers, and component observation subscriptions.
 
-When the UI story does land, this section will specify:
+Catalog UI follows the same catalog lifecycle as code:
 
-- **Directory shape**: a `ui/` subdirectory inside the catalog (e.g. `catalogs/dubspace/ui/`) holding the layout components, asset references, and any catalog-specific renderer code.
-- **Distribution discipline**: same recompile-on-install rule as code — UI ships as source/declarative descriptions, the importing world materializes them in its current UI framework's idiom.
-- **Per-catalog mounting**: similar to tool manifests (§CT11), the world's UI shell discovers catalog UIs via the registry and mounts them per-catalog rather than as a flat surface.
-- **Versioning + trust**: inherited from the rest of the catalog. UI changes ride along with `<catalog>-v<x.y.z>` tags.
-- **Pure-data UI vs. catalog-supplied verbs**: where the boundary sits between "the catalog declares its own components" and "the catalog declares hints, the world's renderer composes."
+- **Directory shape**: UI modules normally live under a catalog-local `ui/`
+  directory and are referenced from `manifest.json`.
+- **Distribution discipline**: non-local UI modules are pinned by content hash
+  at install/update time.
+- **Per-catalog mounting**: the browser resolves frames and components through
+  the installed catalog registry rather than through hardcoded demo tabs.
+- **Versioning + trust**: UI changes ride along with catalog versions and are
+  wizard-installed trusted client code.
 
 Authors picking up the repo should expect their first-party UI work (the dubspace mixer, the taskspace board, the chat transcript) to migrate from `src/client/` into their respective catalogs once the framework exists. The current bundled client is a v1 expedient, not an architectural choice.
 

@@ -96,6 +96,7 @@ Host-facing interfaces for runtime execution, transport, and client bootstrap ac
 - [mcp.md](spec/protocol/mcp.md) — Model Context Protocol surface for LLM agents; dynamic per-location tools (M1–M8)
 - [browser-host.md](spec/protocol/browser-host.md) — transient host bootstrap (§18)
 - [routing.md](spec/protocol/routing.md) — `/objects/<id>` URL form, class-driven renderer dispatch, browser navigation vs MCP focus, `:locate()` / `:open_in_<view>()` verb conventions (AR1–AR13)
+- [ui-component-model.md](spec/protocol/ui-component-model.md) — client UI framework: catalog-owned browser modules, Web Component ABI, declarative frames, scoped neighborhoods, frame composition, consistent client projection, and observation normalization (UCM1–UCM30, **draft**)
 
 ### Reference (Cloudflare)
 

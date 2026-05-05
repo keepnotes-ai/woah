@@ -104,8 +104,11 @@ string does not propagate to API calls — the API is view-agnostic.
 
 A client picks a renderer from the addressed object's class hierarchy.
 The class → renderer mapping is **client-side state**; the substrate
-neither tracks it nor enforces it. The bundled SPA ships a default
-table approximately:
+neither tracks it nor enforces it. The catalog-owned client UI framework in
+[ui-component-model.md](ui-component-model.md) refines this into UI modules,
+components, frames, observation handlers, and item renderers; this section
+defines the routing-level fallback rule. The bundled SPA ships a default table
+approximately:
 
 | Class chain | Default renderer |
 |---|---|

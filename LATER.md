@@ -10,16 +10,22 @@ The sections below distinguish three flavors of pending item:
 
 ## random stuff to do
 
-- command plan is not well layered, should be able to pass(), why so heavy
-- "enter" just re-enters, which shouldn't be a thing
+- weather
+    - visible in-room
+    - just show the actual weather
+    - show "last updated"
+- horoscope
+    - show when it's "disconnected"
+    - show how to use it
+- get the elves to build santa's workshop
+- "enter" should huh
 - chat transparency isn't really working
 - better enter/leave messages; and for dubspace/pinboard/etc
-- santa's workshop
 - djspace
 - dubspace bpm
 - make the couch a transparent room; "sit", "up"/off/out
 - LM couch shows your location as LR, right?
-- @ways
+- @ways, @who, @join, @examine, etc
 - dm (outside of a room), chats and channels
 - are lists-of-text ok? that's a mooism that we don't really need and might cause problems later
 - flesh out the help, make it the default platform-docs

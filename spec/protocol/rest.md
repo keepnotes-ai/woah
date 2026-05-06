@@ -22,6 +22,7 @@ GET   /api/state
 GET   /api/me
 GET   /api/catalogs/ui
 GET   /api/objects/{id-or-name}
+GET   /api/objects/{id-or-name}/summary
 GET   /api/objects/{id-or-name}/ui-snapshot?surface=S
 GET   /api/objects/{id-or-name}/properties/{name}
 POST  /api/objects/{id-or-name}/calls/{verb}
@@ -29,7 +30,7 @@ GET   /api/objects/{id-or-name}/log?from=N&limit=M
 GET   /api/objects/{id-or-name}/stream
 ```
 
-Eleven endpoints. Everything is an object; identifiers are object refs,
+Twelve endpoints. Everything is an object; identifiers are object refs,
 corenames, or implementation-local object ids.
 
 ---
@@ -72,11 +73,13 @@ local session store before returning. Distributed implementations SHOULD also
 remove any session-routing record used for cross-host dispatch; stale best-effort
 routes must fail closed through the normal session validation path.
 
-`GET /api/state` returns the actor-readable world projection plus
+`GET /api/state` is the legacy full-world debug projection. It is wizard-only.
+It returns the actor-readable world projection plus
 `session: { id, actor, current_location }` for the presented session. The
 projection's object graph may include compatibility presence mirrors, but
-clients that need to know where this tab/tool session is should read
-`session.current_location`.
+ordinary clients MUST NOT use it for boot, movement, route resolution, or live
+updates. Use `/api/me`, `/api/objects/{id-or-name}/summary`, and overlay
+snapshots instead.
 
 `GET /api/me` returns the scoped browser projection for the presented session:
 `{ server_time, cursor, self, session, here, inventory }`. It is the ordinary
@@ -118,6 +121,13 @@ permission-filtered object-summary set needed to render that overlay, and
 `cursor` covers the overlay subject's sequenced stream. This endpoint is the
 overlay counterpart to `/api/me`; it MUST NOT serialize the full world object
 map.
+
+`GET /api/objects/{id-or-name}/summary` returns the single
+permission-filtered object summary used by scoped projections. It includes the
+same identity fields and actor-filtered `props` as `/api/me` summaries,
+including `ancestors` for client-side UI frame resolution. It is the narrow
+route/debug lookup for one object; clients MUST NOT use `/api/state` merely to
+resolve a route target's display name or class chain.
 
 Credentialed auth extends the vocabulary per [auth.md §A3](../identity/auth.md#a3-token-vocabulary-extended): `bearer:<jwt>`, `apikey:<id>:<secret>`, `oauth_code:<provider>:<code>`, `recovery:<token>`. Bearer tokens use `Authorization: Bearer <jwt>` with signature/claims validation. The endpoint shape is unchanged; only the accepted vocabulary expands.
 

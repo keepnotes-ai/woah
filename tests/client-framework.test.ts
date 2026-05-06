@@ -550,6 +550,20 @@ describe("client UI framework projection", () => {
     expect(ui.frames.emit({ type: "close_overlay", frame: "note-editor" })).toBe(true);
     expect(ui.frames.overlayStack()).toEqual([]);
   });
+
+  it("reduces take and drop observations into object location fields", () => {
+    const ui = createWooClientFramework();
+    ui.ingestSnapshot("here", [
+      { id: "the_chatroom", name: "Living Room" },
+      { id: "the_towel", name: "towel", location: "the_chatroom" }
+    ]);
+
+    ui.ingestLiveObservation({ type: "taken", actor: "guest_1", item: "the_towel", title: "towel" });
+    expect(ui.observe("the_towel")?.location).toBe("guest_1");
+
+    ui.ingestLiveObservation({ type: "dropped", actor: "guest_1", item: "the_towel", title: "towel", room: "the_chatroom" });
+    expect(ui.observe("the_towel")?.location).toBe("the_chatroom");
+  });
 });
 
 describe("catalog UI registry", () => {

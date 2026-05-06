@@ -77,6 +77,7 @@ export async function handleRestProtocolRequest(request: RestProtocolRequest, ho
 
     if (request.method === "GET" && request.pathname === "/api/state") {
       const session = host.requireSession(request);
+      requireWizard(world, session.actor);
       return jsonProtocol(withSessionProjection(await host.state(session.actor), world, session));
     }
 
@@ -147,6 +148,10 @@ export async function handleRestProtocolRequest(request: RestProtocolRequest, ho
 
     const session = host.requireSession(request);
     const target = resolveRestObject(host, route.id, session, request);
+
+    if (request.method === "GET" && route.rest.length === 1 && route.rest[0] === "summary") {
+      return jsonProtocol(await world.scopedObjectSummary(session.actor, target));
+    }
 
     if (request.method === "GET" && route.rest.length === 1 && route.rest[0] === "ui-snapshot") {
       const surface = request.query("surface") ?? "default";

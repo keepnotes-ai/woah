@@ -292,15 +292,15 @@ That lets reconnect reopen a tool without preloading every tool snapshot.
 
 ### Legacy `/api/state`
 
-Keep `/api/state` during migration for:
+`/api/state` is now a wizard-only legacy/debug projection. It remains for:
 
-- debug/IDE/global object inspection,
+- explicit legacy IDE/global object inspection,
 - tests that still assert whole-world projection behavior,
-- recovery while the new client path is behind a flag.
+- recovery while operators diagnose scoped projection bugs.
 
-It should stop being called by production UI boot, movement, and ordinary
-observation handling. Longer-term, make it wizard/debug-only or replace it
-with paged object-browser APIs.
+It must not be called by production UI boot, movement, route resolution, or
+ordinary observation handling. Non-wizard clients use `/api/me`,
+`/api/objects/<id>/summary`, and overlay snapshots.
 
 ## Observation contract
 
@@ -312,8 +312,9 @@ Audit targets:
 
 - `entered` / `left`: update `here.present_actors`; carry actor summary and
   room ids.
-- `taken` / `dropped` / `given`: update `here.contents` and `inventory`; carry
-  item summary.
+- `taken` / `dropped` / `given`: update `here.contents` and `inventory`. When
+  an observation does not carry a full item summary, the client patches from
+  the current projection and the user-facing `title` field.
 - `described` / `renamed`: update visible object summary fields.
 - exit creation/removal/change: update `here.exits`.
 - feature attach/detach: update summary features for frame/component matching.
@@ -464,7 +465,7 @@ effective projection and therefore the same rendering/audio path.
 Remove these production patterns:
 
 - `refresh()` after every applied/task/replay frame.
-- `scheduleRefresh()` as ordinary live-update handling.
+- debounced `/api/state` refresh as ordinary live-update handling.
 - `buildChatMeta`, `buildDubspaceMeta`, `buildTaskspaceMeta`,
   `buildPinboardMeta` scanning the whole object map.
 - `chatRoom()` derived from "first room whose subscribers contains actor".
@@ -502,10 +503,11 @@ Phase 1 closeout risks to carry forward:
   `npx vitest run tests --pool=threads --testTimeout=30000 --maxWorkers=1`.
   This mitigation belongs in config/scripts for the default release gate;
   longer-term, split/retime the slow tests.
-- The production SPA still has the old global-state path: `/api/state`,
-  `scheduleRefresh()`, `build*Meta()` scans, `ensureSpacePresence()`, and many
-  `state.world.objects` reads. Phase 1 adds the scoped API but does not remove
-  the bounce/snap-back class of bugs until Phase 3/5 switch production reads.
+- The production SPA still has old global-state dependencies:
+  `build*Meta()` scans, `ensureSpacePresence()` in the legacy state path, and
+  many `state.world.objects` reads. Phase 1 adds the scoped API but does not
+  remove the bounce/snap-back class of bugs until Phase 3/5 switch production
+  reads.
 - Frame resolution now has enough data in scoped summaries (`ancestors`), but
   current client frame/class-distance code still reads the global object map.
   Phase 2/3 must move frame resolution to scoped summaries before `/api/state`
@@ -561,8 +563,9 @@ The legacy `/api/state` path remains available during migration with
 - The client sends its last cursor on WS auth. v1 server auth replies
   `resumed: false`, so the client hydrates `/api/me` and then requests replay
   from the returned cursor.
-- In scoped mode, `scheduleRefresh()` is disabled; applied/task/replay frames
-  no longer cause `/api/state` fetches.
+- In scoped mode, applied/task/replay frames no longer cause `/api/state`
+  fetches; the debounced refresh function remains only for explicit
+  `?api=state` / `?legacyState` sessions.
 - Chat/current-room selectors read the scoped `here` snapshot and session
   locations in scoped mode.
 - Direct move/enter results that carry `here` atomically replace the scoped
@@ -574,6 +577,12 @@ The legacy `/api/state` path remains available during migration with
   leaking caller-only return data.
 - The scoped replay cursor advances on every sequenced frame the client sees,
   so a reconnect after movement does not replay from the original boot cursor.
+- `taken` and `dropped` observations update the framework object location and
+  the scoped client's `here.contents` / actor inventory mirror without a full
+  refresh.
+- `GET /api/objects/<id>/summary` exposes the narrow `ObjectSummary` shape for
+  route/debug lookups. It is the supported way to resolve a single object's
+  display/class-chain data without using `/api/state`.
 - Playwright covers the default chat boot path: `/objects/the_chatroom`
   enters, moves Living Room -> Deck -> Living Room by typed commands, keeps
   focus in the chat input, and fails if `/api/state` is fetched.
@@ -601,17 +610,17 @@ Status: initial overlay-snapshot bridge implemented.
 - Added generic `GET /api/objects/<id>/ui-snapshot?surface=<surface>`.
   It returns `{ surface, subject, cursor, room, objects }` and does not call
   the full `/api/state` projection.
-- Dubspace, pinboard, and taskspace tabs load scoped overlay snapshots and
-  merge them into the temporary compatibility world instead of switching the
-  SPA to `/api/state`.
+- Dubspace, pinboard, and taskspace tabs load scoped overlay snapshots into
+  the framework projection instead of switching the SPA to `/api/state`.
 - Overlay snapshot requests are coalesced per `(surface, subject)` while
   in flight, so first activation from both the tab click path and `setTab()`
   does not double-fetch the same snapshot.
-- The IDE/global object browser still intentionally falls back to the legacy
-  state projection. Leaving the IDE for an ordinary chat/tool tab re-enables
-  the scoped projection path and rehydrates `/api/me` if needed.
-- Dubspace `control_changed` observations now update the local compatibility
-  object/control projection before syncing audio, so typed commands such as
+- The IDE tab in scoped mode is a narrow object-summary inspector backed by
+  `GET /api/objects/<id>/summary`. It does not render a hardcoded link into
+  legacy state; the verb-installing legacy IDE remains available only by
+  explicitly booting with `?api=state` or `?legacyState`.
+- Dubspace `control_changed` observations now update the framework object/
+  control projection before syncing audio, so typed commands such as
   `filter 500` do not wait for a later UI gesture to become visible.
 - Dubspace rendering/audio now reads control state through the framework
   projection (`ui.observe`) instead of treating `state.world.dubspace` as the
@@ -621,11 +630,12 @@ Status: initial overlay-snapshot bridge implemented.
 - Playwright blocks `/api/state` while opening dubspace, pinboard, and
   taskspace, proving ordinary tool-tab navigation is now on scoped overlays.
 
-Open after this slice: the current renderers still consume a compatibility
-world assembled from scoped snapshots, but the three tool surfaces now use the
-framework projection as their source of truth in scoped mode. Dubspace object
-ids come from scoped route/overlay/session metadata plus the overlay snapshot,
-and rendering/audio/control handlers read effective values through
+Open after this slice: scoped mode no longer assembles a compatibility
+`state.world` shell. The explicit legacy state mode still builds the old full
+projection for the verb-installing IDE/debug surface. The three tool surfaces
+use the framework projection as their source of truth in scoped mode. Dubspace
+object ids come from scoped route/overlay/session metadata plus the overlay
+snapshot, and rendering/audio/control handlers read effective values through
 `ui.observe`. Pinboard rendering in scoped mode gets board id/source from
 scoped route/overlay/session metadata and reads layout/text/color/presence
 through the framework projection; overlay snapshots seed
@@ -641,23 +651,31 @@ shadow copy after a delete/take. Taskspace now builds its tree/inspector from
 scoped overlay summaries and `ui.observe`, with task creation/move/status/
 claim/requirement/message/artifact observations reducing into sparse
 `taskspace_tree` and `taskspace_task` catalog-state overlays.
-Bundled demo object ids are used only as a transitional route allowlist; custom
-installed worlds need a runtime scoped-route feed before their object URLs can
-default to scoped mode. Chat, dubspace, and pinboard `leave`/`out` verbs now
-return move-shaped results with `here_request`; the client-side
-`markLeftChatRoom` helper is still present as migration glue and can be
-collapsed into the ordinary move-result path.
+Scoped mode is now the default boot path for object URLs unless the URL
+explicitly requests `?api=state` or `?legacyState`. Runtime tool subject
+selection first uses explicit route/view state, then fetched summaries for
+route targets, then overlay handles, then the current scoped session location,
+then feature-space summaries in `here.contents`; scoped mode no longer falls
+back to bundled demo object ids. Id-only projection placeholders are not
+treated as complete summaries, so the router and inspector still fetch
+`/api/objects/<id>/summary`.
+Chat, dubspace, and pinboard `leave`/`out` verbs now return move-shaped results
+with `here_request`, and the client handles chat leave through the same
+move-result path instead of a duplicate local presence/current-location
+mutation.
 
 - Mini-chat host data now names spaces through projected summaries rather than
   ids when the overlay snapshot is present. The remaining cleanup is to have
   frame declarations own each surface's chat target instead of hardcoded tab
   helpers.
-- Replace the compatibility world with direct component/context mounting once
-  catalog components own pinboard, dubspace, and taskspace rendering.
+- Move the remaining hardcoded tab chat-target helpers into frame/catalog
+  declarations.
 
 ### Phase 5: remove legacy production path
 
-- Delete ordinary `scheduleRefresh()` calls.
+- Keep `/api/state` refresh scheduling only in the explicit legacy/debug state
+  mode; ordinary scoped live updates must use observations plus `/api/me` or
+  overlay snapshots.
 - Delete production global metadata scans.
 - Make `/api/state` debug/IDE-only.
 - Remove compatibility `look_deferred` handling when all clients consume
@@ -710,8 +728,7 @@ itself. It changes browser state shape and REST response additions.
 
 Compatibility requirements:
 
-- Keep `/api/state` until the SPA no longer depends on it.
-- After Phase 5, gate `/api/state` as wizard/debug-only or replace it with
+- Keep `/api/state` only as wizard/debug legacy state until it is replaced by
   paged IDE/object-browser APIs.
 - Keep `room` in move results.
 - Keep `look_deferred` until the old client path is removed.

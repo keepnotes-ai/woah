@@ -751,6 +751,22 @@ export function createWooClientFramework() {
 
 export function registerCoreObservationHandlers(registry: ObservationRegistry) {
   registry.observation({
+    types: ["taken", "dropped"],
+    route: "both",
+    reduce: (draft, envelope) => {
+      const obs = envelope.observation;
+      const item = String(obs.item ?? "");
+      if (!item) return;
+      if (obs.type === "taken") {
+        const actor = String(obs.actor ?? "");
+        if (actor) draft.patchObject(item, { location: actor });
+        return;
+      }
+      const room = String(obs.room ?? obs.source ?? envelope.delivered.space ?? "");
+      if (room) draft.patchObject(item, { location: room });
+    }
+  });
+  registry.observation({
     types: ["pin_moved", "note_moved", "pin_resized", "note_resized"],
     route: "sequenced",
     reduce: (draft, envelope) => {

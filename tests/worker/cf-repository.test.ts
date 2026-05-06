@@ -531,7 +531,7 @@ describe("CFObjectRepository production-shape coverage", () => {
       expect(goDeck.status).toBe(200);
       expect(goDeck.body.result).toMatchObject({ room: "the_deck", from: "the_chatroom", look_deferred: true });
       expect(goDeck.body.observations).toContainEqual(expect.objectContaining({ type: "entered", room: "the_deck", origin: "the_chatroom" }));
-      const deckState = await worker.fetch(new Request("https://woo.test/api/state", {
+      const deckState = await worker.fetch(new Request("https://woo.test/api/me", {
         headers: { authorization: `Session ${session}` }
       }), env, {});
       expect(deckState.ok).toBe(true);
@@ -546,7 +546,7 @@ describe("CFObjectRepository production-shape coverage", () => {
       expect(enterTub.status).toBe(200);
       expect(enterTub.body.result).toMatchObject({ room: "the_hot_tub", look_deferred: true });
       expect(enterTub.body.observations).toContainEqual(expect.objectContaining({ type: "entered", room: "the_hot_tub", origin: "the_deck" }));
-      const tubState = await worker.fetch(new Request("https://woo.test/api/state", {
+      const tubState = await worker.fetch(new Request("https://woo.test/api/me", {
         headers: { authorization: `Session ${session}` }
       }), env, {});
       expect(tubState.ok).toBe(true);
@@ -630,7 +630,7 @@ describe("CFObjectRepository production-shape coverage", () => {
       const auth = await gateway.fetch(new Request("https://woo.test/api/auth", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ token: "guest:cf-cold-state" })
+        body: JSON.stringify({ token: "wizard:cf-cold-state-token" })
       }));
       expect(auth.ok).toBe(true);
       const { session } = await auth.json() as { session: string };
@@ -677,7 +677,7 @@ describe("CFObjectRepository production-shape coverage", () => {
       const auth = await gateway.fetch(new Request("https://woo.test/api/auth", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ token: "guest:cf-state-clock" })
+        body: JSON.stringify({ token: "wizard:cf-state-token" })
       }));
       expect(auth.ok).toBe(true);
       const { session } = await auth.json() as { session: string };

@@ -80,6 +80,63 @@ describe("scoped client projection", () => {
     expect(cached.status).toBe(304);
   });
 
+  it("serves a scoped object summary without a full world snapshot", async () => {
+    const world = createWorld();
+    const session = world.auth("guest:object-summary");
+    const result = await handleRestProtocolRequest(get("/api/objects/the_chatroom/summary"), {
+      world,
+      requireSession: () => session,
+      authenticateToken: () => session,
+      state: () => {
+        throw new Error("/api/objects/:id/summary must not call full world state");
+      },
+      broadcastApplied: async () => undefined,
+      broadcastLiveEvents: async () => undefined
+    });
+
+    expect(result.handled).toBe(true);
+    if (!result.handled || "raw" in result) throw new Error("unexpected raw protocol result");
+    expect(result.status).toBe(200);
+    expect(result.body).toMatchObject({
+      id: "the_chatroom",
+      name: "Living Room"
+    });
+    expect((result.body as any).ancestors).toContain("$room");
+    expect((result.body as any).props).toBeDefined();
+  });
+
+  it("gates the legacy full world state endpoint to wizard sessions", async () => {
+    const world = createWorld();
+    const guest = world.auth("guest:legacy-state-denied");
+    const denied = await handleRestProtocolRequest(get("/api/state"), {
+      world,
+      requireSession: () => guest,
+      authenticateToken: () => guest,
+      state: () => {
+        throw new Error("non-wizard /api/state must fail before reading state");
+      },
+      broadcastApplied: async () => undefined,
+      broadcastLiveEvents: async () => undefined
+    });
+    expect(denied.handled).toBe(true);
+    if (!denied.handled || "raw" in denied) throw new Error("unexpected raw protocol result");
+    expect(denied.status).toBe(403);
+
+    const wizard = world.createSessionForActor("$wiz", "bearer");
+    const allowed = await handleRestProtocolRequest(get("/api/state"), {
+      world,
+      requireSession: () => wizard,
+      authenticateToken: () => wizard,
+      state: (actor) => world.state(actor),
+      broadcastApplied: async () => undefined,
+      broadcastLiveEvents: async () => undefined
+    });
+    expect(allowed.handled).toBe(true);
+    if (!allowed.handled || "raw" in allowed) throw new Error("unexpected raw protocol result");
+    expect(allowed.status).toBe(200);
+    expect((allowed.body as any).objects).toBeDefined();
+  });
+
   it("accepts a scoped replay cursor on websocket auth but requires hydrate in v1", async () => {
     const world = createWorld();
     const session = world.auth("guest:scoped-ws-cursor");

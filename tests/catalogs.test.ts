@@ -1875,6 +1875,61 @@ describe("local catalogs", () => {
     expect(world.getProp(guest.actor, "description")).toBe("");
   });
 
+  it("dispatches LambdaCore-shaped @who, @join, @ways, and @examine commands", async () => {
+    const world = createWorld();
+    const first = world.auth("guest:lambdacore-commands-first");
+    const second = world.auth("guest:lambdacore-commands-second");
+    await world.directCall("lambda-enter-first", first.actor, "the_chatroom", "enter", []);
+    await world.directCall("lambda-enter-second", second.actor, "the_deck", "enter", []);
+
+    const whoPlan = await world.directCall("lambda-plan-who", first.actor, "the_chatroom", "command_plan", ["@who"]);
+    expect(whoPlan.op).toBe("result");
+    if (whoPlan.op === "result") {
+      expect(whoPlan.result).toMatchObject({ ok: true, route: "direct", target: first.actor, verb: "who_all", args: [""] });
+    }
+    const who = await world.command("lambda-who", first.id, "the_chatroom", "@who");
+    expect(who.op).toBe("result");
+    if (who.op === "result") {
+      expect(who.result).toEqual(expect.arrayContaining([
+        expect.objectContaining({ player: first.actor, location: "the_chatroom", connected_seconds: expect.any(Number), last_login_at: expect.any(Number) }),
+        expect.objectContaining({ player: second.actor, location: "the_deck", connected_seconds: expect.any(Number), last_login_at: expect.any(Number) })
+      ]));
+      expect(who.observations).toContainEqual(expect.objectContaining({ type: "who", actor: first.actor, present_actors: expect.arrayContaining([first.actor, second.actor]) }));
+    }
+
+    const secondSession = world.sessions.get(second.id);
+    if (secondSession) secondSession.lastInputAt = Date.now() - 1_000_000;
+    const namedSleeping = await world.command("lambda-who-sleeping", first.id, "the_chatroom", `@who ${second.actor}`);
+    expect(namedSleeping.op).toBe("result");
+    if (namedSleeping.op === "result") {
+      expect(namedSleeping.result).toEqual([
+        expect.objectContaining({ player: second.actor, connected: false, connected_seconds: null, last_login_at: expect.any(Number) })
+      ]);
+    }
+
+    const ways = await world.command("lambda-ways", first.id, "the_chatroom", "@ways");
+    expect(ways.op).toBe("result");
+    if (ways.op === "result") {
+      expect(ways.result).toMatchObject({ room: "the_chatroom", exits: expect.arrayContaining(["exit_living_room_southeast", "exit_living_room_south"]) });
+      expect(ways.observations).toContainEqual(expect.objectContaining({ type: "text", target: first.actor, text: expect.stringContaining("Obvious exits:") }));
+    }
+
+    const examine = await world.command("lambda-examine", first.id, "the_chatroom", "@examine lamp");
+    expect(examine.op).toBe("result");
+    if (examine.op === "result") {
+      expect(examine.result).toMatchObject({ target: "the_lamp", owner: "$wiz", obvious_verbs: expect.arrayContaining([expect.stringContaining("give")]) });
+      expect(examine.observations).toContainEqual(expect.objectContaining({ type: "text", target: first.actor, text: expect.stringContaining("Brass Lamp") }));
+    }
+
+    const join = await world.command("lambda-join", first.id, "the_chatroom", `@join ${second.actor}`);
+    expect(join.op).toBe("result");
+    if (join.op === "result") {
+      expect(join.result).toMatchObject({ room: "the_deck", from: "the_chatroom", target: second.actor, look_deferred: true });
+      expect(world.object(first.actor).location).toBe("the_deck");
+      expect(join.observations).toContainEqual(expect.objectContaining({ type: "text", target: first.actor, text: expect.stringContaining("You visit") }));
+    }
+  });
+
   it("surfaces idle/connected presence via $player:look_self and the substrate readers", async () => {
     const world = createWorld();
     const guest = world.auth("guest:idle-a");

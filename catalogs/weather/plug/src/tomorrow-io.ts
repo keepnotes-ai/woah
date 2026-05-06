@@ -18,6 +18,8 @@ export type WeatherCurrent = {
   unit: string;
   label: string;
   observed_at: string;
+  observed_at_text?: string;
+  observed_timezone?: string;
 };
 
 export type WeatherForecastPoint = {

@@ -28,7 +28,8 @@ the plug's lifecycle.
 
 | Name | Default | Notes |
 |---|---|---|
-| `place` | `""` | Location string the plug passes to the upstream API (e.g. `"Mountain View, CA"`). |
+| `place` | `""` | Town name or zip code. The plug passes this to the upstream API, and the block displays this same value. |
+| `timezone` | `""` | IANA timezone, e.g. `America/Los_Angeles`; the plug uses it to write local observation time text. |
 | `units` | `"metric"` | `"metric"` or `"imperial"`. |
 | `forecast_hours` | `12` | How many hours of forecast the plug should fetch. |
 
@@ -44,16 +45,19 @@ the plug's lifecycle.
 
 ## Look Surface
 
-`:title()` and `:look_self()` render the current scalar reading directly,
-for example `Temperature in Mountain View, CA: 72°F`, and include
-`last_updated` / `last_pushed_at` so room look and object look both show
-freshness instead of a raw JSON block.
+`:title()` renders the current scalar reading directly, for example
+`Temperature in Mountain View, CA: 72°F`. `:look_self()` renders a sentence:
+`The weather panel shows that the temperature in Mountain View, CA was 72°F
+at May 6, 2026, 9:01 AM PDT.` The plug formats this from the observation
+timestamp and the block's `timezone`; `:look_self()` does not show the raw
+`last_pushed_at` epoch.
 
 ## Provisioning
 
 ```text
 @create_instance $weather_block as the_living_room_weather location: the_living_room
 :set_property("place", "Mountain View, CA")
+:set_property("timezone", "America/Los_Angeles")
 :set_property("units", "imperial")
 :mint_apikey("weather-cf-worker-prod")
 # paste the resulting secret into wrangler secret put WOO_APIKEY

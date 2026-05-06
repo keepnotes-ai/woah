@@ -12,7 +12,7 @@ This is the outside-world half of the weather block. The catalog half (the
 Cron-triggered hourly. Each tick:
 
 1. POSTs to `/api/auth` with the actor-bound apikey for the weather block.
-2. GETs the block's `place` property (e.g. `"Mountain View, CA"`).
+2. GETs the block's `place` property (a town name or zip code, e.g. `"Mountain View, CA"` or `"94043"`).
 3. Fetches tomorrow.io realtime + hourly-forecast endpoints.
 4. POSTs `:set_properties` with `current` (scalar shape), `forecast` (series
    shape), and `last_pushed_at`.
@@ -48,8 +48,9 @@ hourly free-plan budget and ~10% of the daily budget. Plenty of headroom.
 npm install
 ```
 
-Configure the block on the woo side first (owner sets `place`, then mints an
-apikey via `:mint_apikey`). Take the secret and:
+Configure the block on the woo side first (owner sets `place` to a town
+name or zip code, sets IANA `timezone`, then mints an apikey via
+`:mint_apikey`). Take the secret and:
 
 ```bash
 wrangler secret put WOO_APIKEY            # apikey:<id>:<secret>
@@ -72,7 +73,18 @@ block. `E_NOSESSION` means the token is malformed, unknown, secret-
 mismatched, or revoked. Use the full `apikey:<id>:<secret>` token;
 `apikey:<secret>` is not the documented token form.
 
-Edit `wrangler.toml` to set `[vars] WOO_BASE_URL` and `[vars] BLOCK_ID`.
+Deployment-specific values can be set as Worker variables or secrets. The
+repo bootstrap script stores `WOO_BASE_URL`, `BLOCK_ID`, `WOO_APIKEY`, and
+`TRIGGER_SECRET` with `wrangler secret put`; `TOMORROW_IO_API_KEY` is always
+a secret. If provisioning manually, set all required bindings before deploy:
+
+```bash
+wrangler secret put WOO_BASE_URL
+wrangler secret put BLOCK_ID
+wrangler secret put WOO_APIKEY
+wrangler secret put TOMORROW_IO_API_KEY
+wrangler secret put TRIGGER_SECRET
+```
 
 ```bash
 wrangler deploy
@@ -81,10 +93,12 @@ wrangler deploy
 ## Trigger manually
 
 The Worker also accepts `POST /` (no body required) for first-light wiring or
-for "I just changed the place, refresh now":
+for "I just changed the place, refresh now". Manual triggers require the
+shared trigger secret:
 
 ```bash
-curl -X POST https://<worker-url>/
+curl -X POST https://<worker-url>/ \
+  -H "Authorization: Bearer $TRIGGER_SECRET"
 ```
 
 ## Monitoring

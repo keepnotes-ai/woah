@@ -105,11 +105,12 @@ export async function runWeatherTick(
   const placeValue = await client.getProperty(env.BLOCK_ID, "place");
   const place = typeof placeValue === "string" && placeValue.trim() ? placeValue : null;
   if (!place) {
+    const message = "owner has not configured `place`; set it to a town name or zip code";
     await client.directCall(env.BLOCK_ID, "set_property", [
       "last_error",
-      "owner has not configured `place` on this block"
+      message
     ]);
-    throw new WooError("E_NO_PLACE", "owner has not configured `place` on this block", 400);
+    throw new WooError("E_NO_PLACE", message, 400);
   }
 
   // Owner-set knobs ride writable_owner on the block. The plug honors them
@@ -118,6 +119,8 @@ export async function runWeatherTick(
   // the $block contract.
   const unitsRaw = await client.getProperty(env.BLOCK_ID, "units");
   const units: TomorrowUnits = unitsRaw === "imperial" ? "imperial" : "metric";
+  const timezoneRaw = await getOptionalProperty(client, env.BLOCK_ID, "timezone");
+  const timezone = normalizeTimezone(timezoneRaw);
   const forecastHoursRaw = await client.getProperty(env.BLOCK_ID, "forecast_hours");
   const forecastHours = pickForecastHours(forecastHoursRaw, env.FORECAST_HOURS);
   const tomorrowPlace = normalizeTomorrowLocation(place);
@@ -132,13 +135,13 @@ export async function runWeatherTick(
       fetchImpl
     });
   } catch (err) {
-    await client.directCall(env.BLOCK_ID, "set_property", ["last_error", formatLastError(err)]);
+    await client.directCall(env.BLOCK_ID, "set_property", ["last_error", formatLastError(err, place)]);
     throw err;
   }
 
   await client.directCall(env.BLOCK_ID, "set_properties", [
     {
-      current: snapshot.current,
+      current: withLocalObservationTime(snapshot.current, timezone),
       forecast: snapshot.forecast,
       last_pushed_at: snapshot.fetched_at,
       last_error: null
@@ -149,9 +152,60 @@ export async function runWeatherTick(
 }
 
 export function normalizeTomorrowLocation(place: string): string {
-  const trimmed = place.trim();
-  if (/^-?\d+(\.\d+)?\s*,\s*-?\d+(\.\d+)?$/.test(trimmed)) return trimmed;
-  return trimmed.replace(/,\s*/g, " ");
+  return place.trim();
+}
+
+async function getOptionalProperty(client: WooClient, blockId: string, name: string): Promise<unknown> {
+  try {
+    return await client.getProperty(blockId, name);
+  } catch (err) {
+    if (err instanceof WooError && (err.code === "E_PROPNF" || err.status === 404)) return null;
+    throw err;
+  }
+}
+
+export function normalizeTimezone(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const timezone = value.trim();
+  if (!timezone) return null;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(new Date(0));
+    return timezone;
+  } catch {
+    return null;
+  }
+}
+
+export function withLocalObservationTime(current: WeatherSnapshot["current"], timezone: string | null): WeatherSnapshot["current"] {
+  return {
+    ...current,
+    observed_at_text: formatObservedAt(current.observed_at, timezone),
+    observed_timezone: timezone ?? "UTC"
+  };
+}
+
+export function formatObservedAt(observedAt: string, timezone: string | null): string {
+  const at = Date.parse(observedAt);
+  if (!Number.isFinite(at)) return observedAt || "an unknown time";
+  if (!timezone) return formatUtcMinute(at);
+  try {
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone: timezone,
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      timeZoneName: "short"
+    }).format(new Date(at));
+  } catch {
+    return formatUtcMinute(at);
+  }
+}
+
+function formatUtcMinute(at: number): string {
+  const iso = new Date(at).toISOString();
+  return `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
 }
 
 function pickForecastHours(blockValue: unknown, envValue: string | undefined): number | undefined {
@@ -192,14 +246,18 @@ function errorBreadcrumb(err: unknown): ErrorBreadcrumb {
   return { category: "unknown", message };
 }
 
-function formatLastError(err: unknown): string {
+function formatLastError(err: unknown, place?: string): string {
   if (err instanceof TomorrowIoError) {
     if (err.isRateLimit) {
       const wait = err.retryAfter ? ` (retry after ${err.retryAfter}s)` : "";
-      return `tomorrow.io rate-limited${wait} — free plan caps 25/hour, 500/day`;
+      return `tomorrow.io rate-limited${wait} - free plan caps 25/hour, 500/day`;
     }
     if (err.isAuth) {
-      return "tomorrow.io rejected the API key — check TOMORROW_IO_API_KEY";
+      return "tomorrow.io rejected the API key - check TOMORROW_IO_API_KEY";
+    }
+    if (err.status === 400 || err.status === 404) {
+      const configured = place?.trim() ? ` "${place.trim()}"` : "";
+      return `tomorrow.io could not fetch weather for${configured} - set place to a town name or zip code it recognizes`;
     }
     return err.message;
   }

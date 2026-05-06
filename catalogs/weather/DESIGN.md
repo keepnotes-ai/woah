@@ -11,9 +11,14 @@ exercises the `scalar`, `table`, and `series` shapes simultaneously.
 
 The plug fetches tomorrow.io's `weather/realtime` and `weather/forecast`
 endpoints for the configured `place`, then maps the response into the
-block's three data props. Each value carries its `kind` so the generic
-`<woo-block>` element can render it; specialized weather UIs can choose
-to override per property.
+block's three data props. `place` is the owner-configured town name or zip
+code; the plug sends that value upstream and the block displays that same
+value. `timezone` is the IANA zone used by the plug to write local
+observation time text onto `current.observed_at_text`. If the upstream API
+does not recognize `place`, the plug writes a helpful `last_error` instead
+of inventing a fallback display location.
+Each value carries its `kind` so the generic `<woo-block>` element can
+render it; specialized weather UIs can choose to override per property.
 
 ```text
 current   →  { kind: "scalar", value: 72.4, unit: "°F", label: "current_temp" }
@@ -33,12 +38,12 @@ result. Both inherit from `$block`'s `writable_self` list.
 
 ## Owner-writable config
 
-`place`, `units`, `forecast_hours` are gated by `writable_owner`. The
-plug subscribes to its own block's room — when an owner sets a config
-prop, the resulting `block_data` observation reaches the plug; the next
-poll cycle picks up the new value. (The plug also re-reads config on
-each cycle, so a missed observation is harmless — the queue-as-truth
-shape applies here too.)
+`place`, `timezone`, `units`, `forecast_hours` are gated by
+`writable_owner`. The plug subscribes to its own block's room — when an
+owner sets a config prop, the resulting `block_data` observation reaches
+the plug; the next poll cycle picks up the new value. (The plug also
+re-reads config on each cycle, so a missed observation is harmless — the
+queue-as-truth shape applies here too.)
 
 ## Connection mode
 
@@ -46,7 +51,7 @@ Scheduled / disconnected. The plug Worker has a cron trigger (hourly).
 On each fire it:
 
 1. Authenticates via `apikey:<id>:<secret>`.
-2. Reads `place`, `units`, `forecast_hours` from the block.
+2. Reads `place`, `timezone`, `units`, `forecast_hours` from the block.
 3. Calls tomorrow.io.
 4. Calls `:set_properties({current, forecast, history, last_pushed_at})`
    in a single bundle.

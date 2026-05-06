@@ -9,15 +9,16 @@
     {
       "local_name": "$weather_block",
       "parent": "$block",
-      "description": "A weather display block. The owner configures `place` (a location string the upstream API understands, e.g. \"Mountain View, CA\"), `units` (\"metric\" or \"imperial\"), and `forecast_hours` (how many hours of forecast to surface). The plug pushes `current` as a scalar shape (headline temperature), `forecast` as a table (hourly), and `history` as a series. `last_pushed_at` and `last_error` ride the standard $block writable_self surface so :look surfaces freshness.",
+      "description": "A weather display block. The owner configures `place` (a town name or zip code), `timezone` (IANA timezone for local display), `units` (\"metric\" or \"imperial\"), and `forecast_hours` (how many hours of forecast to surface). The plug sends `place` to the upstream API as configured and pushes `current` as a scalar shape (headline temperature), `forecast` as a table (hourly), and `history` as a series. `last_pushed_at` and `last_error` ride the standard $block writable_self surface so :look surfaces freshness.",
       "properties": [
         { "name": "place", "type": "str", "default": "", "perms": "r" },
+        { "name": "timezone", "type": "str", "default": "", "perms": "r" },
         { "name": "units", "type": "str", "default": "metric", "perms": "r" },
         { "name": "forecast_hours", "type": "int", "default": 12, "perms": "r" },
         { "name": "current", "type": "map", "default": {}, "perms": "r" },
         { "name": "forecast", "type": "map", "default": {}, "perms": "r" },
         { "name": "history", "type": "map", "default": {}, "perms": "r" },
-        { "name": "writable_owner", "type": "list<str>", "default": ["place", "units", "forecast_hours"], "perms": "r" },
+        { "name": "writable_owner", "type": "list<str>", "default": ["place", "timezone", "units", "forecast_hours"], "perms": "r" },
         { "name": "writable_self", "type": "list<str>", "default": ["last_pushed_at", "last_error", "current", "forecast", "history"], "perms": "r" }
       ],
       "verbs": [
@@ -27,7 +28,23 @@
           "direct_callable": true,
           "skip_presence_check": true,
           "arg_spec": { "args": [] },
-          "source": "verb :weather_line() rxd { let current = this.current; let place = this.place; if (typeof(place) != \"string\" || !place) { place = \"this place\"; } if (typeof(current) == \"map\" && has(current, \"value\")) { let unit = \"\"; if (has(current, \"unit\") && current[\"unit\"]) { unit = current[\"unit\"]; } let label = \"Weather\"; if (has(current, \"label\") && current[\"label\"] == \"current_temperature\") { label = \"Temperature\"; } return label + \" in \" + place + \": \" + to_string(current[\"value\"]) + unit; } return \"Weather for \" + place + \": no current reading yet\"; }"
+          "source": "verb :weather_line() rxd { let current = this.current; let place = this:display_location(); if (typeof(current) == \"map\" && has(current, \"value\")) { let unit = \"\"; if (has(current, \"unit\") && current[\"unit\"]) { unit = current[\"unit\"]; } return \"Temperature in \" + place + \": \" + to_string(current[\"value\"]) + unit; } return \"Weather for \" + place + \": no current reading yet\"; }"
+        },
+        {
+          "name": "display_location",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "arg_spec": { "args": [] },
+          "source": "verb :display_location() rxd { let place = this.place; if (typeof(place) != \"string\" || !str_trim(place)) { return \"this location\"; } return str_trim(place); }"
+        },
+        {
+          "name": "current_time_text",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "arg_spec": { "args": [] },
+          "source": "verb :current_time_text() rxd { let current = this.current; if (typeof(current) == \"map\") { if (has(current, \"observed_at_text\") && typeof(current[\"observed_at_text\"]) == \"string\" && current[\"observed_at_text\"]) { return current[\"observed_at_text\"]; } if (has(current, \"observed_at\") && typeof(current[\"observed_at\"]) == \"string\") { let observed = current[\"observed_at\"]; if (length(observed) >= 16) { return str_slice(observed, 1, 10) + \" \" + str_slice(observed, 12, 16) + \" UTC\"; } if (observed) { return observed; } } } return \"an unknown time\"; }"
         },
         {
           "name": "title",
@@ -43,7 +60,7 @@
           "direct_callable": true,
           "skip_presence_check": true,
           "arg_spec": { "args": [] },
-          "source": "verb :look_self() rxd { let line = this:weather_line(); let updated = this.last_pushed_at; let freshness = \"Last updated: never.\"; if (typeof(updated) == \"number\" && updated > 0) { freshness = \"Last updated: \" + to_string(updated) + \".\"; } let text = line + \". \" + freshness; if (this.last_error) { text = text + \" Error: \" + to_string(this.last_error) + \".\"; } return { id: this, title: line, description: text, current: this.current, forecast: this.forecast, history: this.history, last_pushed_at: updated, last_updated: updated, last_error: this.last_error, location: location(this) }; }"
+          "source": "verb :look_self() rxd { let current = this.current; let place = this:display_location(); let line = this:weather_line(); let updated = this.last_pushed_at; let time = this:current_time_text(); let text = \"The weather panel shows no current reading for \" + place + \".\"; if (typeof(current) == \"map\" && has(current, \"value\")) { let unit = \"\"; if (has(current, \"unit\") && current[\"unit\"]) { unit = current[\"unit\"]; } text = \"The weather panel shows that the temperature in \" + place + \" was \" + to_string(current[\"value\"]) + unit + \" at \" + time + \".\"; } if (this.last_error) { text = text + \" Error: \" + to_string(this.last_error) + \".\"; } return { id: this, title: line, description: text, current: current, forecast: this.forecast, history: this.history, last_pushed_at: updated, last_updated: updated, last_updated_text: time, last_error: this.last_error, location: location(this) }; }"
         }
       ]
     },

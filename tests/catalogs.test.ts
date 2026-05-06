@@ -2991,9 +2991,10 @@ describe("local catalogs", () => {
       expect(world.object("the_weather").location).toBe("the_chatroom");
       expect(world.object("the_weather").anchor).toBe("the_chatroom");
       expect(world.getProp("the_weather", "place")).toBe("Mountain View, CA");
+      expect(world.getProp("the_weather", "timezone")).toBe("America/Los_Angeles");
       expect(world.getProp("the_weather", "units")).toBe("imperial");
       expect(world.getProp("the_weather", "forecast_hours")).toBe(12);
-      world.setProp("the_weather", "current", { kind: "scalar", value: 72, unit: "°F", label: "current_temperature" });
+      world.setProp("the_weather", "current", { kind: "scalar", value: 72, unit: "°F", label: "current_temperature", observed_at: "2026-05-06T16:01:00Z", observed_at_text: "May 6, 2026, 9:01 AM PDT", observed_timezone: "America/Los_Angeles" });
       world.setProp("the_weather", "last_pushed_at", 1778073000000);
       const weatherLook = await world.directCall("blocks-weather-look", "$wiz", "the_weather", "look_self", []);
       expect(weatherLook.op).toBe("result");
@@ -3001,7 +3002,8 @@ describe("local catalogs", () => {
         expect(weatherLook.result).toMatchObject({
           title: "Temperature in Mountain View, CA: 72°F",
           last_updated: 1778073000000,
-          description: expect.stringContaining("Last updated: 1778073000000")
+          last_updated_text: "May 6, 2026, 9:01 AM PDT",
+          description: "The weather panel shows that the temperature in Mountain View, CA was 72°F at May 6, 2026, 9:01 AM PDT."
         });
       }
       const roomLook = await world.directCall("blocks-room-look", "$wiz", "the_chatroom", "look", []);
@@ -3019,7 +3021,8 @@ describe("local catalogs", () => {
         expect(lookWeatherCommand.result).toMatchObject({ id: "the_weather" });
         expect(lookWeatherCommand.observations.find((obs) => obs.type === "looked")).toMatchObject({
           room: "the_chatroom",
-          target: "the_weather"
+          target: "the_weather",
+          text: "The weather panel shows that the temperature in Mountain View, CA was 72°F at May 6, 2026, 9:01 AM PDT."
         });
       }
       // Horoscope machine: anchored on the deck, default rate limit + persona.
@@ -3078,22 +3081,40 @@ describe("local catalogs", () => {
       expect(world.getProp(noteId, "text")).toEqual(["Today the stars suggest sandwiches."]);
     });
 
-    it("$weather_block installs cleanly and ships the configured tier lists", () => {
+    it("$weather_block installs cleanly and ships the configured tier lists", async () => {
       const world = createWorld({ catalogs: false });
       installLocalCatalogs(world, ["weather"]);
-      expect(world.getProp("$weather_block", "writable_owner")).toEqual(["place", "units", "forecast_hours"]);
+      expect(world.getProp("$weather_block", "writable_owner")).toEqual(["place", "timezone", "units", "forecast_hours"]);
       expect(world.getProp("$weather_block", "writable_self")).toEqual(["last_pushed_at", "last_error", "current", "forecast", "history"]);
       // An instance inherits the tier lists.
       const blockId = "obj_test_weather_block";
       world.createObject({ id: blockId, name: blockId, parent: "$weather_block", owner: "$wiz", location: "$nowhere" });
-      expect(world.getProp(blockId, "writable_owner")).toEqual(["place", "units", "forecast_hours"]);
+      expect(world.getProp(blockId, "writable_owner")).toEqual(["place", "timezone", "units", "forecast_hours"]);
       expect(world.getProp(blockId, "writable_self")).toEqual(["last_pushed_at", "last_error", "current", "forecast", "history"]);
       // Default config matches the manifest.
       expect(world.getProp(blockId, "place")).toBe("");
+      expect(world.getProp(blockId, "timezone")).toBe("");
       expect(world.getProp(blockId, "units")).toBe("metric");
       expect(world.getProp(blockId, "forecast_hours")).toBe(12);
       // summary_props defaults to ["current"] via the seed_hook on the class.
       expect(world.getProp("$weather_block", "summary_props")).toEqual(["current"]);
+
+      world.setProp(blockId, "current", { kind: "scalar", value: 58.62, unit: "°F", label: "current_temperature", observed_at: "2026-05-06T16:01:00Z", observed_at_text: "May 6, 2026, 9:01 AM PDT" });
+      world.setProp(blockId, "place", "Mountain View, CA");
+      const townLook = await world.directCall("weather-town-state-look", "$wiz", blockId, "look_self", []);
+      expect(townLook.op).toBe("result");
+      if (townLook.op === "result") {
+        const description = String((townLook.result as Record<string, unknown>).description);
+        expect(description).toBe("The weather panel shows that the temperature in Mountain View, CA was 58.62°F at May 6, 2026, 9:01 AM PDT.");
+      }
+
+      world.setProp(blockId, "place", "94043");
+      const zipLook = await world.directCall("weather-zip-look", "$wiz", blockId, "look_self", []);
+      expect(zipLook.op).toBe("result");
+      if (zipLook.op === "result") {
+        const description = String((zipLook.result as Record<string, unknown>).description);
+        expect(description).toBe("The weather panel shows that the temperature in 94043 was 58.62°F at May 6, 2026, 9:01 AM PDT.");
+      }
     });
 
   });

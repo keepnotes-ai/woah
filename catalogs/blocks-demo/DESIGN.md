@@ -18,7 +18,7 @@ explicitly. This catalog isolates the demo placement so:
 
 | Instance | Class | Room | Why |
 |---|---|---|---|
-| `the_weather` | `$weather_block` | `the_chatroom` (the "living room") | Ambient: visible from where everyone hangs out. Default place is Mountain View, CA — owner can `:set_property("place", ...)` to relocate. |
+| `the_weather` | `$weather_block` | `the_chatroom` (the "living room") | Ambient: visible from where everyone hangs out. Default place is Mountain View, CA and timezone is America/Los_Angeles; owner can set `place` and `timezone` to relocate it. |
 | `the_horoscope` | `$horoscope_block` | `the_deck` | Vending-machine ambience reads better outdoors; deck is a standing-around space rather than a sitting-down space. |
 
 Both are anchored (the `$block` base class enforces `:moveto` raises and
@@ -94,6 +94,7 @@ The owner of the block writes config props in-world:
 ```text
 @describe the_weather as "A small bronze weather panel ..."
 the_weather:set_property("place", "Tokyo, JP")
+the_weather:set_property("timezone", "Asia/Tokyo")
 the_weather:set_property("units", "metric")
 the_horoscope:set_property("system_prompt", "...new persona...")
 ```

@@ -460,7 +460,7 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
           const value = pop();
           const name = assertString(pop());
           const obj = assertObj(pop());
-          await current.ctx.world.setPropChecked(current.ctx.progr, obj, name, value);
+          await current.ctx.world.setPropChecked(current.ctx.progr, obj, name, value, current.ctx.hostMemo);
           break;
         }
         case "HAS_PROP": {

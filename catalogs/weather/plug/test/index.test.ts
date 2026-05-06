@@ -58,7 +58,7 @@ describe("runWeatherTick", () => {
         body: {
           data: {
             time: "2026-05-05T18:00:00Z",
-            values: { temperature: 72.4 }
+            values: { temperature: 72.4, weatherCode: 1000 }
           }
         }
       }),
@@ -114,6 +114,7 @@ describe("runWeatherTick", () => {
       kind: "scalar",
       value: 72.4,
       unit: "°F",
+      weather_code: 1000,
       observed_at: "2026-05-05T18:00:00Z",
       observed_at_text: "May 5, 2026, 11:00 AM PDT",
       observed_timezone: "America/Los_Angeles"

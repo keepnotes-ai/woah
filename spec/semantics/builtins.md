@@ -235,7 +235,7 @@ override uses these to surface `is sleeping` / `awake and looks alert` /
 | `E_INTRPT` | Task killed. |
 | `E_GONE` | Transient ref no longer valid (host disconnected). |
 | `E_TIMEOUT` | Deadline exceeded (task wall-time budget, cross-host RPC). |
-| `E_CROSS_HOST_WRITE` | Behavior attempted a property-definition or property-value write on an object outside the current host's atomic rollback scope. |
+| `E_CROSS_HOST_WRITE` | Behavior attempted a property definition, property metadata edit, lifecycle change, or authoring write on an object outside the current host's atomic rollback scope. Ordinary property-value assignment routes to the object's host. |
 | `E_HOST_CYCLE` | Awaited host RPC would re-enter a host already in the current request's wait-for chain. |
 | `E_NOSESSION` | Session token is expired or unknown. |
 | `E_VERSION` | Bytecode version mismatch (cache stale). |

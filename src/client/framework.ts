@@ -264,6 +264,12 @@ export class CatalogUiRegistry {
     return resolved ? this.components.get(resolved) : undefined;
   }
 
+  componentsForSurface(surface: string): RegisteredComponent[] {
+    const wanted = String(surface ?? "");
+    if (!wanted) return [];
+    return [...this.components.values()].filter((component) => component.declaration.surface === wanted);
+  }
+
   resolveComponentId(id: string, declaringAlias?: string): string | undefined {
     const raw = String(id ?? "");
     if (!raw) return undefined;

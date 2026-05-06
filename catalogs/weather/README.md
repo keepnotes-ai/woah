@@ -57,7 +57,7 @@ invalid values are rejected when the plug runs.
 
 | Name | Kind | Notes |
 |---|---|---|
-| `current` | `scalar` | Headline current temperature with unit and label. |
+| `current` | `scalar` | Headline current temperature with unit, label, observed time text, and source `weather_code`. |
 | `forecast` | `series` | Hourly forecast with temperature points and hourly detail rows. |
 | `history` | `series` | Recent observed values as a series. |
 | `last_pushed_at` | int | Inherited from `$block`; epoch ms of last plug push. |
@@ -67,17 +67,25 @@ invalid values are rejected when the plug runs.
 ## Look Surface
 
 `:title()` renders the current scalar reading directly, for example
-`Temperature in Mountain View, CA: 72°F`. `:look_self()` renders a sentence:
-`The weather panel shows that the temperature in Mountain View, CA was 72°F
+`Temperature in Mountain View CA: 72°F`. `:look_self()` renders a sentence:
+`The weather panel shows that the temperature in Mountain View CA was 72°F
 at May 6, 2026, 9:01 AM PDT.` The plug formats this from the observation
 timestamp and the block's `timezone`; `:look_self()` does not show the raw
 `last_pushed_at` epoch.
+
+## UI
+
+The catalog declares `weather.badge`, a compact `title-badge` component for
+room title bars. The bundled web client mounts it next to the current room name
+when a room contains a `$weather_block`; the demo Living Room is the intended
+initial placement. The badge reads projected block data and falls back
+silently if the UI module is unavailable.
 
 ## Provisioning
 
 ```text
 @create_instance $weather_block as the_living_room_weather location: the_living_room
-:set_location("Mountain View, CA", "America/Los_Angeles")
+:set_location("Mountain View CA", "America/Los_Angeles")
 :set_units("imperial")
 :mint_apikey("weather-cf-worker-prod")
 # paste the resulting secret into wrangler secret put WOO_APIKEY

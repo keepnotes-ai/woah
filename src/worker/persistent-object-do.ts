@@ -477,6 +477,16 @@ export class PersistentObjectDO {
         if (memo) return await memoizeHostOperation(memo.reads, `prop:${progr}:${objRef}:${name}`, read);
         return await read();
       },
+      setPropChecked: async (progr, objRef, name, value, memo) => {
+        const host = await hostForObject(objRef, memo);
+        if (!host || host === localHost) {
+          await world.setPropChecked(progr, objRef, name, value, memo);
+          return;
+        }
+        memo?.reads.delete(`prop:${progr}:${objRef}:${name}`);
+        this.crossHostPropCache.delete(`${host}|${objRef}|${name}`);
+        await this.forwardInternalChecked<{ ok: true }>(host, "/__internal/remote-set-prop", { progr, obj: objRef, name, value });
+      },
       objectSummary: async (readActor, objRef, memo) => {
         const read = async (): Promise<ScopedObjectSummary> => {
           const host = await hostForObject(objRef, memo);
@@ -1177,6 +1187,14 @@ export class PersistentObjectDO {
         const obj = String(body.obj ?? "") as ObjRef;
         const name = String(body.name ?? "");
         return jsonResponse({ value: await world.getPropChecked(progr, obj, name) });
+      }
+
+      if (request.method === "POST" && pathname === "/__internal/remote-set-prop") {
+        const progr = String(body.progr ?? "") as ObjRef;
+        const obj = String(body.obj ?? "") as ObjRef;
+        const name = String(body.name ?? "");
+        await world.setPropChecked(progr, obj, name, body.value as WooValue);
+        return jsonResponse({ ok: true });
       }
 
       if (request.method === "POST" && pathname === "/__internal/object-summary") {

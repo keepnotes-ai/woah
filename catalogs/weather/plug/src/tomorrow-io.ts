@@ -17,6 +17,7 @@ export type WeatherCurrent = {
   value: number;
   unit: string;
   label: string;
+  weather_code: number;
   observed_at: string;
   observed_at_text?: string;
   observed_timezone?: string;
@@ -87,6 +88,7 @@ export async function fetchWeather(options: TomorrowFetchOptions): Promise<Weath
     value: Number(realtimeValues.temperature ?? 0),
     unit: tempUnit,
     label: "current_temperature",
+    weather_code: Number(realtimeValues.weatherCode ?? 0),
     observed_at: realtimeTime
   };
 

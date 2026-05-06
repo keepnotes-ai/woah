@@ -240,7 +240,12 @@ The caller receives an applied frame only after the final commit succeeds. If co
 
 Cross-anchor-cluster mutations (cross-DO RPCs from inside the verb body) are **not** in the rollback scope, per [space.md §S3.4](../semantics/space.md#s3-failure-rules-normative). Verb authors avoid them in sequenced flows; if they must, they accept the torn-state risk.
 
-The VM does not perform raw remote property writes (`SET_PROP`, property definition, or property metadata edits) from inside a running behavior. Those raise `E_CROSS_HOST_WRITE`. Cross-host mutation, when unavoidable, is expressed as `CALL_VERB` to the remote object so the receiving host performs its own permission checks, sequencing discipline, and audit trail.
+The VM routes ordinary remote property-value writes (`SET_PROP`) to the
+owning host, which performs the same permission checks and durable write it
+would perform for a local assignment. Property definition, property metadata
+edits, and lifecycle operations still raise `E_CROSS_HOST_WRITE` when they
+would cross hosts; those operations are authoring/lifecycle changes rather than
+ordinary object state writes.
 
 ---
 

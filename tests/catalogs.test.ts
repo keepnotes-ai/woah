@@ -3029,7 +3029,7 @@ describe("local catalogs", () => {
       expect(world.object("the_weather").parent).toBe("$weather_block");
       expect(world.object("the_weather").location).toBe("the_chatroom");
       expect(world.object("the_weather").anchor).toBe("the_chatroom");
-      expect(world.getProp("the_weather", "place")).toBe("Mountain View, CA");
+      expect(world.getProp("the_weather", "place")).toBe("Mountain View CA");
       expect(world.getProp("the_weather", "timezone")).toBe("America/Los_Angeles");
       expect(world.getProp("the_weather", "units")).toBe("imperial");
       expect(world.getProp("the_weather", "forecast_hours")).toBe(12);
@@ -3039,10 +3039,10 @@ describe("local catalogs", () => {
       expect(weatherLook.op).toBe("result");
       if (weatherLook.op === "result") {
         expect(weatherLook.result).toMatchObject({
-          title: "Temperature in Mountain View, CA: 72°F",
+          title: "Temperature in Mountain View CA: 72°F",
           last_updated: "May 6, 2026, 9:01 AM PDT",
           last_updated_text: "May 6, 2026, 9:01 AM PDT",
-          description: "The weather panel shows that the temperature in Mountain View, CA was 72°F at May 6, 2026, 9:01 AM PDT."
+          description: "The weather panel shows that the temperature in Mountain View CA was 72°F at May 6, 2026, 9:01 AM PDT."
         });
       }
       const roomLook = await world.directCall("blocks-room-look", "$wiz", "the_chatroom", "look", []);
@@ -3050,7 +3050,7 @@ describe("local catalogs", () => {
       if (roomLook.op === "result") {
         expect(roomLook.result).toMatchObject({
           contents: expect.arrayContaining([
-            expect.objectContaining({ id: "the_weather", title: "Temperature in Mountain View, CA: 72°F" })
+            expect.objectContaining({ id: "the_weather", title: "Temperature in Mountain View CA: 72°F" })
           ])
         });
       }
@@ -3061,7 +3061,7 @@ describe("local catalogs", () => {
         expect(lookWeatherCommand.observations.find((obs) => obs.type === "looked")).toMatchObject({
           room: "the_chatroom",
           target: "the_weather",
-          text: "The weather panel shows that the temperature in Mountain View, CA was 72°F at May 6, 2026, 9:01 AM PDT."
+          text: "The weather panel shows that the temperature in Mountain View CA was 72°F at May 6, 2026, 9:01 AM PDT."
         });
       }
       // Horoscope machine: anchored on the deck, default rate limit + persona.

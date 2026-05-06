@@ -134,6 +134,7 @@ export type HostBridge = {
   localHost: string;
   hostForObject(id: ObjRef, memo?: HostOperationMemo): string | null | Promise<string | null>;
   getPropChecked(progr: ObjRef, objRef: ObjRef, name: string, memo?: HostOperationMemo): Promise<WooValue>;
+  setPropChecked(progr: ObjRef, objRef: ObjRef, name: string, value: WooValue, memo?: HostOperationMemo): Promise<void>;
   objectSummary(readActor: ObjRef, objRef: ObjRef, memo?: HostOperationMemo): Promise<ScopedObjectSummary>;
   objectSummaries(readActor: ObjRef, objRefs: ObjRef[], memo?: HostOperationMemo): Promise<Record<ObjRef, ScopedObjectSummary>>;
   roomSnapshot(readActor: ObjRef, room: ObjRef, sessionId?: string | null, memo?: HostOperationMemo): Promise<RoomSnapshot>;
@@ -169,8 +170,8 @@ export type HostObjectSummary = {
 
 export type HostOperationMemo = {
   routes: Map<ObjRef, Promise<string | null>>;
-  // Read promises are scoped to one execution frame. They intentionally behave
-  // like a frame snapshot, not a coherence mechanism after remote mutation.
+  // Read promises are scoped to one execution frame. Remote write bridges must
+  // invalidate the matching key so read-after-write observes the new value.
   reads: Map<string, Promise<unknown>>;
 };
 
@@ -805,9 +806,11 @@ export class WooWorld {
     return await Promise.all(objRefs.map((objRef) => this.getPropChecked(progr, objRef, name, memo)));
   }
 
-  async setPropChecked(progr: ObjRef, objRef: ObjRef, name: string, value: WooValue): Promise<void> {
-    if (await this.remoteHostForObject(objRef)) {
-      throw wooError("E_CROSS_HOST_WRITE", `cross-host writes are not atomic: ${objRef}.${name}`, { progr, obj: objRef, property: name, value });
+  async setPropChecked(progr: ObjRef, objRef: ObjRef, name: string, value: WooValue, memo?: HostOperationMemo): Promise<void> {
+    if (await this.remoteHostForObject(objRef, memo)) {
+      if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+      await this.hostBridge.setPropChecked(progr, objRef, name, value, memo);
+      return;
     }
     try {
       if (!this.canWriteProperty(progr, objRef, name)) {

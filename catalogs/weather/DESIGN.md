@@ -23,10 +23,12 @@ Each value carries its `kind` so the generic `<woo-block>` element can
 render it; specialized weather UIs can choose to override per property.
 
 ```text
-current   →  { kind: "scalar", value: 72.4, unit: "°F", label: "current_temp" }
-forecast  →  { kind: "table",
-               columns: [{name: "hour"}, {name: "temp"}, {name: "precip"}],
-               rows: [[1, 72, 0], [2, 71, 0.1], ...] }
+current   →  { kind: "scalar", value: 72.4, unit: "°F",
+               label: "current_temperature", weather_code: 1000 }
+forecast  →  { kind: "series",
+               series: [{ name: "temperature", unit: "°F", points: [[ts, 71], ...] }],
+               hourly: [{ time: ts, temperature: 71,
+                          precipitation_probability: 5, weather_code: 1000 }, ...] }
 history   →  { kind: "series",
                series: [
                  { name: "temp",     unit: "°F", points: [[ts, 71], ...] },
@@ -57,6 +59,23 @@ prop, the resulting `block_data` observation reaches the plug; the next
 poll cycle picks up the new value. (The plug also re-reads config on each
 cycle, so a missed observation is harmless — the queue-as-truth shape
 applies here too.)
+
+## Draft UI
+
+The weather catalog ships a small `title-badge` component,
+`weather.badge` / `<woo-weather-badge>`, declared in its manifest. The web
+client mounts title badges in the chat room title bar when the current room's
+contents include a matching object. In the demo deployment this means the
+Living Room title bar shows the living-room weather block's current condition
+and temperature to the right of "Living Room"; rooms without a weather block
+show no badge.
+
+The badge is only presentation. It reads the projected `$weather_block`
+summary, primarily `current`, `forecast`, `config_state`, `place`, and
+`last_error`. The plug writes `current.weather_code` from the realtime source
+API so the badge can choose a compact condition icon without inferring weather
+from temperature. If the UI module is missing or the component fails, ordinary
+`:title()` / `:look_self()` remain the authoritative text surfaces.
 
 ## Connection mode
 

@@ -5,12 +5,33 @@
   "description": "Weather block class — a $block subclass that displays current conditions, a forecast, and recent history for a configured place. Owner sets `place`, `units`, and `forecast_hours`; an external plug Worker (catalogs/weather/plug) fetches tomorrow.io on a schedule and pushes data via apikey-bound session.",
   "license": "MIT",
   "depends": ["@local:block"],
+  "ui": {
+    "abi": "woo-ui/v1",
+    "modules": [
+      {
+        "id": "weather-ui",
+        "entry": "ui/weather-badge.ts"
+      }
+    ],
+    "components": [
+      {
+        "id": "weather.badge",
+        "module": "weather-ui",
+        "tag": "woo-weather-badge",
+        "surface": "title-badge",
+        "subject": "$weather_block",
+        "neighborhood": {
+          "include": ["subject"]
+        }
+      }
+    ]
+  },
   "classes": [
     {
       "local_name": "$weather_block",
       "parent": "$block",
       "flags": { "fertile": true },
-      "description": "A weather display block. The owner configures `place` (a town name or zip code), `timezone` (IANA timezone for local display), `units` (\"metric\" or \"imperial\"), and `forecast_hours` (how many hours of forecast to surface). The plug sends `place` to the upstream API as configured and pushes `current` as a scalar shape (headline temperature), `forecast` as a table (hourly), and `history` as a series. `last_pushed_at` and `last_error` ride the standard $block writable_self surface so :look surfaces freshness.",
+      "description": "A weather display block. The owner configures `place` (a town name or zip code), `timezone` (IANA timezone for local display), `units` (\"metric\" or \"imperial\"), and `forecast_hours` (how many hours of forecast to surface). The plug sends `place` to the upstream API as configured and pushes `current` as a scalar shape (headline temperature plus source weather code), `forecast` as a series with hourly detail, and `history` as a series. `last_pushed_at` and `last_error` ride the standard $block writable_self surface so :look surfaces freshness.",
       "properties": [
         { "name": "place", "type": "str", "default": "", "perms": "r" },
         { "name": "timezone", "type": "str", "default": "", "perms": "r" },

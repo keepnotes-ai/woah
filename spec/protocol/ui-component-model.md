@@ -392,6 +392,26 @@ Region names are a layout concern; surfaces are a dispatch concern. They
 intentionally share some labels (`main`, `presence`, `chat`) for readability
 when a layout's region matches the typical component surface placed there.
 
+### UCM8.1 Draft: container title badges
+
+`title-badge` is a draft first-party surface for compact status components
+mounted by a container UI near that container's title. A title badge renders a
+contained object's state without taking over that object's detail view. The
+container chooses the mount location; the badge component remains owned by the
+contained object's catalog.
+
+The initial browser client supports this only for the chat room title bar:
+when the current room's contents include an object with a registered
+`title-badge` component whose `subject` constraint matches that object, the
+chat UI may mount the component to the right of the room name. The mounted
+component receives the contained object as its `subject` and the current
+projection summary as `data`.
+
+Title badges are observational UI. They MUST NOT be the only way to inspect or
+control the object. Missing, unsupported, or failed title-badge UI degrades to
+no badge; the room title and ordinary object look/tool surfaces remain
+authoritative.
+
 The optional `subject` constraint is enforced at frame-mount time. Before
 mounting a component on a node whose resolved subject is `S`, the host MUST
 verify that `S.is_a(component.subject)` (or that `S` equals the constraint

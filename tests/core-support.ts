@@ -136,6 +136,11 @@ export class LocalHostBridge implements HostBridge {
     return await memoizeTestOperation(memo.reads, key, read);
   }
 
+  async setPropChecked(progr: ObjRef, objRef: ObjRef, name: string, value: WooValue, memo?: HostOperationMemo): Promise<void> {
+    memo?.reads.delete(`prop:${progr}:${objRef}:${name}`);
+    await this.worldFor(objRef).setPropChecked(progr, objRef, name, value, memo);
+  }
+
   async objectSummary(readActor: ObjRef, objRef: ObjRef, memo?: HostOperationMemo): Promise<ScopedObjectSummary> {
     const key = `summary:${readActor}:${objRef}`;
     const read = async () => await this.worldFor(objRef).scopedObjectSummary(readActor, objRef, memo);

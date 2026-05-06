@@ -1,6 +1,6 @@
 ---
 name: weather
-version: 0.1.0
+version: 0.1.2
 spec_version: v1
 license: MIT
 description: Weather block class — a $block subclass driven by an external plug that fetches tomorrow.io and pushes current, forecast, and history.
@@ -18,6 +18,9 @@ fetched by an external plug Worker. The plug authenticates as the block's
 actor via an apikey credential, calls a hosted weather API on a schedule,
 and pushes the result into the block's `writable_self` properties; the
 block's owner configures *where* and *how* via `writable_owner` props.
+The class object `$weather_block` is fertile: builders can create new
+weather panel instances under it, and each instance inherits the
+owner/wizard configuration verbs.
 
 See [DESIGN.md](DESIGN.md) for the mapping to canonical block kinds and
 the plug's lifecycle.
@@ -32,6 +35,23 @@ the plug's lifecycle.
 | `timezone` | `""` | IANA timezone, e.g. `America/Los_Angeles`; the plug uses it to write local observation time text. |
 | `units` | `"metric"` | `"metric"` or `"imperial"`. |
 | `forecast_hours` | `12` | How many hours of forecast the plug should fetch. |
+| `config_state` | `{status: "unconfigured"}` | Plug confirmation state for the current location/timezone. |
+
+## Owner Tools
+
+`$weather_block` exposes narrow configuration verbs on each instance:
+
+| Verb | Notes |
+|---|---|
+| `set_location(place, timezone)` | Sets `place` and `timezone` together, clears stale errors, and marks `config_state.status` as `pending` until the plug confirms them. |
+| `set_units(units)` | Accepts `metric` or `imperial`. |
+| `set_forecast_hours(hours)` | Stores a rounded value from 1 to 168. |
+
+Only the block owner or a wizard can use these verbs. The generic
+`$block:set_property` / `:set_properties` surface remains hidden from MCP
+tools; plug sessions still use it for data writes. Semantic validation
+stays in the plug: timezone values must be real IANA timezone names, and
+invalid values are rejected when the plug runs.
 
 ### Plug-writable (data)
 
@@ -42,6 +62,7 @@ the plug's lifecycle.
 | `history` | `series` | Recent observed values as a series. |
 | `last_pushed_at` | int | Inherited from `$block`; epoch ms of last plug push. |
 | `last_error` | str/null | Inherited from `$block`; most recent fetch failure. |
+| `config_state` | map | `pending`, `confirmed`, or config-specific `error` state for the owner-set location/timezone. |
 
 ## Look Surface
 
@@ -56,9 +77,8 @@ timestamp and the block's `timezone`; `:look_self()` does not show the raw
 
 ```text
 @create_instance $weather_block as the_living_room_weather location: the_living_room
-:set_property("place", "Mountain View, CA")
-:set_property("timezone", "America/Los_Angeles")
-:set_property("units", "imperial")
+:set_location("Mountain View, CA", "America/Los_Angeles")
+:set_units("imperial")
 :mint_apikey("weather-cf-worker-prod")
 # paste the resulting secret into wrangler secret put WOO_APIKEY
 # wrangler deploy from catalogs/weather/plug

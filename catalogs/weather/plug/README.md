@@ -12,22 +12,28 @@ This is the outside-world half of the weather block. The catalog half (the
 Cron-triggered hourly. Each tick:
 
 1. POSTs to `/api/auth` with the actor-bound apikey for the weather block.
-2. GETs the block's `place` property (a town name or zip code, e.g. `"Mountain View, CA"` or `"94043"`).
+2. GETs the block's owner-set config (`place`, `timezone`, `units`, and `forecast_hours`).
 3. Fetches tomorrow.io realtime + hourly-forecast endpoints.
 4. POSTs `:set_properties` with `current` (scalar shape), `forecast` (series
-   shape), and `last_pushed_at`.
+   shape), `last_pushed_at`, and `config_state`.
 5. Disconnects.
 
-If the block has no `place` configured, or tomorrow.io errors, the plug writes
-the failure into `last_error` on the block so the UI can render "stale, last
-attempt errored: …". Recognized failure modes:
+If the block has no `place` configured, has an invalid timezone, or
+tomorrow.io rejects the place, the plug writes `config_state.status = "error"`
+and a readable `last_error` on the block. On success it writes
+`config_state.status = "confirmed"`. Timezone values must be valid IANA
+timezone names; the plug does not do alias matching. Non-config source
+failures, such as rate limits or auth errors, still update `last_error`.
+Recognized failure modes:
 
+- `owner has not configured a valid timezone - use an IANA timezone such as America/Los_Angeles`
 - `tomorrow.io rate-limited (retry after Ns) — free plan caps 25/hour, 500/day`
 - `tomorrow.io rejected the API key — check TOMORROW_IO_API_KEY`
 - generic per-call message on other transport / parse failures
 
 The Worker fails the whole tick when tomorrow.io errors; the cron retries
-hourly. No backoff state — `last_error` is the operator's only signal.
+hourly. `last_error` is the operator-facing signal; `config_state` tells the
+block owner whether the latest location/timezone has been confirmed.
 
 ## Tomorrow.io free-plan budget
 
@@ -48,9 +54,10 @@ hourly free-plan budget and ~10% of the daily budget. Plenty of headroom.
 npm install
 ```
 
-Configure the block on the woo side first (owner sets `place` to a town
-name or zip code, sets IANA `timezone`, then mints an apikey via
-`:mint_apikey`). Take the secret and:
+Configure the block on the woo side first with `:set_location(place,
+timezone)`, then mint an apikey via `:mint_apikey`. The block marks the new
+location as pending; the plug confirms or rejects it on the next run. Take
+the secret and:
 
 ```bash
 wrangler secret put WOO_APIKEY            # apikey:<id>:<secret>
@@ -73,14 +80,13 @@ block. `E_NOSESSION` means the token is malformed, unknown, secret-
 mismatched, or revoked. Use the full `apikey:<id>:<secret>` token;
 `apikey:<secret>` is not the documented token form.
 
-Deployment-specific values can be set as Worker variables or secrets. The
-repo bootstrap script stores `WOO_BASE_URL`, `BLOCK_ID`, `WOO_APIKEY`, and
-`TRIGGER_SECRET` with `wrangler secret put`; `TOMORROW_IO_API_KEY` is always
-a secret. If provisioning manually, set all required bindings before deploy:
+Deployment-specific public values live in `wrangler.toml` under `[vars]`:
+`WOO_BASE_URL`, `BLOCK_ID`, and optional `FORECAST_HOURS`. The repo bootstrap
+script updates those public vars. Secrets still go through
+`wrangler secret put`. If provisioning manually, set the secrets before
+deploy:
 
 ```bash
-wrangler secret put WOO_BASE_URL
-wrangler secret put BLOCK_ID
 wrangler secret put WOO_APIKEY
 wrangler secret put TOMORROW_IO_API_KEY
 wrangler secret put TRIGGER_SECRET
@@ -117,7 +123,8 @@ for the failure mode without parsing free-text:
 | `category` | Cause | Fix |
 |---|---|---|
 | `woo:E_NOSESSION` | woo rejected the apikey | check `WOO_APIKEY` secret |
-| `woo:E_NO_PLACE` | block has no `place` set | owner runs `:set_property("place", "City")` |
+| `weather_config:E_NO_PLACE` | block has no `place` set | owner runs `:set_location("City", "America/Los_Angeles")` |
+| `weather_config:E_BAD_TIMEZONE` | block timezone is empty or not recognized | owner runs `:set_location` with an IANA timezone |
 | `tomorrow:auth` | tomorrow.io rejected the API key | check `TOMORROW_IO_API_KEY` secret |
 | `tomorrow:rate_limit` | hit the free-plan ceiling | wait, or upgrade |
 | `tomorrow:<status>` | other tomorrow.io HTTP error | inspect `message` |

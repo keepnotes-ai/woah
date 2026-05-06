@@ -333,6 +333,7 @@ Repair/update remains an explicit sequenced operation through
     {
       "local_name": "$loop_slot",
       "parent": "hughpyle/woo-libs:root-pack:$control",
+      "flags": {"fertile": true},
       "properties": [{"name": "loop_id", "default": null, "perms": "rw"}, ...],
       "verbs": [{"name": "play", "source": "verb $loop_slot:play() {...}", "perms": "rxd", ...}, ...]
     },
@@ -362,6 +363,12 @@ Catalog `perms` use the same authoring shorthand as source: `rxd` means install
 with normalized `perms: "rx"` and `direct_callable: true`. Catalogs may also set
 `direct_callable` explicitly; the explicit metadata field is the authoritative
 stored form after install.
+
+Class and feature objects may declare lifecycle `flags` for ordinary
+authoring/template behavior. `fertile: true` means instances may be created
+under the catalog class by actors who do not own the class object; deployed
+instances created from seed hooks remain ordinary non-fertile objects unless
+their own creation path sets flags separately.
 
 Seed hooks are intentionally small. `create_instance` creates a named instance
 from a catalog or dependency class, `attach_feature` appends a feature object to

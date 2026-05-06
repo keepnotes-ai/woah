@@ -22,6 +22,10 @@ type CatalogObjectDef = {
   local_name: string;
   parent: string;
   description?: string;
+  flags?: {
+    fertile?: boolean;
+    recyclable?: boolean;
+  };
   properties?: CatalogPropertyDef[];
   verbs?: CatalogVerbDef[];
 };
@@ -293,6 +297,20 @@ export function catalogManifestStatus(world: WooWorld, manifest: CatalogManifest
           actual: actualParent
         });
       }
+      for (const [flag, expected] of Object.entries(def.flags ?? {})) {
+        if (typeof expected !== "boolean") continue;
+        const actual = (world.object(def.local_name).flags as Record<string, boolean | undefined>)[flag] === true;
+        if (actual !== expected) {
+          issues.push({
+            severity: "warning",
+            kind: "flag_drift",
+            object: def.local_name,
+            message: `${def.local_name}.${flag} flag differs from manifest`,
+            expected,
+            actual
+          });
+        }
+      }
     } catch (err) {
       issues.push(catalogStatusErrorIssue("unresolved_parent", def.local_name, err));
     }
@@ -472,7 +490,7 @@ export function installCatalogManifest(world: WooWorld, manifest: CatalogManifes
   for (const def of objectDefs) {
     const id = def.local_name;
     const parent = resolveObjectRef(world, def.parent, localObjects, localSeeds, existing);
-    world.createObject({ id, name: id, parent, owner: actor });
+    world.createObject({ id, name: id, parent, owner: actor, flags: def.flags });
     setDescriptionIfEmpty(world, id, catalogDescription(def.description, id, manifest.name));
     for (const property of def.properties ?? []) installProperty(world, id, property, actor);
     for (const verb of def.verbs ?? []) installVerbDef(world, id, verb, actor, allowImplementationHints, false);
@@ -832,9 +850,21 @@ function applyCatalogSchemaPlanStep(
   switch (step.kind) {
     case "ensure_object": {
       const parent = resolveObjectRef(world, step.def.parent, context.localObjects, context.localSeeds, context.existing);
-      if (!world.objects.has(step.object)) world.createObject({ id: step.object, name: step.object, parent, owner: context.actor });
+      if (!world.objects.has(step.object)) world.createObject({ id: step.object, name: step.object, parent, owner: context.actor, flags: step.def.flags });
       else if (world.object(step.object).parent !== parent && !world.isDescendantOf(parent, step.object)) {
         world.chparentAuthoredObject(context.actor, step.object, parent);
+      }
+      if (world.objects.has(step.object)) {
+        let flagsChanged = false;
+        const target = world.object(step.object);
+        for (const [flag, expected] of Object.entries(step.def.flags ?? {})) {
+          if (typeof expected !== "boolean") continue;
+          const actual = (target.flags as Record<string, boolean | undefined>)[flag] === true;
+          if (actual === expected) continue;
+          (target.flags as Record<string, boolean>)[flag] = expected;
+          flagsChanged = true;
+        }
+        if (flagsChanged) world.markObjectChanged(step.object);
       }
       setDescriptionIfEmpty(world, step.object, catalogDescription(step.def.description, step.object, manifest.name));
       return;

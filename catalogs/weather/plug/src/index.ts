@@ -94,6 +94,18 @@ export type WeatherTickResult = {
   fetched_at: number;
 };
 
+export class WeatherConfigError extends Error {
+  constructor(
+    public readonly code: string,
+    message: string,
+    public readonly status: number,
+    public readonly value?: unknown
+  ) {
+    super(message);
+    this.name = "WeatherConfigError";
+  }
+}
+
 export async function runWeatherTick(
   env: WeatherPlugEnv,
   deps: { fetchImpl?: typeof fetch } = {}
@@ -106,11 +118,8 @@ export async function runWeatherTick(
   const place = typeof placeValue === "string" && placeValue.trim() ? placeValue : null;
   if (!place) {
     const message = "owner has not configured `place`; set it to a town name or zip code";
-    await client.directCall(env.BLOCK_ID, "set_property", [
-      "last_error",
-      message
-    ]);
-    throw new WooError("E_NO_PLACE", message, 400);
+    await writeConfigError(client, env.BLOCK_ID, "E_NO_PLACE", message, { place: placeValue });
+    throw new WeatherConfigError("E_NO_PLACE", message, 400, { place: placeValue });
   }
 
   // Owner-set knobs ride writable_owner on the block. The plug honors them
@@ -121,6 +130,11 @@ export async function runWeatherTick(
   const units: TomorrowUnits = unitsRaw === "imperial" ? "imperial" : "metric";
   const timezoneRaw = await getOptionalProperty(client, env.BLOCK_ID, "timezone");
   const timezone = normalizeTimezone(timezoneRaw);
+  if (!timezone) {
+    const message = "owner has not configured a valid timezone; use an IANA timezone such as America/Los_Angeles";
+    await writeConfigError(client, env.BLOCK_ID, "E_BAD_TIMEZONE", message, { place, timezone: timezoneRaw });
+    throw new WeatherConfigError("E_BAD_TIMEZONE", message, 400, { place, timezone: timezoneRaw });
+  }
   const forecastHoursRaw = await client.getProperty(env.BLOCK_ID, "forecast_hours");
   const forecastHours = pickForecastHours(forecastHoursRaw, env.FORECAST_HOURS);
   const tomorrowPlace = normalizeTomorrowLocation(place);
@@ -135,7 +149,12 @@ export async function runWeatherTick(
       fetchImpl
     });
   } catch (err) {
-    await client.directCall(env.BLOCK_ID, "set_property", ["last_error", formatLastError(err, place)]);
+    const message = formatLastError(err, place);
+    if (isConfigSourceError(err)) {
+      await writeConfigError(client, env.BLOCK_ID, errorConfigCode(err), message, { place, timezone });
+    } else {
+      await client.directCall(env.BLOCK_ID, "set_property", ["last_error", message]);
+    }
     throw err;
   }
 
@@ -144,7 +163,14 @@ export async function runWeatherTick(
       current: withLocalObservationTime(snapshot.current, timezone),
       forecast: snapshot.forecast,
       last_pushed_at: snapshot.fetched_at,
-      last_error: null
+      last_error: null,
+      config_state: {
+        status: "confirmed",
+        message: "weather plug confirmed location and timezone",
+        place,
+        timezone,
+        confirmed_at: snapshot.fetched_at
+      }
     }
   ]);
 
@@ -239,6 +265,9 @@ function errorBreadcrumb(err: unknown): ErrorBreadcrumb {
       : `tomorrow:${err.status}`;
     return { category, status: err.status, message: err.message };
   }
+  if (err instanceof WeatherConfigError) {
+    return { category: `weather_config:${err.code}`, code: err.code, status: err.status, message: err.message };
+  }
   if (err instanceof WooError) {
     return { category: `woo:${err.code}`, code: err.code, status: err.status, message: err.message };
   }
@@ -262,6 +291,30 @@ function formatLastError(err: unknown, place?: string): string {
     return err.message;
   }
   return err instanceof Error ? err.message : String(err);
+}
+
+async function writeConfigError(client: WooClient, blockId: string, code: string, message: string, value: Record<string, unknown>): Promise<void> {
+  await client.directCall(blockId, "set_properties", [
+    {
+      last_error: message,
+      config_state: {
+        status: "error",
+        code,
+        message,
+        ...value,
+        checked_at: Date.now()
+      }
+    }
+  ]);
+}
+
+function isConfigSourceError(err: unknown): boolean {
+  return err instanceof TomorrowIoError && (err.status === 400 || err.status === 404);
+}
+
+function errorConfigCode(err: unknown): string {
+  if (err instanceof TomorrowIoError && err.status === 404) return "E_UNKNOWN_PLACE";
+  return "E_BAD_PLACE";
 }
 
 // Gate the manual fetch trigger on a shared secret. Constant-time-ish
@@ -296,6 +349,12 @@ function constantTimeEqual(a: string, b: string): boolean {
 
 function errorResponse(err: unknown): Response {
   if (err instanceof WooError) {
+    return Response.json(
+      { ok: false, code: err.code, message: err.message, value: err.value },
+      { status: err.status >= 400 && err.status < 600 ? err.status : 500 }
+    );
+  }
+  if (err instanceof WeatherConfigError) {
     return Response.json(
       { ok: false, code: err.code, message: err.message, value: err.value },
       { status: err.status >= 400 && err.status < 600 ? err.status : 500 }

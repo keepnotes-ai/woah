@@ -95,7 +95,7 @@ describe("runLoggedWeatherTick", () => {
     });
   });
 
-  it("emits tick_error with category=woo:E_NO_PLACE when the owner hasn't set place", async () => {
+  it("emits tick_error with category=weather_config:E_NO_PLACE when the owner hasn't set place", async () => {
     const { fetchImpl } = makeFetch([
       () => ({ status: 200, body: { actor: "the_weather_block", session: "sess", expires_at: null, token_class: "apikey" } }),
       () => ({ status: 200, body: { value: "" } }),
@@ -105,7 +105,7 @@ describe("runLoggedWeatherTick", () => {
     await expect(runLoggedWeatherTick(env, "fetch", { fetchImpl })).rejects.toMatchObject({ code: "E_NO_PLACE" });
     const errLine = lines.find((l) => l.event === "tick_error");
     expect(errLine).toMatchObject({
-      category: "woo:E_NO_PLACE",
+      category: "weather_config:E_NO_PLACE",
       code: "E_NO_PLACE",
       trigger: "fetch"
     });

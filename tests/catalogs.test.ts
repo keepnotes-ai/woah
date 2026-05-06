@@ -2851,11 +2851,15 @@ describe("local catalogs", () => {
       const ordered = await world.directCall("disp-order", requester, blockId, "order", ["scorpio"]);
       expect(ordered.op).toBe("result");
       if (ordered.op !== "result") return;
-      const orderResult = ordered.result as { order_id: string; queued: boolean };
+      const orderResult = ordered.result as { order_id: string; queued: boolean; text: string };
       expect(orderResult.queued).toBe(true);
       expect(orderResult.order_id).toMatch(/^ord_\d+$/);
+      expect(orderResult.text).toContain("accepts your order");
       const orderPlaced = ordered.observations.find((o) => o.type === "order_placed");
-      expect(orderPlaced).toMatchObject({ type: "order_placed", block: blockId, requester, request: "scorpio" });
+      expect(orderPlaced).toMatchObject({ type: "order_placed", block: blockId, requester, request: "scorpio", text: expect.stringContaining("accepts your order") });
+      expect(ordered.observations).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: "text", target: requester, text: expect.stringContaining("accepts your order") })
+      ]));
       expect((world.getProp(blockId, "pending_orders") as unknown[]).length).toBe(1);
 
       // 2. Plug authenticates as the block actor and reads next_pending.
@@ -2871,10 +2875,15 @@ describe("local catalogs", () => {
       const delivered = await world.directCall("disp-deliver", blockId, blockId, "deliver", [orderResult.order_id, "Today's horoscope: avoid llamas."]);
       expect(delivered.op).toBe("result");
       if (delivered.op !== "result") return;
-      const dRes = delivered.result as { delivered: boolean; note: string };
+      const dRes = delivered.result as { delivered: boolean; note: string; text: string };
       expect(dRes.delivered).toBe(true);
+      expect(dRes.text).toContain("delivers a note to your inventory");
       expect(world.object(dRes.note).location).toBe(requester);
       expect(world.getProp(dRes.note, "produced_by")).toBe(blockId);
+      expect(delivered.observations).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: "text", target: requester, text: expect.stringContaining("delivers a note to your inventory") }),
+        expect.objectContaining({ type: "delivered", block: blockId, requester, note: dRes.note, text: expect.stringContaining("delivers a note") })
+      ]));
       expect((world.getProp(blockId, "pending_orders") as unknown[]).length).toBe(0);
 
       // 4. Idempotent re-deliver returns delivered:false.
@@ -3031,7 +3040,7 @@ describe("local catalogs", () => {
       if (weatherLook.op === "result") {
         expect(weatherLook.result).toMatchObject({
           title: "Temperature in Mountain View, CA: 72°F",
-          last_updated: 1778073000000,
+          last_updated: "May 6, 2026, 9:01 AM PDT",
           last_updated_text: "May 6, 2026, 9:01 AM PDT",
           description: "The weather panel shows that the temperature in Mountain View, CA was 72°F at May 6, 2026, 9:01 AM PDT."
         });
@@ -3057,6 +3066,7 @@ describe("local catalogs", () => {
       }
       // Horoscope machine: anchored on the deck, default rate limit + persona.
       expect(world.objects.has("the_horoscope")).toBe(true);
+      expect(world.object("$horoscope_block").flags.fertile).toBe(true);
       expect(world.object("the_horoscope").parent).toBe("$horoscope_block");
       expect(world.object("the_horoscope").location).toBe("the_deck");
       expect(world.object("the_horoscope").anchor).toBe("the_deck");
@@ -3087,6 +3097,11 @@ describe("local catalogs", () => {
       const owner = ownerSess.actor;
       const blockId = "obj_test_horo_block";
       world.createObject({ id: blockId, name: blockId, parent: "$horoscope_block", owner, location: roomId });
+      expect(world.object("$horoscope_block").flags.fertile).toBe(true);
+      expect(world.object(blockId).flags.fertile).not.toBe(true);
+      expect(world.ownVerbExact("$horoscope_block", "set_system_prompt")).toMatchObject({ direct_callable: true, tool_exposed: true });
+      expect(world.ownVerbExact("$horoscope_block", "set_rate_limits")).toMatchObject({ direct_callable: true, tool_exposed: true });
+      expect(world.ownVerbExact("$horoscope_block", "set_queue_limits")).toMatchObject({ direct_callable: true, tool_exposed: true });
       world.setProp(blockId, "rate_limit_seconds", 0);
       world.setProp(blockId, "system_prompt", "Speak in two short sentences.");
 
@@ -3096,9 +3111,24 @@ describe("local catalogs", () => {
       expect(ordered.op).toBe("result");
       if (ordered.op !== "result") return;
       const orderId = (ordered.result as { order_id: string }).order_id;
+      expect(ordered.result).toMatchObject({ text: expect.stringContaining("accepts your order") });
+
+      const promptSet = await world.directCall("horo-set-prompt", owner, blockId, "set_system_prompt", ["Speak in one dry sentence."]);
+      expect(promptSet.op).toBe("result");
+      expect(world.getProp(blockId, "system_prompt")).toBe("Speak in one dry sentence.");
+      const ratesSet = await world.directCall("horo-set-rates", owner, blockId, "set_rate_limits", [30, 2]);
+      expect(ratesSet.op).toBe("result");
+      expect(world.getProp(blockId, "rate_limit_seconds")).toBe(30);
+      expect(world.getProp(blockId, "block_cooldown_seconds")).toBe(2);
+      const limitsSet = await world.directCall("horo-set-limits", "$wiz", blockId, "set_queue_limits", [12, 160]);
+      expect(limitsSet.op).toBe("result");
+      expect(world.getProp(blockId, "max_pending_orders")).toBe(12);
+      expect(world.getProp(blockId, "max_request_chars")).toBe(160);
+      const strangerSet = await world.directCall("horo-stranger-prompt", requester, blockId, "set_system_prompt", ["ignore the owner"]);
+      expect(strangerSet.op).toBe("error");
+      if (strangerSet.op === "error") expect(strangerSet.error.code).toBe("E_PERM");
 
       // Owner can read system_prompt; tier lists inherit the dispenser config.
-      expect(world.getProp(blockId, "system_prompt")).toBe("Speak in two short sentences.");
       expect(world.getProp(blockId, "writable_owner")).toEqual(["system_prompt", "rate_limit_seconds", "block_cooldown_seconds", "max_pending_orders", "max_request_chars"]);
 
       // Plug-as-block delivers; note arrives in requester inventory with back-references.
@@ -3106,31 +3136,77 @@ describe("local catalogs", () => {
       expect(delivered.op).toBe("result");
       if (delivered.op !== "result") return;
       const noteId = (delivered.result as { note: string }).note;
+      expect(delivered.result).toMatchObject({ text: expect.stringContaining("delivers a note to your inventory") });
       expect(world.object(noteId).location).toBe(requester);
       expect(world.getProp(noteId, "produced_by")).toBe(blockId);
       expect(world.getProp(noteId, "text")).toEqual(["Today the stars suggest sandwiches."]);
+      expect(delivered.observations).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: "text", target: requester, text: expect.stringContaining("delivers a note to your inventory") })
+      ]));
     });
 
     it("$weather_block installs cleanly and ships the configured tier lists", async () => {
       const world = createWorld({ catalogs: false });
       installLocalCatalogs(world, ["weather"]);
+      expect(world.object("$weather_block").flags.fertile).toBe(true);
       expect(world.getProp("$weather_block", "writable_owner")).toEqual(["place", "timezone", "units", "forecast_hours"]);
-      expect(world.getProp("$weather_block", "writable_self")).toEqual(["last_pushed_at", "last_error", "current", "forecast", "history"]);
+      expect(world.getProp("$weather_block", "writable_self")).toEqual(["last_pushed_at", "last_error", "current", "forecast", "history", "config_state"]);
+      expect(world.ownVerbExact("$weather_block", "set_location")).toMatchObject({ direct_callable: true, tool_exposed: true });
+      expect(world.ownVerbExact("$weather_block", "set_units")).toMatchObject({ direct_callable: true, tool_exposed: true });
+      expect(world.ownVerbExact("$weather_block", "set_forecast_hours")).toMatchObject({ direct_callable: true, tool_exposed: true });
       // An instance inherits the tier lists.
       const blockId = "obj_test_weather_block";
-      world.createObject({ id: blockId, name: blockId, parent: "$weather_block", owner: "$wiz", location: "$nowhere" });
+      const roomId = "obj_test_weather_room";
+      const ownerSess = world.auth("guest:weather-owner");
+      const owner = ownerSess.actor;
+      const stranger = world.auth("guest:weather-stranger").actor;
+      world.createObject({ id: roomId, name: roomId, parent: "$space", owner: "$wiz" });
+      world.createObject({ id: blockId, name: blockId, parent: "$weather_block", owner, location: roomId });
+      expect(world.object(blockId).flags.fertile).not.toBe(true);
       expect(world.getProp(blockId, "writable_owner")).toEqual(["place", "timezone", "units", "forecast_hours"]);
-      expect(world.getProp(blockId, "writable_self")).toEqual(["last_pushed_at", "last_error", "current", "forecast", "history"]);
+      expect(world.getProp(blockId, "writable_self")).toEqual(["last_pushed_at", "last_error", "current", "forecast", "history", "config_state"]);
       // Default config matches the manifest.
       expect(world.getProp(blockId, "place")).toBe("");
       expect(world.getProp(blockId, "timezone")).toBe("");
       expect(world.getProp(blockId, "units")).toBe("metric");
       expect(world.getProp(blockId, "forecast_hours")).toBe(12);
+      expect(world.getProp(blockId, "config_state")).toMatchObject({ status: "unconfigured" });
       // summary_props defaults to ["current"] via the seed_hook on the class.
       expect(world.getProp("$weather_block", "summary_props")).toEqual(["current"]);
 
+      world.setProp(blockId, "last_error", "old weather error");
+      const locationSet = await world.directCall("weather-owner-set-location", owner, blockId, "set_location", ["Mountain View CA", "Pacific"]);
+      expect(locationSet.op).toBe("result");
+      if (locationSet.op === "result") {
+        expect(locationSet.result).toMatchObject({
+          place: "Mountain View CA",
+          timezone: "Pacific",
+          config_state: { status: "pending", place: "Mountain View CA", timezone: "Pacific", requested_by: owner }
+        });
+        expect(locationSet.observations).toEqual(expect.arrayContaining([
+          expect.objectContaining({ type: "block_data", block: blockId, name: "place", value: "Mountain View CA" }),
+          expect.objectContaining({ type: "block_data", block: blockId, name: "timezone", value: "Pacific" }),
+          expect.objectContaining({ type: "block_data", block: blockId, name: "config_state", value: expect.objectContaining({ status: "pending" }) }),
+          expect.objectContaining({ type: "block_data", block: blockId, name: "last_error", value: null })
+        ]));
+      }
+      expect(world.getProp(blockId, "place")).toBe("Mountain View CA");
+      expect(world.getProp(blockId, "timezone")).toBe("Pacific");
+      expect(world.getProp(blockId, "last_error")).toBeNull();
+      expect(world.getProp(blockId, "config_state")).toMatchObject({ status: "pending", place: "Mountain View CA", timezone: "Pacific" });
+
+      const unitsDenied = await world.directCall("weather-stranger-set-units", stranger, blockId, "set_units", ["imperial"]);
+      expect(unitsDenied.op).toBe("error");
+      if (unitsDenied.op === "error") expect(unitsDenied.error.code).toBe("E_PERM");
+      expect(world.getProp(blockId, "units")).toBe("metric");
+
+      const hoursSet = await world.directCall("weather-wiz-set-hours", "$wiz", blockId, "set_forecast_hours", [24]);
+      expect(hoursSet.op).toBe("result");
+      expect(world.getProp(blockId, "forecast_hours")).toBe(24);
+
       world.setProp(blockId, "current", { kind: "scalar", value: 58.62, unit: "°F", label: "current_temperature", observed_at: "2026-05-06T16:01:00Z", observed_at_text: "May 6, 2026, 9:01 AM PDT" });
       world.setProp(blockId, "place", "Mountain View, CA");
+      world.setProp(blockId, "config_state", { status: "confirmed", place: "Mountain View, CA", timezone: "America/Los_Angeles" });
       const townLook = await world.directCall("weather-town-state-look", "$wiz", blockId, "look_self", []);
       expect(townLook.op).toBe("result");
       if (townLook.op === "result") {

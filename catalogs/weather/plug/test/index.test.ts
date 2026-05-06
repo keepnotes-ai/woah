@@ -104,6 +104,12 @@ describe("runWeatherTick", () => {
     const props = body.args[0];
     expect(props.last_error).toBeNull();
     expect(props.last_pushed_at).toEqual(expect.any(Number));
+    expect(props.config_state).toMatchObject({
+      status: "confirmed",
+      place: "Mountain View, CA",
+      timezone: "America/Los_Angeles",
+      confirmed_at: expect.any(Number)
+    });
     expect(props.current).toMatchObject({
       kind: "scalar",
       value: 72.4,
@@ -150,8 +156,35 @@ describe("runWeatherTick", () => {
     ]);
 
     await expect(runWeatherTick(env, { fetchImpl })).rejects.toMatchObject({ code: "E_NO_PLACE" });
-    expect(calls[2].url).toBe("https://woo.example/api/objects/the_weather_block/calls/set_property");
-    expect((calls[2].body as { args: unknown[] }).args[0]).toBe("last_error");
+    expect(calls[2].url).toBe("https://woo.example/api/objects/the_weather_block/calls/set_properties");
+    const props = (calls[2].body as { args: [Record<string, any>] }).args[0];
+    expect(props.last_error).toMatch(/owner has not configured `place`/);
+    expect(props.config_state).toMatchObject({ status: "error", code: "E_NO_PLACE" });
+  });
+
+  it("writes a config error when timezone is not usable", async () => {
+    const { fetchImpl, calls } = makeFetch([
+      () => ({
+        status: 200,
+        body: { actor: "the_weather_block", session: "sess_w", expires_at: null, token_class: "apikey" }
+      }),
+      () => ({ status: 200, body: { value: "Mountain View, CA" } }),
+      () => ({ status: 200, body: { value: "imperial" } }),
+      () => ({ status: 200, body: { value: "not/a-zone" } }),
+      () => ({ status: 200, body: { result: null, observations: [] } })
+    ]);
+
+    await expect(runWeatherTick(env, { fetchImpl })).rejects.toMatchObject({ code: "E_BAD_TIMEZONE" });
+    expect(calls).toHaveLength(5);
+    expect(calls[4].url).toBe("https://woo.example/api/objects/the_weather_block/calls/set_properties");
+    const props = (calls[4].body as { args: [Record<string, any>] }).args[0];
+    expect(props.last_error).toMatch(/valid timezone/);
+    expect(props.config_state).toMatchObject({
+      status: "error",
+      code: "E_BAD_TIMEZONE",
+      place: "Mountain View, CA",
+      timezone: "not/a-zone"
+    });
   });
 
   it("writes a clean auth-rejected last_error when tomorrow.io returns 401", async () => {
@@ -226,9 +259,14 @@ describe("runWeatherTick", () => {
 
     await expect(runWeatherTick(env, { fetchImpl })).rejects.toThrow();
     expect(new URL(calls[5].url).searchParams.get("location")).toBe("Atlantis");
-    const args = (calls[6].body as { args: unknown[] }).args;
-    expect(args[0]).toBe("last_error");
-    expect(args[1]).toBe('tomorrow.io could not fetch weather for "Atlantis" - set place to a town name or zip code it recognizes');
+    const props = (calls[6].body as { args: [Record<string, any>] }).args[0];
+    expect(props.last_error).toBe('tomorrow.io could not fetch weather for "Atlantis" - set place to a town name or zip code it recognizes');
+    expect(props.config_state).toMatchObject({
+      status: "error",
+      code: "E_BAD_PLACE",
+      place: "Atlantis",
+      timezone: "America/Los_Angeles"
+    });
   });
 });
 
@@ -244,6 +282,7 @@ describe("weather observation time formatting", () => {
     expect(normalizeTimezone("America/Los_Angeles")).toBe("America/Los_Angeles");
     expect(formatObservedAt("2026-05-05T18:00:00Z", "America/Los_Angeles")).toBe("May 5, 2026, 11:00 AM PDT");
     expect(formatObservedAt("2026-05-05T18:00:00Z", null)).toBe("2026-05-05 18:00 UTC");
+    expect(normalizeTimezone("Pacific")).toBeNull();
     expect(normalizeTimezone("not/a-zone")).toBeNull();
   });
 });

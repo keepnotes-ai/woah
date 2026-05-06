@@ -6,6 +6,8 @@
 example of "owner sets the upstream key, plug pushes the data, UI
 renders the canonical kinds without weather-specific code." It also
 exercises the `scalar`, `table`, and `series` shapes simultaneously.
+The class object is a fertile template: behavior and owner tools live on
+`$weather_block`, while deployed panels are ordinary non-fertile instances.
 
 ## Property mapping (plug → block)
 
@@ -34,16 +36,27 @@ history   →  { kind: "series",
 
 The plug also writes `last_pushed_at` (epoch ms of the most recent
 successful push) and clears or sets `last_error` based on the upstream
-result. Both inherit from `$block`'s `writable_self` list.
+result. It also writes `config_state`: `confirmed` after a successful
+fetch for the current location/timezone, or `error` for configuration
+failures such as an invalid timezone or an upstream "unknown place"
+response. These inherit from `$block`'s `writable_self` list.
 
 ## Owner-writable config
 
 `place`, `timezone`, `units`, `forecast_hours` are gated by
-`writable_owner`. The plug subscribes to its own block's room — when an
-owner sets a config prop, the resulting `block_data` observation reaches
-the plug; the next poll cycle picks up the new value. (The plug also
-re-reads config on each cycle, so a missed observation is harmless — the
-queue-as-truth shape applies here too.)
+`writable_owner`. Owners and wizards use narrow exposed verbs
+(`set_location`, `set_units`, `set_forecast_hours`) rather than the raw
+generic `$block:set_property` surface. `set_location` performs only local
+shape checks, writes `place` and `timezone`, clears stale `last_error`, and
+marks `config_state.status` as `pending`. The plug owns the semantic checks:
+IANA timezone validation and source-API location failures all report back
+through `config_state` and `last_error`.
+
+The plug subscribes to its own block's room — when an owner sets a config
+prop, the resulting `block_data` observation reaches the plug; the next
+poll cycle picks up the new value. (The plug also re-reads config on each
+cycle, so a missed observation is harmless — the queue-as-truth shape
+applies here too.)
 
 ## Connection mode
 
@@ -53,7 +66,7 @@ On each fire it:
 1. Authenticates via `apikey:<id>:<secret>`.
 2. Reads `place`, `timezone`, `units`, `forecast_hours` from the block.
 3. Calls tomorrow.io.
-4. Calls `:set_properties({current, forecast, history, last_pushed_at})`
+4. Calls `:set_properties({current, forecast, history, last_pushed_at, config_state})`
    in a single bundle.
 5. Disconnects.
 

@@ -152,6 +152,37 @@ describe("scoped client projection", () => {
     expect(live).toHaveLength(1);
   });
 
+  it("returns websocket command errors from invalid command spaces", async () => {
+    const world = createWorld();
+    const session = world.auth("guest:ws-command-bad-space");
+    const sent: any[] = [];
+    await handleWsProtocolFrame("conn", {
+      op: "command",
+      id: "ws-command-bad-space",
+      space: "the_lamp",
+      text: "hello"
+    }, {
+      authenticate: () => session,
+      attach: () => undefined,
+      session: () => ({ sessionId: session.id, actor: session.actor }),
+      send: (_connection, frame) => sent.push(frame),
+      call: async () => { throw new Error("unexpected call"); },
+      command: (frameId, wsSession, space, text) => world.command(frameId, wsSession.sessionId, space, text),
+      direct: async () => { throw new Error("unexpected direct"); },
+      replay: async () => { throw new Error("unexpected replay"); },
+      deliverInput: async () => null,
+      broadcastApplied: async () => { throw new Error("unexpected applied"); },
+      broadcastTaskResult: async () => undefined,
+      broadcastLiveEvents: async () => { throw new Error("unexpected live"); }
+    });
+
+    expect(sent[0]).toMatchObject({
+      op: "error",
+      id: "ws-command-bad-space",
+      error: { code: "E_TYPE" }
+    });
+  });
+
   it("includes enriched movement results on sequenced applied frames", async () => {
     const world = createWorld();
     const session = world.auth("guest:scoped-sequenced-move");

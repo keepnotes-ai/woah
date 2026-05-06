@@ -283,7 +283,7 @@ function connect() {
         if (frameErrors.length > 0) ui.failOptimisticCall(frame.id);
         else {
           ui.completeOptimisticCall(frame.id);
-          if (commandContext) renderChatCommandResult(frame.message, frame.result, commandContext.text);
+          if (commandContext) renderChatCommandResult(chatCommandUiActionFromMessage(frame.message), frame.result, commandContext.text);
         }
         pendingCommands.delete(frame.id);
         pendingFrameErrors.delete(frame.id);
@@ -335,7 +335,7 @@ function connect() {
         const commandContext = pendingCommands.get(frame.id);
         if (commandContext) {
           pendingCommands.delete(frame.id);
-          renderChatCommandResult(frame.command, frame.result, commandContext.text);
+          renderChatCommandResult(chatCommandUiActionFromPlan(frame.command), frame.result, commandContext.text);
         }
       }
     }
@@ -3031,10 +3031,25 @@ function sendChatInput(space: string, text: string) {
   }, receiveChatError);
 }
 
-function renderChatCommandResult(plan: any, result: any, originalText: string) {
+type ChatCommandUiAction = { verb: string; target: string };
+
+function chatCommandUiActionFromMessage(message: any): ChatCommandUiAction {
+  return {
+    verb: String(message?.verb ?? ""),
+    target: String(message?.target ?? "")
+  };
+}
+
+function chatCommandUiActionFromPlan(plan: any): ChatCommandUiAction {
+  return {
+    verb: String(plan?.verb ?? ""),
+    target: String(plan?.target ?? "")
+  };
+}
+
+function renderChatCommandResult(action: ChatCommandUiAction, result: any, originalText: string) {
   applyScopedMoveResult(result);
-  const verb = String(plan?.verb ?? "");
-  const target = String(plan?.target ?? "");
+  const { verb, target } = action;
   if (verb === "enter" && target === dubspaceSpace()) {
     setDubspaceOperators(result);
     setTab("dubspace", { mode: "push", leaveCurrent: false });

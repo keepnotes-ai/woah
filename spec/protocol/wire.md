@@ -48,6 +48,12 @@ WebSockets between client and player host. JSON frames. UTF-8. Values are encode
 //   text    — text exactly as typed by the actor
 { op: "command", id: string, space: ObjRef, text: string }
 
+The bound actor MUST be present in `space`; otherwise the host returns
+`op:"error"` with `E_PERM` before planning. Command planning and execution
+complete in one host task when the resolved target is on the planning host. In
+distributed routing, the gateway may plan on one host and dispatch on another;
+that cross-host plan→dispatch boundary is not atomic.
+
 // Deliver input to the oldest task awaiting READ for this actor.
 // Space-owned continuations resume as an applied $resume frame.
 { op: "input", id?: string, value: Value }

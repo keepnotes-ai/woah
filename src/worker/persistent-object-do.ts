@@ -1683,6 +1683,8 @@ export class PersistentObjectDO {
       return result.op === "result" ? { ...result, command: plan } as DirectResultFrame : result;
     }
 
+    // If the resolved command target is itself a $space, the planner chooses
+    // that space; object commands sequence through the originating surface.
     const commandSpace = plan.space ?? space;
     const message: Message = { actor: session.actor, target: plan.target, verb: plan.verb, args: plan.args };
     const host = await this.resolveObjectHost(commandSpace, WORLD_HOST);

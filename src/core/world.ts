@@ -1459,23 +1459,23 @@ export class WooWorld {
         throw wooError("E_DIRECT_DENIED", `direct call denied for ${target}:${verbName}`, { target, verb: verbName });
       }
       if (forceDirect && !wizard) throw wooError("E_PERM", "only wizards may force direct calls", { actor, target, verb: verbName });
-        if (forceDirect) this.recordWizardAction(actor, "force_direct", { target, verb: verbName, reason: options.forceReason ?? null });
-        const audience = this.directAudience(target);
-        const hostMemo = createHostOperationMemo();
-        const sessionId = options.sessionId === undefined ? this.primarySessionForActor(actor)?.id ?? null : options.sessionId;
-        if (audience) await this.scrubStaleSubscribersForSpace(audience, actor, this.chatPresent(audience), hostMemo);
-        if (audience && verb.skip_presence_check !== true && !forceDirect) this.authorizePresence(actor, audience, sessionId);
-        const observations: Observation[] = [];
-        if (forceDirect) observations.push({ type: "wizard_action", action: "force_direct", actor, target, verb: verbName, source: target });
-        const message: Message = { actor, target, verb: verbName, args };
-        const deferredHostEffects: DeferredHostEffect[] = [];
+      if (forceDirect) this.recordWizardAction(actor, "force_direct", { target, verb: verbName, reason: options.forceReason ?? null });
+      const hostMemo = createHostOperationMemo();
+      const audience = await this.directAudience(target, hostMemo);
+      const sessionId = options.sessionId === undefined ? this.primarySessionForActor(actor)?.id ?? null : options.sessionId;
+      if (audience) await this.chatPresentAsync(audience, actor);
+      if (audience && verb.skip_presence_check !== true && !forceDirect) this.authorizePresence(actor, audience, sessionId);
+      const observations: Observation[] = [];
+      if (forceDirect) observations.push({ type: "wizard_action", action: "force_direct", actor, target, verb: verbName, source: target });
+      const message: Message = { actor, target, verb: verbName, args };
+      const deferredHostEffects: DeferredHostEffect[] = [];
       let result: WooValue = null;
       let mutated = false;
       const dispatchCtx: CallContext = {
-          world: this,
-          space: audience ?? "#-1",
-          seq: -1,
-          session: sessionId,
+        world: this,
+        space: audience ?? "#-1",
+        seq: -1,
+        session: sessionId,
         actor,
         player: actor,
         caller: "#-1",
@@ -4781,12 +4781,23 @@ export class WooWorld {
     return true;
   }
 
-  private directAudience(target: ObjRef): ObjRef | null {
+  private async directAudience(target: ObjRef, memo?: HostOperationMemo): Promise<ObjRef | null> {
     const obj = this.object(target);
-    if (this.inheritsFrom(target, "$space")) return target;
-    if (obj.anchor && this.inheritsFrom(obj.anchor, "$space")) return obj.anchor;
-    if (obj.location && this.inheritsFrom(obj.location, "$space")) return obj.location;
+    if (await this.isDescendantOfCheckedOrFalse(target, "$space", memo)) return target;
+    if (obj.anchor && await this.isDescendantOfCheckedOrFalse(obj.anchor, "$space", memo)) return obj.anchor;
+    if (obj.location && await this.isDescendantOfCheckedOrFalse(obj.location, "$space", memo)) return obj.location;
     return null;
+  }
+
+  private async isDescendantOfCheckedOrFalse(objRef: ObjRef, ancestorRef: ObjRef, memo?: HostOperationMemo): Promise<boolean> {
+    try {
+      return await this.isDescendantOfChecked(objRef, ancestorRef, memo);
+    } catch {
+      // Audience discovery is intentionally tolerant: a stale anchor, stale
+      // location mirror, or unreachable remote host means "no audience here",
+      // not "fail the direct call before the verb can run".
+      return false;
+    }
   }
 
   private liveAudienceActors(space: ObjRef): ObjRef[] | undefined {

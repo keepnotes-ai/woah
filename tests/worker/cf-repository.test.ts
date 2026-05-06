@@ -279,6 +279,50 @@ class FakeHostBridge implements HostBridge {
 }
 
 describe("CFObjectRepository production-shape coverage", () => {
+  it("emits startup storage metrics before world init completes", async () => {
+    const logs: string[] = [];
+    const logSpy = vi.spyOn(console, "log").mockImplementation((...args) => {
+      logs.push(args.map(String).join(" "));
+    });
+    const directoryState = new FakeDurableObjectState("directory");
+    const gatewayState = new FakeDurableObjectState("world");
+
+    try {
+      const directory = new DirectoryDO(directoryState as unknown as DurableObjectState, { WOO_INTERNAL_SECRET: "cf-test-secret" });
+      const env = {
+        WOO_INITIAL_WIZARD_TOKEN: "cf-startup-metrics-token",
+        WOO_INTERNAL_SECRET: "cf-test-secret",
+        WOO_AUTO_INSTALL_CATALOGS: "",
+        DIRECTORY: new FakeDurableObjectNamespace((name) => {
+          if (name !== "directory") throw new Error(`unexpected Directory DO ${name}`);
+          return directory;
+        }),
+        WOO: new FakeDurableObjectNamespace((name) => {
+          throw new Error(`unexpected Woo DO ${name}`);
+        })
+      } as unknown as Env;
+      const gateway = new PersistentObjectDO(gatewayState as unknown as DurableObjectState, env);
+
+      const response = await gateway.fetch(new Request("https://woo.test/healthz"));
+      expect(response.ok).toBe(true);
+
+      const metrics = logs
+        .filter((line) => line.startsWith("woo.metric "))
+        .map((line) => JSON.parse(line.slice("woo.metric ".length)) as Record<string, unknown>);
+      expect(metrics).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: "startup_storage", phase: "cf_repository_migrate", host_key: "world" }),
+        expect.objectContaining({ kind: "startup_storage", phase: "cf_repository_load", host_key: "world", stored: false }),
+        expect.objectContaining({ kind: "startup_storage", phase: "cf_repository_save", host_key: "world" }),
+        expect.objectContaining({ kind: "startup_storage", phase: "directory_schema", host_key: "directory" }),
+        expect.objectContaining({ kind: "startup_storage", phase: "directory_register_objects", host_key: "directory" })
+      ]));
+    } finally {
+      logSpy.mockRestore();
+      directoryState.close();
+      gatewayState.close();
+    }
+  });
+
   it("boots, persists, and reloads through the CF storage API shape", async () => {
     const harness = makeCfHarness();
     try {

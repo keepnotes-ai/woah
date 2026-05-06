@@ -460,8 +460,11 @@ Required event types (cardinality budget per DO):
 | `session` | event_kind ('bind'\|'detach'\|'reap'), token_class | — | actor_id |
 | `wizard_action` | action ('force_direct'\|'force_recycle'\|'impersonate') | — | actor_id |
 | `error` | code, surface ('rest'\|'wire'\|'rpc') | — | request_id |
+| `startup_storage` | phase, status, error_code? | latency_ms, object_count, route_count, statement_count | do_id |
 
 Cost: one AE write per call is fine at v1 traffic levels; budget revisits at scale.
+
+Startup storage instrumentation is emitted by the DO/repository wrapper before the `WooWorld` metrics hook exists. It covers repository schema migration, repository load/save, host-seed fetch, Directory schema setup, and Directory object-route registration.
 
 ### R10.2 Structured logs
 

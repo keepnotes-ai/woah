@@ -3,7 +3,7 @@ import { setPropBytecode, setValueBytecode } from "./fixtures";
 import { installLocalCatalogs } from "./local-catalogs";
 import type { ObjectRepository, SerializedObject, SerializedWorld, WorldRepository } from "./repository";
 import { hashSource } from "./source-hash";
-import type { ObjRef, TinyBytecode, WooValue } from "./types";
+import type { MetricEvent, ObjRef, TinyBytecode, WooValue } from "./types";
 import { valuesEqual } from "./types";
 import { normalizeVerbPerms } from "./verb-perms";
 import { WooWorld } from "./world";
@@ -198,15 +198,17 @@ const PLAYER_WAYS_SOURCE = `verb :ways(room_name) rxd {
   return { room: room, exits: exits, text: text };
 }`;
 
-export function createWorld(options: { repository?: WorldRepository & Partial<ObjectRepository>; catalogs?: readonly string[] | false } = {}): WooWorld {
+export function createWorld(options: { repository?: WorldRepository & Partial<ObjectRepository>; catalogs?: readonly string[] | false; metricsHook?: (event: MetricEvent) => void } = {}): WooWorld {
   if (!options.repository) {
     const world = new WooWorld();
+    if (options.metricsHook) world.setMetricsHook(options.metricsHook);
     world.importWorld(cloneSerializedWorld(cachedBootSnapshot(options.catalogs)));
     world.enableIncrementalPersistence();
     return world;
   }
 
   const world = new WooWorld(options.repository);
+  if (options.metricsHook) world.setMetricsHook(options.metricsHook);
   const stored = options.repository?.load();
   if (stored) {
     world.importWorld(stored);
@@ -239,9 +241,10 @@ function bootSnapshotKey(catalogs: readonly string[] | false | undefined): strin
 
 export function createWorldFromSerialized(
   serialized: SerializedWorld,
-  options: { repository?: WorldRepository & Partial<ObjectRepository>; persist?: boolean } = {}
+  options: { repository?: WorldRepository & Partial<ObjectRepository>; persist?: boolean; metricsHook?: (event: MetricEvent) => void } = {}
 ): WooWorld {
   const world = new WooWorld(options.repository);
+  if (options.metricsHook) world.setMetricsHook(options.metricsHook);
   world.importWorld(serialized);
   if (options.persist !== false) world.persist();
   world.enableIncrementalPersistence();

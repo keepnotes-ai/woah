@@ -105,7 +105,7 @@ export class PersistentObjectDO {
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
     this.env = env;
-    this.repo = new CFObjectRepository(state);
+    this.repo = new CFObjectRepository(state, (event) => this.emitMetric(event, this.durableHostKey()));
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -294,9 +294,10 @@ export class PersistentObjectDO {
         return;
       }
       coldInitStart = Date.now();
+      const metricsHook = (event: MetricEvent) => this.emitMetric(event, hostKey);
       const world = hostKey === WORLD_HOST
-        ? createWorld({ repository: this.repo, catalogs: parseAutoInstallCatalogs(this.env.WOO_AUTO_INSTALL_CATALOGS) })
-        : await this.createHostScopedWorld(hostKey as ObjRef);
+        ? createWorld({ repository: this.repo, catalogs: parseAutoInstallCatalogs(this.env.WOO_AUTO_INSTALL_CATALOGS), metricsHook })
+        : await this.createHostScopedWorld(hostKey as ObjRef, metricsHook);
       this.installHostBridge(world, hostKey);
       // Rehydrate live WebSocket attachments. After DO wake-from-hibernation,
       // state.getWebSockets() returns sockets whose serializeAttachment
@@ -325,7 +326,7 @@ export class PersistentObjectDO {
     return world;
   }
 
-  private async createHostScopedWorld(hostKey: ObjRef): Promise<WooWorld> {
+  private async createHostScopedWorld(hostKey: ObjRef, metricsHook: (event: MetricEvent) => void): Promise<WooWorld> {
     const stored = this.repo.load();
     let scoped = stored ? nonEmptyHostScopedWorld(stored, hostKey) : null;
     if (stored && !scoped) {
@@ -347,7 +348,7 @@ export class PersistentObjectDO {
     if (scoped && freshSeed) scoped = mergeHostScopedSeed(scoped, freshSeed);
     if (!scoped) scoped = freshSeed;
     if (!scoped) throw wooError("E_OBJNF", `no host-scoped seed for ${hostKey}`, hostKey);
-    const world = createWorldFromSerialized(scoped, { repository: this.repo });
+    const world = createWorldFromSerialized(scoped, { repository: this.repo, metricsHook });
     // Run local catalog schema/data migration plans on this host's actual
     // slice. The gateway cannot convert state it does not own.
     runHostScopedLocalCatalogLifecycle(world, hostKey, { freshSeed: stored === null });
@@ -375,19 +376,28 @@ export class PersistentObjectDO {
   }
 
   private async fetchHostSeed(hostKey: ObjRef): Promise<SerializedWorld> {
+    const startedAt = Date.now();
     const id = this.env.WOO.idFromName(WORLD_HOST);
-    const request = await signInternalRequest(this.env, new Request(`${INTERNAL_ORIGIN}/__internal/host-seed`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json; charset=utf-8",
-        "x-woo-host-key": WORLD_HOST
-      },
-      body: JSON.stringify({ host: hostKey })
-    }));
-    const response = await this.env.WOO.get(id).fetch(request);
-    const body = await response.json();
-    if (!response.ok) throw wooError("E_STORAGE", `failed to load host seed for ${hostKey}`, body as WooValue);
-    return body as SerializedWorld;
+    try {
+      const request = await signInternalRequest(this.env, new Request(`${INTERNAL_ORIGIN}/__internal/host-seed`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json; charset=utf-8",
+          "x-woo-host-key": WORLD_HOST
+        },
+        body: JSON.stringify({ host: hostKey })
+      }));
+      const response = await this.env.WOO.get(id).fetch(request);
+      const body = await response.json();
+      if (!response.ok) {
+        throw wooError("E_STORAGE", `failed to load host seed for ${hostKey}`, body as WooValue);
+      }
+      this.emitMetric({ kind: "startup_storage", phase: "host_seed_fetch", ms: Date.now() - startedAt, status: "ok", objects: Array.isArray((body as { objects?: unknown }).objects) ? ((body as { objects: unknown[] }).objects.length) : undefined }, hostKey);
+      return body as SerializedWorld;
+    } catch (err) {
+      this.emitMetric({ kind: "startup_storage", phase: "host_seed_fetch", ms: Date.now() - startedAt, status: "error", error: metricErrorCode(err) }, hostKey);
+      throw err;
+    }
   }
 
   private async registerObjectRoutes(world: WooWorld): Promise<void> {
@@ -1968,4 +1978,9 @@ async function workerHashText(text: string): Promise<string> {
 
 function logCatalogTapEvent(event: CatalogTapLogEvent): void {
   console.log("woo.catalog", JSON.stringify({ ...event, ts: Date.now() }));
+}
+
+function metricErrorCode(err: unknown): string {
+  if (err && typeof err === "object" && "code" in err) return String((err as { code: unknown }).code);
+  return err instanceof Error ? err.name : "E_INTERNAL";
 }

@@ -291,6 +291,10 @@ describe("scoped client projection", () => {
 
   it("returns null here when the session has no room or space context", async () => {
     const world = createWorld();
+    // Demoworld seeds `$system.guest_initial_room` so fresh guests land in
+    // Living Room; for this test we want a deployment with no configured
+    // initial room so `here` is genuinely null.
+    world.setProp("$system", "guest_initial_room", null);
     const session = world.auth("guest:scoped-nowhere");
 
     const body = await apiMe(world, session);

@@ -237,6 +237,10 @@ describe("McpHost", () => {
 
   it("exposes verb editor tools after the programmer enters the editor room", async () => {
     const world = bootstrapWorld();
+    // The verb editor exit-to-$nowhere assertion below assumes the actor had
+    // no prior location. Demoworld would otherwise auto-place fresh guests in
+    // Living Room.
+    world.setProp("$system", "guest_initial_room", null);
     const session = world.auth("guest:mcp-editor");
     const actorObj = world.object(session.actor);
     actorObj.owner = session.actor;
@@ -571,6 +575,9 @@ describe("McpHost", () => {
 
   it("does not enumerate remote tools while sending post-call list_changed hints", async () => {
     const world = bootstrapWorld();
+    // The bridge below declares the_chatroom remote; the lazy-refresh contract
+    // tested here assumes the actor doesn't start out in a remote room.
+    world.setProp("$system", "guest_initial_room", null);
     const session = world.auth("guest:mcp-lazy-refresh");
     let remoteEnumerations = 0;
     world.setHostBridge({

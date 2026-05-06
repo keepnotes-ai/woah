@@ -34,6 +34,29 @@ catalog uses. All user-visible behavior lives here.
 
 Spec:  `spec/discovery/catalogs.md`
 
+## Layering discipline
+
+Core must stay catalog-agnostic and client-agnostic. TypeScript under `src/core`
+may implement the object substrate, VM execution, persistence, transport-neutral
+call mechanics, host routing, generic builtins, and catalog installation
+machinery. It must not accumulate knowledge of bundled catalogs, client UI
+shapes, command words, LambdaCore conveniences, or specific in-world objects
+such as particular rooms, players, appliances, notes, boards, or editors.
+
+User-visible behavior belongs in woocode catalogs. Verbs such as `look`,
+`examine`, `who`, `join`, `help`, `say`, `take`, `drop`, and command parser
+conventions are catalog/superstructure behavior, even when they currently need
+a native helper because the DSL or VM cannot express part of the mechanism.
+Native helpers should be generic primitives invoked by woocode, not hardcoded
+implementations of particular user-facing verbs.
+
+The VM and runtime core must not branch on bootstrap object identities or class
+names to change behavior. If a behavior depends on an object's role, express
+that role as catalog data, properties, verb metadata, or an explicit generic
+builtin argument. Bootstrap objects may be seeded in `src/core/bootstrap.ts` to
+make an empty world installable, but ordinary runtime semantics must not gain
+special cases for those seed objects.
+
 ## The seed graph
 
 Some seed objects in woocode are delivered by `src/core/bootstrap.ts`.

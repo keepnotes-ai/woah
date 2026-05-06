@@ -1578,6 +1578,10 @@ describe("local catalogs", () => {
 
   it("supports a small multi-room chat world with stable carryable placement", async () => {
     const world = createWorld();
+    // The "outsider" branch below tests $match permission gating for an actor
+    // who is not in the_chatroom. Demoworld would otherwise auto-place every
+    // fresh guest there.
+    world.setProp("$system", "guest_initial_room", null);
     const session = world.auth("guest:room-walk");
     const watcher = world.auth("guest:room-walk-watcher");
 
@@ -2421,7 +2425,8 @@ describe("local catalogs", () => {
     const migrations = (world.getProp("$system", "applied_migrations") as string[])
       .filter((id) => ![
         "2026-05-03-chat-command-plan-source-repair",
-        "2026-05-06-chat-actor-huh-source-repair"
+        "2026-05-06-chat-actor-huh-source-repair",
+        "2026-05-06-chat-look-at-command-repair"
       ].includes(id));
     world.setProp("$system", "applied_migrations", migrations);
 
@@ -2458,6 +2463,7 @@ describe("local catalogs", () => {
     expect(world.ownVerbExact("$conversational", "look_at")?.arg_spec.command).toMatchObject({ dobj: "object", args_from: ["dobj_prefix"] });
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-03-chat-command-plan-source-repair");
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-06-chat-actor-huh-source-repair");
+    expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-06-chat-look-at-command-repair");
 
     const session = world.auth("guest:command-plan-repair");
     await world.directCall("enter-command-plan-repair", session.actor, "the_chatroom", "enter", []);

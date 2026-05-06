@@ -1025,7 +1025,23 @@ export class WooWorld {
     }
     const tokenClass = this.tokenClassFor(token);
     const actor = this.allocateGuest();
+    this.placeAllocatedGuest(actor);
     return this.createSessionForActor(actor, tokenClass);
+  }
+
+  // Move a freshly-allocated guest into the room named by `$system.guest_initial_room`,
+  // if one is configured and the guest is currently sitting at $nowhere. The
+  // property is catalog-set; core stays catalog-agnostic and falls through
+  // silently when it is unset.
+  private placeAllocatedGuest(actor: ObjRef): void {
+    const obj = this.objects.get(actor);
+    if (!obj) return;
+    if (obj.location && obj.location !== "$nowhere") return;
+    const configured = this.propOrNull("$system", "guest_initial_room");
+    if (typeof configured !== "string" || !configured) return;
+    if (configured === actor) return;
+    if (!this.objects.has(configured)) return;
+    this.moveObject(actor, configured);
   }
 
   private authApiKey(payload: string): Session {
@@ -4110,6 +4126,11 @@ export class WooWorld {
   private scanObjectRefs(obj: WooObject, add: (id: ObjRef | null | undefined, scanRefs?: boolean) => void): void {
     for (const [name, value] of obj.properties) {
       if (obj.id === "$system" && name === "catalog_migration_records") continue;
+      // `guest_initial_room` is deployment-wide config: its value is a target
+      // room, not a structural reference. Pulling it into every host slice
+      // (because `$system` is in every lineage) would leak the room into hosts
+      // that have no other reason to know about it.
+      if (obj.id === "$system" && name === "guest_initial_room") continue;
       this.scanValueRefs(value, add);
     }
     for (const def of obj.propertyDefs.values()) this.scanValueRefs(def.defaultValue, add);

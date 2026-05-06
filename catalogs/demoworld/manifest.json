@@ -269,6 +269,13 @@
       "feature": "$conversational"
     },
     {
+      "kind": "set_property",
+      "object": "$system",
+      "property": "guest_initial_room",
+      "value": "the_chatroom",
+      "mode": "set_if_missing"
+    },
+    {
       "kind": "create_instance",
       "class": "$chatroom",
       "as": "the_deck",

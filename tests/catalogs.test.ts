@@ -1578,6 +1578,10 @@ describe("local catalogs", () => {
 
   it("supports a small multi-room chat world with stable carryable placement", async () => {
     const world = createWorld();
+    // The "outsider" branch below tests $match permission gating for an actor
+    // who is not in the_chatroom. Demoworld would otherwise auto-place every
+    // fresh guest there.
+    world.setProp("$system", "guest_initial_room", null);
     const session = world.auth("guest:room-walk");
     const watcher = world.auth("guest:room-walk-watcher");
 

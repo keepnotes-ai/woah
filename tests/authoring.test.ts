@@ -264,6 +264,10 @@ describe("authoring", () => {
 
   it("supports verb editor room sessions through the programmer surface", async () => {
     const world = createWorld();
+    // The verb editor exit-to-$nowhere assertions below assume the actor had
+    // no prior location. Demoworld would otherwise auto-place fresh guests in
+    // Living Room.
+    world.setProp("$system", "guest_initial_room", null);
     const programmer = world.auth("guest:verb-editor");
     const actorObj = world.object(programmer.actor);
     actorObj.owner = programmer.actor;

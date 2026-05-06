@@ -639,7 +639,13 @@ describe("woo core", () => {
   });
 
   it("runs chat command dispatch under actor authority when entering the planned verb", async () => {
-    const { world, actor } = authedWorld();
+    // The actor in this assertion is not a presence-bearing room subscriber;
+    // demoworld would otherwise auto-place fresh guests in Living Room and
+    // shift this test off its intended path.
+    const world = createWorld();
+    world.setProp("$system", "guest_initial_room", null);
+    const session = world.auth("guest:test");
+    const actor = session.actor;
     world.createObject({ id: "sealed_sign", name: "Sealed Sign", parent: "$thing", owner: "$wiz", location: "the_chatroom" });
     world.addVerb("sealed_sign", {
       ...nativeVerb("poke", "default_title", "$wiz"),
@@ -944,6 +950,15 @@ describe("woo core", () => {
     expect(session.actor).toMatch(/^guest_/);
     expect(session.actor).not.toBe("$guest");
     expect(world.object(session.actor).parent).toBe("$guest");
+  });
+
+  it("places fresh guests in the configured initial room without adding presence", async () => {
+    const world = createWorld();
+    const session = world.auth("guest:initial-room");
+    expect(world.object(session.actor).location).toBe("the_chatroom");
+    expect(session.currentLocation).toBe("the_chatroom");
+    expect(world.object("the_chatroom").contents.has(session.actor)).toBe(true);
+    expect(world.hasPresence(session.actor, "the_chatroom")).toBe(false);
   });
 
   it("does not join the chatroom until explicit enter", async () => {

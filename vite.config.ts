@@ -14,6 +14,7 @@ export default defineConfig({
     // The threads pool avoids Vitest fork/birpc RPC timeouts; no single-worker
     // cap is needed now that per-test timeout is high enough for heavy files.
     pool: "threads",
+    isolate: false,
     testTimeout: 30_000
   }
 });

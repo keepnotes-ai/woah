@@ -12,6 +12,8 @@ type BootstrapOptions = {
   catalogs?: readonly string[] | false;
 };
 
+const bootSnapshotCache = new Map<string, SerializedWorld>();
+
 const ACTOR_LOOK_SELF_SOURCE = `verb :look_self() rxd {
   let title = this:title();
   let description = this.description;
@@ -197,6 +199,13 @@ const PLAYER_WAYS_SOURCE = `verb :ways(room_name) rxd {
 }`;
 
 export function createWorld(options: { repository?: WorldRepository & Partial<ObjectRepository>; catalogs?: readonly string[] | false } = {}): WooWorld {
+  if (!options.repository) {
+    const world = new WooWorld();
+    world.importWorld(cloneSerializedWorld(cachedBootSnapshot(options.catalogs)));
+    world.enableIncrementalPersistence();
+    return world;
+  }
+
   const world = new WooWorld(options.repository);
   const stored = options.repository?.load();
   if (stored) {
@@ -209,6 +218,23 @@ export function createWorld(options: { repository?: WorldRepository & Partial<Ob
   }
   world.enableIncrementalPersistence();
   return world;
+}
+
+function cachedBootSnapshot(catalogs: readonly string[] | false | undefined): SerializedWorld {
+  const key = bootSnapshotKey(catalogs);
+  const existing = bootSnapshotCache.get(key);
+  if (existing) return existing;
+  const world = new WooWorld();
+  world.withPersistencePaused(() => bootstrap(world, { catalogs }));
+  const snapshot = world.exportWorld();
+  bootSnapshotCache.set(key, snapshot);
+  return snapshot;
+}
+
+function bootSnapshotKey(catalogs: readonly string[] | false | undefined): string {
+  if (catalogs === undefined) return "default";
+  if (catalogs === false) return "false";
+  return JSON.stringify([...catalogs]);
 }
 
 export function createWorldFromSerialized(

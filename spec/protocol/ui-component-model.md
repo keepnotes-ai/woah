@@ -1092,6 +1092,7 @@ type WooObservationHandler = {
         observation: Record<string, unknown>,
         delivered: DeliveredObservation
       ) => number | undefined);
+  liveProjection?: "preview" | "canonical";
   reduce?: (
     draft: ClientProjectionDraft,
     envelope: ObservationEnvelope
@@ -1100,10 +1101,10 @@ type WooObservationHandler = {
 
 type ClientProjectionDraft = {
   patchObject(ref: string, fields: Record<string, unknown>): void;
-  setObject(ref: string, snapshot: ObjectSnapshot): void;
-  removeObject(ref: string): void;
+  patchObjectProps(ref: string, props: Record<string, unknown>): void;
+  patchCatalogState(ref: string, key: string, fields: Record<string, unknown>): void;
+  clearCatalogState(ref: string, key: string): void;
   clearAuthoritative(ref: string): void;
-  patchCatalogState(key: string, fields: Record<string, unknown>): void;
 };
 ```
 
@@ -1115,6 +1116,26 @@ authoritative entries from resurrecting objects after a scoped snapshot or
 sequenced removal.
 Reducers that need a prior value require the observation to carry it
 explicitly.
+
+The framework owns reducers for the generic property-change observations that
+substrate fixtures and generic catalogs use:
+
+- `{type:"property_changed", source|target|object, name, value}` patches
+  `observe(ref).props[name]`.
+- `{type:"value_changed", source|target|object, value}` patches
+  `observe(ref).props.value`.
+- `{type:"block_data", block|target|source, name, value}` patches
+  `observe(block).props[name]`.
+
+These generic property-change reducers declare `liveProjection:"canonical"`.
+When delivered on the live route, their reductions are folded into the
+authoritative canonical layer instead of the expiring live-preview layer. This
+is reserved for observations that represent committed state changes; transient
+gestures and previews keep the default `liveProjection:"preview"` behavior.
+
+Catalog-specific observations may still carry richer domain facts, but any
+observation intended to keep object props coherent MUST carry enough data for a
+pure reducer to update the projection without rereading `/api/me`.
 
 Example:
 
@@ -1154,11 +1175,12 @@ server remains the source of truth. A projection is a latency and continuity
 mechanism for the client, not a server-state mutation.
 
 A handler whose `reduce` function patches the live-preview layer for live
-observations MUST supply `live_ttl_ms`, either as a constant or computed per
+observations SHOULD supply `live_ttl_ms`, either as a constant or computed per
 observation. If `live_ttl_ms` is omitted, the host applies a conservative
-default (1500ms in v1) and emits a diagnostic. Sequenced handlers do not
-need a TTL; their reductions land in the sequenced layer and are reconciled
-by replay rather than expiry.
+default (1500ms in v1). Sequenced handlers do not need a TTL; their reductions
+land in the sequenced layer and are reconciled by replay rather than expiry.
+Live handlers that set `liveProjection:"canonical"` also do not need a TTL,
+because their reductions represent committed state rather than previews.
 
 When multiple handlers match the same observation, the host applies them in
 catalog dependency order and then install order. Reducers that touch the same

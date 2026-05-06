@@ -551,7 +551,7 @@ function objectIdForTab(tab: AppState["tab"]): string {
   if (tab === "chat") return activeChatRoom();
   if (tab === "dubspace") return dubspaceSpace();
   if (tab === "pinboard") return pinboardSpace();
-  if (tab === "taskspace") return state.selectedTask && state.world?.taskspace?.tasks?.[state.selectedTask] ? state.selectedTask : taskspaceSpace();
+  if (tab === "taskspace") return state.selectedTask && taskspaceModel()?.tasks?.[state.selectedTask] ? state.selectedTask : taskspaceSpace();
   if (tab === "ide") return state.selectedObject || defaultSelectedObject();
   return "";
 }
@@ -593,7 +593,7 @@ function routeForObjectId(objectId: string): AppState["tab"] {
   if (objectId === activeChatRoom()) return "chat";
   if (objectId === dubspaceSpace()) return "dubspace";
   if (objectId === pinboardSpace()) return "pinboard";
-  if (state.world?.taskspace?.tasks?.[objectId]) return "taskspace";
+  if (taskspaceModel()?.tasks?.[objectId]) return "taskspace";
   if (state.world?.objects?.[objectId]) return "ide";
   return "chat";
 }
@@ -606,14 +606,16 @@ function applyLocationRoute(mode: "replace" | "push", route: RouteLocation | nul
   const ensureTabPresence = (tab: AppState["tab"]) => {
     if (tab === "dubspace") enterDubspace();
     if (tab === "pinboard") enterPinboard();
+    if (tab === "taskspace") enterTaskspace();
   };
   const viewTab = tabFromViewHint(route.view);
   if (viewTab) {
-    if (viewTab === "taskspace" && state.world?.taskspace?.tasks?.[route.objectId]) setSelectedTask(route.objectId, { apply: false });
+    const taskspace = taskspaceModel();
+    if (viewTab === "taskspace" && taskspace?.tasks?.[route.objectId]) setSelectedTask(route.objectId, { apply: false });
     if (viewTab === "ide" && state.world?.objects?.[route.objectId]) setSelectedObject(route.objectId, { apply: false });
-    if (viewTab === "taskspace" && !state.world?.taskspace?.tasks?.[route.objectId]) setSelectedTask(firstMatchingTask(
-      Array.isArray(state.world?.taskspace?.root_tasks) ? state.world.taskspace.root_tasks : [],
-      state.world?.taskspace?.tasks ?? {},
+    if (viewTab === "taskspace" && !taskspace?.tasks?.[route.objectId]) setSelectedTask(firstMatchingTask(
+      Array.isArray(taskspace?.root_tasks) ? taskspace.root_tasks : [],
+      taskspace?.tasks ?? {},
       activeTaskStatuses()
     ), { apply: false });
     setTab(viewTab, { mode, leaveCurrent: true }, () => {
@@ -623,7 +625,7 @@ function applyLocationRoute(mode: "replace" | "push", route: RouteLocation | nul
   }
 
   const inferredTab = routeForObjectId(route.objectId);
-  if (inferredTab === "taskspace" && state.world?.taskspace?.tasks?.[route.objectId]) {
+  if (inferredTab === "taskspace" && taskspaceModel()?.tasks?.[route.objectId]) {
     setSelectedTask(route.objectId, { apply: false });
     setTab(inferredTab, { mode, leaveCurrent: true }, () => {
       ensureTabPresence(inferredTab);
@@ -867,6 +869,9 @@ function applyScopedOverlaySnapshot(key: string, snapshot: any) {
     }
   }
   applyScopedProjectionModel();
+  if (surface === "pinboard") {
+    hydratePinboardNotesTextIfNeeded(pinboardModel());
+  }
 }
 
 function applyScopedProjectionSnapshot(me: any, catalogs: any) {
@@ -998,8 +1003,11 @@ function adaptScopedWorld(me: any, catalogs: any) {
 function overlaySnapshotObjects(snapshot: any): any[] {
   if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return [];
   return [
-    ...arrayOfObjects(snapshot.objects),
-    ...roomSnapshotObjects(snapshot.room)
+    // Room snapshots intentionally carry thin contents; overlay objects carry
+    // the full subject neighborhood. Put thin records first so full overlay
+    // summaries win when the projection ingests duplicate ids.
+    ...roomSnapshotObjects(snapshot.room),
+    ...arrayOfObjects(snapshot.objects)
   ];
 }
 
@@ -1200,8 +1208,44 @@ function dubspaceObjectIds(meta: any): string[] {
     .filter((id): id is string => typeof id === "string" && Boolean(id));
 }
 
-function projectedDubspace(meta: any = state.world?.dubspaceMeta ?? {}) {
+function projectedDubspace(meta: any = dubspaceMeta()) {
   return Object.fromEntries(dubspaceObjectIds(meta).map((id: string) => [id, projectedObjectView(id)]).filter(([, view]) => view));
+}
+
+function dubspaceMeta(): any {
+  if (!scopedProjectionEnabled) return state.world?.dubspaceMeta ?? {};
+  const space = dubspaceSpace();
+  const objects = overlaySnapshotObjects(dubspaceOverlaySnapshot());
+  const byClass = (localName: string) => {
+    const ids = objects
+      .filter((item) => isCatalogObjectSummary(item, "dubspace", localName) && (localName === "$dubspace" || item?.location === space))
+      .map((item) => String(item.id ?? ""))
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b));
+    const unique = [...new Set(ids)];
+    return unique.length > 0 ? unique : bundledSeedRefs(dubspaceManifest, localName);
+  };
+  return {
+    space: byClass("$dubspace")[0] ?? space,
+    slots: byClass("$loop_slot"),
+    channel: byClass("$channel")[0],
+    filter: byClass("$filter")[0],
+    delay: byClass("$delay")[0],
+    drum: byClass("$drum_loop")[0],
+    scene: byClass("$scene")[0]
+  };
+}
+
+function dubspaceOverlaySnapshot(): any {
+  const space = dubspaceSpace();
+  if (!space) return undefined;
+  return state.scopedProjection?.overlaySnapshots?.[`dubspace:${space}`];
+}
+
+function isCatalogObjectSummary(item: any, catalogName: string, localName: string): boolean {
+  const classRef = catalogClass(installedCatalog(state.world, catalogName), localName) ?? localName;
+  const ancestors = Array.isArray(item?.ancestors) ? item.ancestors.map(String) : [];
+  return item?.parent === classRef || item?.parent === localName || ancestors.includes(classRef) || ancestors.includes(localName);
 }
 
 function buildTaskspaceMeta(world: any) {
@@ -1219,6 +1263,171 @@ function projectTaskspace(world: any, meta: any) {
     root_tasks: Array.isArray(space?.props?.root_tasks) ? space.props.root_tasks : [],
     tasks: Object.fromEntries(taskIds.map((id) => [id, objectView(world, id)]).filter(([, view]) => view))
   };
+}
+
+function taskspaceModel(): any {
+  if (!scopedProjectionEnabled) return state.world?.taskspace;
+  const spaceId = taskspaceSpace();
+  if (!spaceId) return undefined;
+  const space = projectedObjectView(spaceId) ?? { id: spaceId, name: spaceId, props: {} };
+  const tree = scopedTaskspaceTree(spaceId);
+  const ids = new Set<string>();
+  for (const id of Array.isArray(space.props?.root_tasks) ? space.props.root_tasks : []) ids.add(String(id));
+  for (const id of Object.keys(tree.parents)) ids.add(id);
+  for (const item of overlaySnapshotObjects(taskspaceOverlaySnapshot())) {
+    const id = String(item?.id ?? "");
+    if (id && isTaskspaceTaskSummary(item)) ids.add(id);
+  }
+  if (state.selectedTask) ids.add(state.selectedTask);
+
+  const tasks: Record<string, any> = {};
+  for (const id of ids) {
+    const view = taskspaceProjectedTask(id);
+    if (view) tasks[id] = view;
+  }
+
+  const childIds = new Map<string, Set<string>>();
+  const roots = new Set<string>();
+  for (const [id, task] of Object.entries(tasks)) {
+    const parent = taskspaceTaskParent(id, task, tree.parents);
+    task.props.parent_task = parent;
+    if (parent && tasks[parent]) {
+      if (!childIds.has(parent)) childIds.set(parent, new Set());
+      childIds.get(parent)!.add(id);
+    } else {
+      roots.add(id);
+    }
+  }
+
+  for (const [id, task] of Object.entries(tasks)) {
+    const children = [...(childIds.get(id) ?? new Set<string>())];
+    task.props.subtasks = sortTaskChildren(children, id, tasks, tree.index);
+  }
+
+  return {
+    space,
+    root_tasks: sortTaskChildren([...roots], null, tasks, tree.index),
+    tasks
+  };
+}
+
+function scopedTaskspaceTree(spaceId: string): { parents: Record<string, string | null>; index: Record<string, number> } {
+  const raw = ui.observe(spaceId)?.catalogState.taskspace_tree;
+  const parents: Record<string, string | null> = {};
+  const index: Record<string, number> = {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { parents, index };
+  for (const [key, value] of Object.entries(raw)) {
+    if (key.startsWith("index:")) {
+      const task = key.slice("index:".length);
+      const numeric = Number(value);
+      if (task && Number.isFinite(numeric)) index[task] = numeric;
+    } else {
+      parents[key] = typeof value === "string" ? value : null;
+    }
+  }
+  return { parents, index };
+}
+
+function taskspaceTaskParent(id: string, task: any, parents: Record<string, string | null>): string | null {
+  if (Object.prototype.hasOwnProperty.call(parents, id)) return parents[id];
+  const parent = task?.props?.parent_task;
+  return typeof parent === "string" && parent ? parent : null;
+}
+
+function sortTaskChildren(ids: string[], parent: string | null, tasks: Record<string, any>, overlayIndex: Record<string, number>): string[] {
+  const baseOrder = parent
+    ? Array.isArray(tasks[parent]?.props?.subtasks) ? tasks[parent].props.subtasks.map(String) : []
+    : Array.isArray(projectedObjectView(taskspaceSpace())?.props?.root_tasks) ? projectedObjectView(taskspaceSpace())!.props.root_tasks.map(String) : [];
+  const baseIndex = new Map(baseOrder.map((id: string, index: number) => [id, index]));
+  return [...new Set(ids)].sort((a, b) => {
+    const ai = overlayIndex[a] ?? baseIndex.get(a) ?? Number.MAX_SAFE_INTEGER;
+    const bi = overlayIndex[b] ?? baseIndex.get(b) ?? Number.MAX_SAFE_INTEGER;
+    return ai - bi || String(tasks[a]?.props?.title ?? a).localeCompare(String(tasks[b]?.props?.title ?? b)) || a.localeCompare(b);
+  });
+}
+
+function taskspaceProjectedTask(id: string): any | undefined {
+  const projected = ui.observe(id);
+  const legacy = state.world?.taskspace?.tasks?.[id];
+  if (!projected && !legacy) return undefined;
+  const overlay = projected?.catalogState.taskspace_task ?? {};
+  const props = {
+    ...(legacy?.props ?? {}),
+    ...(projected?.props ?? {})
+  };
+  for (const key of ["title", "description", "parent_task", "status", "assignee", "space"]) {
+    if (Object.prototype.hasOwnProperty.call(overlay, key)) props[key] = (overlay as any)[key];
+  }
+  props.requirements = mergeTaskspaceRequirements(props.requirements, overlay);
+  props.messages = mergeTaskspaceMessages(props.messages, overlay);
+  props.artifacts = mergeTaskspaceArtifacts(props.artifacts, overlay);
+  return {
+    id,
+    name: projected?.name ?? legacy?.name ?? props.title ?? id,
+    owner: projected?.owner ?? legacy?.owner,
+    parent: projected?.parent ?? legacy?.parent,
+    location: projected?.location ?? legacy?.location,
+    props
+  };
+}
+
+function mergeTaskspaceRequirements(base: any, overlay: Record<string, unknown>): any[] {
+  const out = Array.isArray(base) ? base.map((item) => ({ ...(item && typeof item === "object" && !Array.isArray(item) ? item : {}) })) : [];
+  for (const [key, value] of Object.entries(overlay)) {
+    if (!key.startsWith("requirement:")) continue;
+    const index = Number(key.slice("requirement:".length));
+    if (!Number.isInteger(index) || index < 0 || !value || typeof value !== "object" || Array.isArray(value)) continue;
+    out[index] = { ...(out[index] ?? {}), ...(value as Record<string, unknown>) };
+  }
+  for (const [key, value] of Object.entries(overlay)) {
+    if (!key.startsWith("requirement_checked:")) continue;
+    const index = Number(key.slice("requirement_checked:".length));
+    if (!Number.isInteger(index) || index < 0) continue;
+    out[index] = { ...(out[index] ?? {}), checked: value === true };
+  }
+  return out.filter((item) => item !== undefined);
+}
+
+function mergeTaskspaceMessages(base: any, overlay: Record<string, unknown>): any[] {
+  const out = Array.isArray(base) ? [...base] : [];
+  const seen = new Set(out.map((item: any) => `message:${String(item?.ts ?? "")}:${String(item?.body ?? "")}`));
+  for (const [key, value] of Object.entries(overlay)) {
+    if (!key.startsWith("message:") || !value || typeof value !== "object" || Array.isArray(value)) continue;
+    const item = value as Record<string, unknown>;
+    const dedupe = `message:${String(item.ts ?? "")}:${String(item.body ?? "")}`;
+    if (!seen.has(dedupe)) {
+      seen.add(dedupe);
+      out.push(item);
+    }
+  }
+  return out.sort((a: any, b: any) => Number(a?.ts ?? 0) - Number(b?.ts ?? 0));
+}
+
+function mergeTaskspaceArtifacts(base: any, overlay: Record<string, unknown>): any[] {
+  const out = Array.isArray(base) ? [...base] : [];
+  const seen = new Set(out.map((item: any) => `${String(item?.kind ?? "")}:${String(item?.ref ?? "")}`));
+  for (const [key, value] of Object.entries(overlay)) {
+    if (!key.startsWith("artifact:") || !value || typeof value !== "object" || Array.isArray(value)) continue;
+    const item = value as Record<string, unknown>;
+    const dedupe = `${String(item.kind ?? "")}:${String(item.ref ?? "")}`;
+    if (!seen.has(dedupe)) {
+      seen.add(dedupe);
+      out.push(item);
+    }
+  }
+  return out;
+}
+
+function taskspaceOverlaySnapshot(): any {
+  const space = taskspaceSpace();
+  if (!space) return undefined;
+  return state.scopedProjection?.overlaySnapshots?.[`taskspace:${space}`];
+}
+
+function isTaskspaceTaskSummary(item: any): boolean {
+  const taskClass = catalogClass(installedCatalog(state.world, "taskspace"), "$task") ?? "$task";
+  const ancestors = Array.isArray(item?.ancestors) ? item.ancestors.map(String) : [];
+  return item?.parent === taskClass || item?.parent === "$task" || ancestors.includes(taskClass) || ancestors.includes("$task");
 }
 
 function buildPinboardMeta(world: any) {
@@ -1483,14 +1692,46 @@ function projectChat(world: any, meta: any) {
 }
 
 function defaultSelectedObject() {
-  return state.world?.dubspaceMeta?.delay ?? Object.keys(state.world?.objects ?? {}).sort()[0] ?? "";
+  return dubspaceMeta().delay ?? Object.keys(state.world?.objects ?? {}).sort()[0] ?? "";
 }
 
 function dubspaceSpace() {
+  if (scopedProjectionEnabled) {
+    const route = startupRoute ?? parseLocationRoute(location.pathname, location.search);
+    if (route?.view === "dubspace" && route.objectId) return route.objectId;
+    if (route?.objectId === bundledToolSeeds.dubspace) return route.objectId;
+    const overlays = state.scopedProjection?.overlays ?? {};
+    for (const handle of Object.values(overlays)) {
+      const subject = typeof (handle as any)?.subject === "string" ? (handle as any).subject : "";
+      const surface = typeof (handle as any)?.surface === "string" ? (handle as any).surface : "";
+      if (subject && surface === "dubspace") return subject;
+    }
+    const current = state.scopedProjection?.session?.current_location;
+    if (typeof current === "string" && current === bundledToolSeeds.dubspace) return current;
+    return bundledToolSeeds.dubspace;
+  }
   return String(state.world?.dubspaceMeta?.space ?? "");
 }
 
 function taskspaceSpace() {
+  if (scopedProjectionEnabled) {
+    const route = startupRoute ?? parseLocationRoute(location.pathname, location.search);
+    if (route?.view === "taskspace" && route.objectId) {
+      const routedTask = taskspaceProjectedTask(route.objectId);
+      const routedSpace = routedTask?.props?.space;
+      return typeof routedSpace === "string" && routedSpace ? routedSpace : route.objectId;
+    }
+    if (route?.objectId === bundledToolSeeds.taskspace) return route.objectId;
+    const overlays = state.scopedProjection?.overlays ?? {};
+    for (const handle of Object.values(overlays)) {
+      const subject = typeof (handle as any)?.subject === "string" ? (handle as any).subject : "";
+      const surface = typeof (handle as any)?.surface === "string" ? (handle as any).surface : "";
+      if (subject && surface === "taskspace") return subject;
+    }
+    const current = state.scopedProjection?.session?.current_location;
+    if (typeof current === "string" && current === bundledToolSeeds.taskspace) return current;
+    return bundledToolSeeds.taskspace;
+  }
   return String(state.world?.taskspaceMeta?.space ?? "");
 }
 
@@ -1912,7 +2153,7 @@ function rememberTaskObservations(observations: any[], frameId?: string) {
 }
 
 function syncTaskSelection() {
-  const taskspace = state.world?.taskspace;
+  const taskspace = taskspaceModel();
   const tasks = taskspace?.tasks ?? {};
   const roots = Array.isArray(taskspace?.root_tasks) ? taskspace.root_tasks : [];
   const active = activeTaskStatuses();
@@ -2059,6 +2300,7 @@ function bindCommon() {
         if (!wasDifferent) return;
         if (next === "dubspace") enterDubspace();
         if (next === "pinboard") enterPinboard();
+        if (next === "taskspace") enterTaskspace();
       });
     });
   });
@@ -2098,7 +2340,7 @@ function installBundledCatalogUi() {
 
 function renderDubspace() {
   const dub = effectiveDubspace();
-  const meta = state.world?.dubspaceMeta ?? {};
+  const meta = dubspaceMeta();
   const space = meta.space ? dub[meta.space] : null;
   const spaceId = typeof meta.space === "string" ? meta.space : "";
   const operators = dubspaceOperators();
@@ -2189,7 +2431,7 @@ function dubspaceOperators(): string[] {
 
 function renderFilterStrip(filter: any) {
   const cutoff = filter.cutoff ?? 1000;
-  const target = state.world?.dubspaceMeta?.filter ?? "";
+  const target = dubspaceMeta().filter ?? "";
   return `
     <div class="filter-strip">
       <div class="loop-strip-head">
@@ -2303,7 +2545,7 @@ function bindDubspace() {
   document.querySelectorAll<HTMLElement>("[data-pitch-dial]").forEach((dial) => bindPitchDial(dial));
   document.querySelector<HTMLButtonElement>("[data-transport]")?.addEventListener("click", (event) => {
     const mode = (event.currentTarget as HTMLButtonElement).dataset.transport;
-    const drum = state.world?.dubspaceMeta?.drum ?? "";
+    const drum = dubspaceMeta().drum ?? "";
     const props = mode === "stop"
       ? { playing: false }
       : { playing: true, started_at: Date.now() + state.clockOffset };
@@ -2311,14 +2553,14 @@ function bindDubspace() {
   });
   document.querySelector<HTMLInputElement>("[data-tempo]")?.addEventListener("change", (event) => {
     const bpm = Number((event.currentTarget as HTMLInputElement).value);
-    const drum = state.world?.dubspaceMeta?.drum ?? "";
+    const drum = dubspaceMeta().drum ?? "";
     callDubspaceMutation("set_tempo", [bpm], dubspaceOptimisticProps(drum, { bpm }, `${drum}:bpm`));
   });
   document.querySelectorAll<HTMLButtonElement>("[data-step]").forEach((button) => {
     button.addEventListener("click", () => {
       const [voice, step] = button.dataset.step!.split(":");
       const enabled = button.dataset.enabled !== "true";
-      const drum = state.world?.dubspaceMeta?.drum ?? "";
+      const drum = dubspaceMeta().drum ?? "";
       const pattern = patternWithStep(projectedObjectView(drum)?.props?.pattern, voice, Number(step), enabled);
       callDubspaceMutation("set_drum_step", [voice, Number(step), enabled], dubspaceOptimisticProps(drum, { pattern }, `${drum}:pattern`));
     });
@@ -2329,7 +2571,7 @@ function bindDubspace() {
   });
   document.querySelector<HTMLButtonElement>("[data-recall-scene]")?.addEventListener("click", () => {
     const space = dubspaceSpace();
-    const scene = state.world?.dubspaceMeta?.scene;
+    const scene = dubspaceMeta().scene;
     if (space && scene) call(space, space, "recall_scene", [scene]);
   });
 }
@@ -3749,7 +3991,7 @@ function bindSpaceChatPanel(panel: HTMLElement & WooElement & { data?: SpaceChat
   panel.woo = createChatWooContext(space, chatLineActorRefs(lines));
   setCustomElementData(panel, {
     space,
-    spaceName: objectName(state.world, space),
+    spaceName: projectedObjectView(space)?.name ?? objectName(state.world, space),
     lines,
     draft: spaceChatDraft(space),
     height: Math.round(spaceChatHeight(space))
@@ -4374,7 +4616,7 @@ function pinboardPalette(palette: any): string[] {
 }
 
 function renderTaskspace() {
-  const taskspace = state.world?.taskspace;
+  const taskspace = taskspaceModel();
   const space = taskspaceSpace();
   const tasks = taskspace?.tasks ?? {};
   const roots = Array.isArray(taskspace?.root_tasks) ? taskspace.root_tasks : [];
@@ -4583,6 +4825,26 @@ function firstMatchingTask(ids: string[], tasks: any, active: Set<string>): stri
   return undefined;
 }
 
+function enterTaskspace() {
+  const space = taskspaceSpace();
+  if (!space || !canSendDirect() || actorPresentInSpace(space)) return;
+  direct(space, "enter", [], () => {
+    void ensureScopedOverlayForTab("taskspace").then(() => {
+      if (state.tab === "taskspace") render();
+    });
+    requestSpaceChatFocus(space);
+  }, receiveChatError);
+}
+
+function taskspaceCall(target: string, verb: string, args: unknown[] = [], onCall?: (id: string) => void) {
+  const space = taskspaceSpace();
+  if (!space || !target) return;
+  ensureSpacePresence(space, () => {
+    const id = call(space, target, verb, args);
+    onCall?.(id);
+  }, receiveChatError);
+}
+
 function bindTaskspace() {
   bindSpaceChatPanels();
   document.querySelectorAll<HTMLButtonElement>("[data-task-status]").forEach((button) => {
@@ -4599,7 +4861,7 @@ function bindTaskspace() {
     const title = titleInput?.value.trim() || "Untitled";
     const description = descriptionInput?.value.trim() || "";
     const space = taskspaceSpace();
-    if (space) pendingTaskSelections.add(call(space, space, "create_task", [title, description]));
+    if (space) taskspaceCall(space, "create_task", [title, description], (id) => pendingTaskSelections.add(id));
     if (titleInput) titleInput.value = "";
     if (descriptionInput) descriptionInput.value = "";
   });
@@ -4623,10 +4885,8 @@ function bindTaskspace() {
   document.querySelectorAll<HTMLButtonElement>("[data-task-action]").forEach((button) => {
     button.addEventListener("click", () => {
       const action = button.dataset.taskAction!;
-      const space = taskspaceSpace();
-      if (!space) return;
-      if (action === "claim" || action === "release") call(space, id, action, []);
-      if (action.startsWith("status:")) call(space, id, "set_status", [action.slice("status:".length)]);
+      if (action === "claim" || action === "release") taskspaceCall(id, action, []);
+      if (action.startsWith("status:")) taskspaceCall(id, "set_status", [action.slice("status:".length)]);
     });
   });
   document.querySelector<HTMLButtonElement>("[data-add-subtask]")?.addEventListener("click", () => {
@@ -4635,36 +4895,31 @@ function bindTaskspace() {
     const title = titleInput?.value.trim() || "Subtask";
     const description = descriptionInput?.value.trim() || "";
     state.taskExpanded[id] = true;
-    const space = taskspaceSpace();
-    if (space) pendingTaskSelections.add(call(space, id, "add_subtask", [title, description]));
+    taskspaceCall(id, "add_subtask", [title, description], (callId) => pendingTaskSelections.add(callId));
     if (titleInput) titleInput.value = "";
     if (descriptionInput) descriptionInput.value = "";
   });
   document.querySelector<HTMLButtonElement>("[data-add-requirement]")?.addEventListener("click", () => {
     const input = document.querySelector<HTMLInputElement>("[data-requirement]");
     const text = input?.value.trim() || "Requirement";
-    const space = taskspaceSpace();
-    if (space) call(space, id, "add_requirement", [text]);
+    taskspaceCall(id, "add_requirement", [text]);
     if (input) input.value = "";
   });
   document.querySelectorAll<HTMLInputElement>("[data-check-req]").forEach((input) => {
     input.addEventListener("change", () => {
-      const space = taskspaceSpace();
-      if (space) call(space, id, "check_requirement", [Number(input.dataset.checkReq), input.checked]);
+      taskspaceCall(id, "check_requirement", [Number(input.dataset.checkReq), input.checked]);
     });
   });
   document.querySelector<HTMLButtonElement>("[data-add-message]")?.addEventListener("click", () => {
     const input = document.querySelector<HTMLInputElement>("[data-message]");
     const body = input?.value.trim() || "Update";
-    const space = taskspaceSpace();
-    if (space) call(space, id, "add_message", [body]);
+    taskspaceCall(id, "add_message", [body]);
     if (input) input.value = "";
   });
   document.querySelector<HTMLButtonElement>("[data-add-artifact]")?.addEventListener("click", () => {
     const input = document.querySelector<HTMLInputElement>("[data-artifact]");
     const ref = input?.value.trim() || "https://example.com";
-    const space = taskspaceSpace();
-    if (space) call(space, id, "add_artifact", [{ kind: ref.startsWith("http") ? "url" : "external", ref }]);
+    taskspaceCall(id, "add_artifact", [{ kind: ref.startsWith("http") ? "url" : "external", ref }]);
     if (input) input.value = "";
   });
 }
@@ -4868,7 +5123,7 @@ class DubAudio {
     this.dubspace = dubspace;
     this.clockOffset = clockOffset;
     this.syncEffects(dubspace);
-    const slots = Array.isArray(state.world?.dubspaceMeta?.slots) ? state.world.dubspaceMeta.slots : [];
+    const slots = Array.isArray(dubspaceMeta().slots) ? dubspaceMeta().slots : [];
     for (const [index, id] of slots.entries()) {
       const props = dubspace[id]?.props ?? {};
       const freq = loopPitch(Number(props.freq ?? defaultLoopFreq(index + 1))).freq;
@@ -4896,7 +5151,7 @@ class DubAudio {
 
   private syncEffects(dubspace: any) {
     const now = this.context.currentTime;
-    const meta = state.world?.dubspaceMeta ?? {};
+    const meta = dubspaceMeta();
     const delay = dubspace[meta.delay]?.props ?? {};
     const filter = dubspace[meta.filter]?.props ?? {};
     const channel = dubspace[meta.channel]?.props ?? {};
@@ -4916,7 +5171,7 @@ class DubAudio {
 
   private tickSequencer() {
     if (this.context.state !== "running") return;
-    const drum = this.dubspace?.[state.world?.dubspaceMeta?.drum]?.props;
+    const drum = this.dubspace?.[dubspaceMeta().drum]?.props;
     if (!drum?.playing) {
       this.lastStep = -1;
       return;

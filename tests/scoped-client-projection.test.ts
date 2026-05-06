@@ -300,6 +300,17 @@ describe("scoped client projection", () => {
   it("serves scoped overlay snapshots without reading the full world state", async () => {
     const world = createWorld();
     const session = world.auth("guest:overlay-snapshot");
+    await world.directCall("overlay-pinboard-enter", session.actor, "the_pinboard", "enter", [], { sessionId: session.id });
+    const added = await world.call("overlay-pinboard-note", session.id, "the_pinboard", {
+      actor: session.actor,
+      target: "the_pinboard",
+      verb: "add_note",
+      args: ["green note", "green", 12, 24, 160, 88]
+    });
+    expect(added.op).toBe("applied");
+    const pin = String((added as any).result?.id ?? "");
+    expect(pin).toBeTruthy();
+
     const result = await handleRestProtocolRequest(getWithQuery("/api/objects/the_pinboard/ui-snapshot", { surface: "pinboard" }), {
       world,
       requireSession: () => session,
@@ -322,6 +333,9 @@ describe("scoped client projection", () => {
     });
     expect(body.cursor.spaces.the_pinboard.next_seq).toEqual(expect.any(Number));
     expect(body.objects.some((object: { id?: string }) => object.id === "the_pinboard")).toBe(true);
+    const pinSummary = body.objects.find((object: { id?: string }) => object.id === pin);
+    expect(pinSummary?.props?.color).toBe("green");
+    expect(pinSummary?.props?.text).toBeNull();
   });
 
   it("adds here to direct move and enter results while preserving legacy fields", async () => {

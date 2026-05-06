@@ -328,6 +328,40 @@ describe("client UI framework projection", () => {
     expect(ui.observe("slot_1")?.props.playing).toBe(false);
   });
 
+  it("reduces taskspace observations into task props and sparse tree/detail overlays", () => {
+    const ui = createWooClientFramework();
+    ui.ingestSnapshot("overlay:taskspace:the_taskspace", [
+      { id: "the_taskspace", name: "Tasks", parent: "$taskspace", props: { root_tasks: [] } }
+    ]);
+
+    ui.ingestAppliedFrame({
+      op: "applied",
+      seq: 21,
+      space: "the_taskspace",
+      observations: [
+        { type: "task_created", task: "task_1", parent: null, title: "Ship scoped tasks" },
+        { type: "task_claimed", task: "task_1", actor: "guest_1" },
+        { type: "status_changed", task: "task_1", from: "claimed", to: "in_progress" },
+        { type: "requirement_added", task: "task_1", index: 0, text: "renders without /api/state" },
+        { type: "requirement_checked", task: "task_1", index: 0, checked: true },
+        { type: "message_added", task: "task_1", actor: "guest_1", body: "wired", ts: 1234 }
+      ]
+    });
+
+    expect(ui.observe("task_1")?.props).toMatchObject({
+      title: "Ship scoped tasks",
+      parent_task: null,
+      assignee: "guest_1",
+      status: "in_progress"
+    });
+    expect(ui.observe("the_taskspace")?.catalogState.taskspace_tree).toMatchObject({ task_1: null });
+    expect(ui.observe("task_1")?.catalogState.taskspace_task).toMatchObject({
+      "requirement:0": { text: "renders without /api/state", checked: false },
+      "requirement_checked:0": true,
+      "message:1234": { actor: "guest_1", body: "wired", ts: 1234 }
+    });
+  });
+
   it("ingests scoped snapshots without clearing unrelated scopes", () => {
     const ui = createWooClientFramework();
     ui.ingestSnapshot("here", [
@@ -345,6 +379,17 @@ describe("client UI framework projection", () => {
     expect(ui.observe("actor_1")).toBeUndefined();
     expect(ui.observe("room_1")?.props.topic).toBe("new");
     expect(ui.observe("note_1")?.catalogState.pinboard_note).toMatchObject({ x: 10, y: 20 });
+  });
+
+  it("lets later full overlay summaries win over earlier thin duplicates", () => {
+    const ui = createWooClientFramework();
+    ui.ingestSnapshot("overlay:pinboard:the_pinboard", [
+      { id: "note_1", name: "Note", parent: "$pin", ancestors: ["$thing", "$note", "$pin"] },
+      { id: "note_1", name: "Note", parent: "$pin", ancestors: ["$thing", "$note", "$pin"], props: { color: "green" }, catalogState: { pinboard_note: { color: "green" } } }
+    ]);
+
+    expect(ui.observe("note_1")?.props.color).toBe("green");
+    expect(ui.observe("note_1")?.catalogState.pinboard_note).toMatchObject({ color: "green" });
   });
 
   it("notifies projection subscribers for snapshot, optimistic, and prune changes", () => {

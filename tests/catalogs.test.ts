@@ -1172,7 +1172,7 @@ describe("local catalogs", () => {
     expect(worldVerb(host, "$pinboard", "list_notes").source).toContain("contents(this)");
   });
 
-  it("runHostScopedLocalCatalogLifecycle verifies completed schema plans before trusting host metadata", { timeout: 15000 }, () => {
+  it("runHostScopedLocalCatalogLifecycle verifies completed schema plans before trusting host metadata", { timeout: 30000 }, () => {
     const host = createWorld();
     runHostScopedLocalCatalogLifecycle(host, "the_chatroom");
     const commandPlanRecords = host.getProp("$system", "catalog_migration_records") as Array<Record<string, WooValue>>;

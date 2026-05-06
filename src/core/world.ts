@@ -117,6 +117,7 @@ export type CallContext = {
   observations: Observation[];
   observe(event: Observation): void;
   deferHostEffect?(effect: DeferredHostEffect): void;
+  onSessionsEnded?(sessions: Session[]): void | Promise<void>;
   hostMemo?: HostOperationMemo;
   /** Per-call set of `${obj}->${target}` markers used by movetoChecked to
    * prevent infinite recursion when an `obj:moveto` verb calls back into
@@ -260,6 +261,7 @@ export type DirectCallOptions = {
   forceReason?: string;
   sessionId?: string | null;
   deferHostEffect?: (effect: DeferredHostEffect) => void;
+  onSessionsEnded?: (sessions: Session[]) => void | Promise<void>;
 };
 
 type WooRepository = WorldRepository & Partial<ObjectRepository>;
@@ -1079,11 +1081,15 @@ export class WooWorld {
    * unconditionally and for the owner of the bound actor (so the same actor
    * who could mint can also revoke). */
   revokeApiKey(actor: ObjRef, id: string): boolean {
+    return this.revokeApiKeyWithClosedSessions(actor, id).revoked;
+  }
+
+  private revokeApiKeyWithClosedSessions(actor: ObjRef, id: string): { revoked: boolean; closedSessions: Session[] } {
     const raw = this.propOrNull("$system", "api_keys");
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { revoked: false, closedSessions: [] };
     const map = raw as Record<string, WooValue>;
     const rec = map[id];
-    if (!rec || typeof rec !== "object" || Array.isArray(rec)) return false;
+    if (!rec || typeof rec !== "object" || Array.isArray(rec)) return { revoked: false, closedSessions: [] };
     const r = rec as Record<string, WooValue>;
     const targetActor = String(r.actor ?? "");
     const isWizard = this.canBypassPerms(actor);
@@ -1091,26 +1097,30 @@ export class WooWorld {
     if (!isWizard && !isOwner) {
       throw wooError("E_PERM", "revoke requires wizard authority or ownership of the bound actor", { actor, key_id: id });
     }
-    if (r.revoked_at != null) return false; // already revoked — caller can disambiguate via listApiKeys
-    const updated = { ...r, revoked_at: Date.now() };
+    return this.revokeApiKeyRecord(actor, id, map, r, targetActor);
+  }
+
+  private revokeApiKeyRecord(actor: ObjRef, id: string, map: Record<string, WooValue>, record: Record<string, WooValue>, targetActor: ObjRef): { revoked: boolean; closedSessions: Session[] } {
+    if (record.revoked_at != null) return { revoked: false, closedSessions: [] }; // already revoked — caller can disambiguate via listApiKeys
+    const updated = { ...record, revoked_at: Date.now() };
     this.setProp("$system", "api_keys", { ...map, [id]: updated as WooValue });
-    this.closeSessionsForApiKey(id);
+    const closedSessions = this.closeSessionsForApiKey(id);
     this.recordWizardAction(actor, "revoke_api_key", { key_id: id, actor: targetActor });
-    return true;
+    return { revoked: true, closedSessions };
   }
 
   /** Walk the in-memory session table and reap any whose apikeyId matches.
-   * Returns the count of sessions closed. Live transports (WS, MCP) discover
+   * Returns the sessions closed. Live transports (WS, MCP) discover
    * via their session-resume path that the session no longer exists and
    * disconnect on the next op. */
-  private closeSessionsForApiKey(id: string): number {
-    const matches: string[] = [];
-    for (const [sid, session] of this.sessions) {
-      if (session.apikeyId === id) matches.push(sid);
+  private closeSessionsForApiKey(id: string): Session[] {
+    const matches: Session[] = [];
+    for (const session of this.sessions.values()) {
+      if (session.apikeyId === id) matches.push({ ...session, attachedSockets: new Set(session.attachedSockets) });
     }
-    for (const sid of matches) this.reapSession(sid);
+    for (const session of matches) this.reapSession(session.id);
     if (matches.length > 0) this.persist(true);
-    return matches.length;
+    return matches;
   }
 
   /** Wizard-only: list every apikey record's metadata. */
@@ -1592,6 +1602,7 @@ export class WooWorld {
         message,
         observations,
         hostMemo,
+        onSessionsEnded: options.onSessionsEnded,
         observe: (event) => {
           observations.push({ ...event, source: event.source ?? target });
         },
@@ -5791,7 +5802,9 @@ export class WooWorld {
     this.nativeHandlers.set("revoke_api_key", (ctx, args) => {
       const id = String(args[0] ?? "");
       if (!id) throw wooError("E_INVARG", "revoke_api_key requires an id");
-      return this.revokeApiKey(ctx.actor, id);
+      const result = this.revokeApiKeyWithClosedSessions(ctx.actor, id);
+      if (result.closedSessions.length > 0) return Promise.resolve(ctx.onSessionsEnded?.(result.closedSessions)).then(() => result.revoked);
+      return result.revoked;
     });
     this.nativeHandlers.set("list_api_keys", (ctx) => {
       return this.listApiKeys(ctx.actor) as unknown as WooValue;

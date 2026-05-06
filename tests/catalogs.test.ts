@@ -2693,6 +2693,29 @@ describe("local catalogs", () => {
       if (strangerDeliver.op === "error") expect(strangerDeliver.error.code).toBe("E_PERM");
     });
 
+    it("$dispenser_block keeps queue internals out of public get_data", async () => {
+      const world = createWorld({ catalogs: false });
+      installLocalCatalogs(world, ["dispenser"]);
+      const owner = world.auth("guest:disp-private-owner").actor;
+      const requester = world.auth("guest:disp-private-requester").actor;
+      const stranger = world.auth("guest:disp-private-stranger").actor;
+      const blockId = "obj_test_disp_private";
+      world.createObject({ id: blockId, name: blockId, parent: "$dispenser_block", owner, location: "$nowhere" });
+      world.setProp(blockId, "rate_limit_seconds", 0);
+      world.setProp(blockId, "block_cooldown_seconds", 0);
+
+      const ordered = await world.directCall("private-order", requester, blockId, "order", ["private prompt"]);
+      expect(ordered.op).toBe("result");
+
+      const leaked = await world.directCall("private-leak", stranger, blockId, "get_data", ["pending_orders"]);
+      expect(leaked.op).toBe("error");
+      if (leaked.op === "error") expect(leaked.error.code).toBe("E_PERM");
+
+      const ownerRead = await world.directCall("private-owner-read", owner, blockId, "get_data", ["pending_orders"]);
+      expect(ownerRead.op).toBe("result");
+      if (ownerRead.op === "result") expect(ownerRead.result).toMatchObject([{ request: "private prompt", requester }]);
+    });
+
     it("$dispenser_block:order rate-limits per requester", async () => {
       const world = createWorld({ catalogs: false });
       installLocalCatalogs(world, ["dispenser"]);

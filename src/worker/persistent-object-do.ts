@@ -174,6 +174,9 @@ export class PersistentObjectDO {
         requireSession: () => this.requireRestSession(world, request),
         onAuthenticated: (session) => this.registerSessionRoute(session),
         onSessionEnded: (session) => this.unregisterSessionRoute(session.id),
+        onSessionsEnded: async (sessions) => {
+          for (const session of sessions) await this.unregisterSessionRoute(session.id);
+        },
         state: (actor) => this.aggregateState(world, actor),
         installTap: async (actor, body) => {
           if (!gatewayHost) throw wooError("E_NOTAPPLICABLE", "GitHub tap install is only available on the world gateway host");

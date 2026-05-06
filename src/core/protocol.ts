@@ -36,6 +36,7 @@ export type RestProtocolHost = {
   authenticateToken(token: string): Session | Promise<Session>;
   onAuthenticated?(session: Session): void | Promise<void>;
   onSessionEnded?(session: Session): void | Promise<void>;
+  onSessionsEnded?(sessions: Session[]): void | Promise<void>;
   state(actor: ObjRef): unknown | Promise<unknown>;
   installTap?(actor: ObjRef, body: Record<string, unknown>): Promise<AppliedFrame>;
   updateTap?(actor: ObjRef, body: Record<string, unknown>): Promise<AppliedFrame>;
@@ -202,7 +203,12 @@ export async function handleRestProtocolRequest(request: RestProtocolRequest, ho
       const forceDirect = request.header("x-woo-force-direct") === "1";
       const direct = host.directCall ?? ((frameId, directActor, directTarget, directVerb, directArgs, directOptions) =>
         world.directCall(frameId, directActor, directTarget, directVerb, directArgs, directOptions));
-      const result = await direct(id, actor, target, verb, args, { forceDirect, forceReason: "REST X-Woo-Force-Direct", sessionId: session.id });
+      const result = await direct(id, actor, target, verb, args, {
+        forceDirect,
+        forceReason: "REST X-Woo-Force-Direct",
+        sessionId: session.id,
+        onSessionsEnded: host.onSessionsEnded
+      });
       if (result.op === "error") return errorProtocol(result.error);
       await host.broadcastLiveEvents(result);
       return jsonProtocol({

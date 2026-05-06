@@ -55,6 +55,15 @@
           "source": "verb :order(request) rxd { this:check_order_limits(request); let entry = this:enqueue_order(request); let here = location(this); if (here != null && isa(here, $space)) { observe_to_space(here, { type: \"order_placed\", source: this, block: this, order_id: entry[\"order_id\"], requester: actor, request: request, ts: entry[\"ts\"] }); } try { tell(this, \"order:\" + entry[\"order_id\"]); } except err { } return { order_id: entry[\"order_id\"], queued: true, ts: entry[\"ts\"] }; }"
         },
         {
+          "name": "get_data",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "tool_exposed": true,
+          "arg_spec": { "args": ["name"] },
+          "source": "verb :get_data(name) rxd { if (name in [\"pending_orders\", \"next_order_seq\", \"last_request_at\", \"last_order_at\"]) { if (actor != this && actor != this.owner && !has_flag(actor, \"wizard\")) { raise { code: \"E_PERM\", message: \"dispenser queue data is private to the owner and plug\", value: { property: name, actor: actor } }; } } return pass(name); }"
+        },
+        {
           "name": "deliver",
           "perms": "rx",
           "direct_callable": true,

@@ -22,6 +22,8 @@ export type ProjectionPatch = {
   props?: Record<string, unknown>;
   // Catalog-derived projection state lives here, grouped by catalog key.
   catalogState?: Record<string, Record<string, unknown>>;
+  // Catalog-derived state groups to remove from the subject.
+  clearCatalogState?: string[];
 };
 
 export type ProjectionSnapshot = {
@@ -67,6 +69,7 @@ export type ClientProjectionDraft = {
   patchObject(ref: string, fields: Record<string, unknown>): void;
   patchObjectProps(ref: string, props: Record<string, unknown>): void;
   patchCatalogState(ref: string, key: string, fields: Record<string, unknown>): void;
+  clearCatalogState(ref: string, key: string): void;
 };
 
 export type WooObservationHandler = {
@@ -731,6 +734,58 @@ export function registerCoreObservationHandlers(registry: ObservationRegistry) {
     }
   });
   registry.observation({
+    types: ["pin_recolored", "note_color_changed"],
+    route: "sequenced",
+    reduce: (draft, envelope) => {
+      const obs = envelope.observation;
+      const pin = String(obs.pin ?? obs.note ?? obs.id ?? "");
+      if (!pin) return;
+      draft.patchCatalogState(pin, "pinboard_note", { color: obs.color });
+    }
+  });
+  registry.observation({
+    types: ["note_edited"],
+    route: "sequenced",
+    reduce: (draft, envelope) => {
+      const obs = envelope.observation;
+      const note = String(obs.note ?? obs.pin ?? obs.id ?? "");
+      if (!note) return;
+      draft.patchCatalogState(note, "pinboard_note", { text: obs.text });
+    }
+  });
+  registry.observation({
+    types: ["note_added"],
+    route: "sequenced",
+    reduce: (draft, envelope) => {
+      const note = envelope.observation.note;
+      if (!note || typeof note !== "object" || Array.isArray(note)) return;
+      const id = String((note as any).id ?? envelope.observation.pin ?? "");
+      if (!id) return;
+      draft.patchObject(id, {
+        name: typeof (note as any).name === "string" ? (note as any).name : undefined,
+        owner: typeof (note as any).owner === "string" ? (note as any).owner : undefined
+      });
+      draft.patchCatalogState(id, "pinboard_note", pinboardNoteState(note));
+    }
+  });
+  registry.observation({
+    types: ["pin_removed", "note_deleted"],
+    route: "sequenced",
+    reduce: (draft, envelope) => {
+      const id = String(envelope.observation.pin ?? envelope.observation.note ?? envelope.observation.id ?? "");
+      if (id) draft.clearCatalogState(id, "pinboard_note");
+    }
+  });
+  registry.observation({
+    types: ["notes_cleared"],
+    route: "sequenced",
+    reduce: (draft, envelope) => {
+      for (const id of Array.isArray(envelope.observation.notes) ? envelope.observation.notes : []) {
+        if (typeof id === "string" && id) draft.clearCatalogState(id, "pinboard_note");
+      }
+    }
+  });
+  registry.observation({
     types: ["control_changed"],
     route: "both",
     reduce: (draft, envelope) => {
@@ -850,6 +905,13 @@ class ProjectionDraft implements ClientProjectionDraft {
     this.merge(subject, { subject, catalogState: { [catalogKey]: stripUndefined(fields) } });
   }
 
+  clearCatalogState(ref: string, key: string) {
+    const subject = String(ref ?? "");
+    const catalogKey = String(key ?? "");
+    if (!subject || !catalogKey) return;
+    this.merge(subject, { subject, clearCatalogState: [catalogKey] });
+  }
+
   consume(): ProjectionPatch[] {
     return [...this.patches.values()];
   }
@@ -924,6 +986,7 @@ function applyPatch(target: ObjectProjection, patch: ProjectionPatch | undefined
   if (!patch) return;
   if (patch.fields) Object.assign(target, stripUndefined(patch.fields));
   if (patch.props) Object.assign(target.props, stripUndefined(patch.props));
+  for (const key of patch.clearCatalogState ?? []) delete target.catalogState[key];
   if (patch.catalogState) {
     for (const [key, fields] of Object.entries(patch.catalogState)) {
       target.catalogState[key] = { ...(target.catalogState[key] ?? {}), ...stripUndefined(fields) };
@@ -936,7 +999,8 @@ function mergePatch(left: ProjectionPatch | undefined, right: ProjectionPatch): 
     subject: right.subject,
     fields: mergeRecord(left?.fields, right.fields),
     props: mergeRecord(left?.props, right.props),
-    catalogState: mergeCatalogState(left?.catalogState, right.catalogState)
+    catalogState: mergeCatalogState(left?.catalogState, right.catalogState),
+    clearCatalogState: mergeClearList(left?.clearCatalogState, right.clearCatalogState)
   };
 }
 
@@ -953,6 +1017,11 @@ function mergeCatalogState(
   for (const [key, fields] of Object.entries(left ?? {})) merged[key] = { ...fields };
   for (const [key, fields] of Object.entries(right ?? {})) merged[key] = { ...(merged[key] ?? {}), ...stripUndefined(fields) };
   return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
+function mergeClearList(left?: string[], right?: string[]): string[] | undefined {
+  const merged = [...new Set([...(left ?? []), ...(right ?? [])].map(String).filter(Boolean))];
+  return merged.length > 0 ? merged : undefined;
 }
 
 function stripUndefined<T extends Record<string, unknown>>(value: T): T {
@@ -1017,8 +1086,19 @@ function removePatchFields(current: ProjectionPatch, applied: ProjectionPatch): 
     subject: current.subject,
     fields,
     props,
-    catalogState: Object.keys(catalogState).length > 0 ? catalogState : undefined
+    catalogState: Object.keys(catalogState).length > 0 ? catalogState : undefined,
+    clearCatalogState: removeClearKeys(current.clearCatalogState, applied)
   };
+}
+
+function removeClearKeys(keys: string[] | undefined, applied: ProjectionPatch): string[] | undefined {
+  if (!keys || keys.length === 0) return undefined;
+  const appliedKeys = new Set([
+    ...Object.keys(applied.catalogState ?? {}),
+    ...(applied.clearCatalogState ?? [])
+  ]);
+  const next = keys.filter((key) => !appliedKeys.has(key));
+  return next.length > 0 ? next : undefined;
 }
 
 function removeKeys(record: Record<string, unknown> | undefined, keys: string[]): Record<string, unknown> | undefined {
@@ -1030,7 +1110,7 @@ function removeKeys(record: Record<string, unknown> | undefined, keys: string[])
 }
 
 function isEmptyPatch(patch: ProjectionPatch): boolean {
-  return !patch.fields && !patch.props && !patch.catalogState;
+  return !patch.fields && !patch.props && !patch.catalogState && !patch.clearCatalogState;
 }
 
 function subjectsInLayer(layer: ProjectionLayer | undefined): Set<string> {
@@ -1041,7 +1121,8 @@ function livePatchDiscriminator(patch: ProjectionPatch): string {
   const fields = Object.keys(patch.fields ?? {}).map((key) => `field.${key}`);
   const props = Object.keys(patch.props ?? {}).map((key) => `prop.${key}`);
   const catalog = Object.entries(patch.catalogState ?? {}).flatMap(([key, value]) => Object.keys(value).map((field) => `catalog.${key}.${field}`));
-  return [...fields, ...props, ...catalog].sort().join(",");
+  const clearCatalog = (patch.clearCatalogState ?? []).map((key) => `catalog.${key}`);
+  return [...fields, ...props, ...catalog, ...clearCatalog].sort().join(",");
 }
 
 function qualifyComponentId(alias: string, id: string): string {

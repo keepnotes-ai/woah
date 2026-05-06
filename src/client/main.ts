@@ -100,6 +100,14 @@ type PinboardMapModel = {
   spanY: number;
 };
 
+type PinboardRenderModel = {
+  board: any;
+  notes: any[];
+  present: string[];
+  palette: string[];
+  viewport: { w?: unknown; h?: unknown };
+};
+
 const state: AppState = {
   tab: "chat",
   audioOn: false,
@@ -291,10 +299,9 @@ function connect() {
       const pinboardAnimations = capturePinboardAnimations(observations);
       const needsPinboardNotesRefresh = observations.some((observation: any) => isPinboardObservation(observation) && pinboardObservationNeedsNotesRefresh(String(observation?.type ?? "")));
       if (needsPinboardNotesRefresh) pinboardNotesRefreshPending = false;
-      // The server has confirmed any pin moves/resizes that show up here;
-      // first fold those values into the local note model, then clear the
-      // optimistic patch so the render below does not snap back to stale
-      // /api/state coordinates while the follow-up refresh catches up.
+      // Legacy /api/state mode still folds confirmed placement observations
+      // into its pinboard note array. Scoped mode gets the same fields through
+      // the framework reducer above.
       for (const observation of observations) {
         const type = String(observation?.type ?? "");
         if (type === "pin_moved" || type === "pin_resized" || type === "note_moved" || type === "note_resized") {
@@ -731,7 +738,7 @@ async function refresh() {
     syncUrlFromCurrentState("replace");
   }
   audio?.sync(effectiveDubspace(), state.clockOffset);
-  hydratePinboardNotesTextIfNeeded(state.world?.pinboard);
+  hydratePinboardNotesTextIfNeeded(pinboardModel());
   render();
 }
 
@@ -851,7 +858,7 @@ function applyScopedOverlaySnapshot(key: string, snapshot: any) {
     ? { ...(state.scopedProjection.overlays ?? {}), [key]: { subject, surface, restore: true } }
     : state.scopedProjection.overlays ?? {};
   state.scopedProjection = { ...state.scopedProjection, overlays, overlaySnapshots };
-  const objects = overlaySnapshotObjects(snapshot);
+  const objects = overlaySnapshotProjectionObjects(snapshot);
   ui.ingestSnapshot(`overlay:${key}`, objects);
   if (snapshot.cursor?.spaces) {
     for (const [space, record] of Object.entries(snapshot.cursor.spaces)) {
@@ -994,6 +1001,29 @@ function overlaySnapshotObjects(snapshot: any): any[] {
     ...arrayOfObjects(snapshot.objects),
     ...roomSnapshotObjects(snapshot.room)
   ];
+}
+
+function overlaySnapshotProjectionObjects(snapshot: any): any[] {
+  const objects = overlaySnapshotObjects(snapshot);
+  if (snapshot?.surface !== "pinboard") return objects;
+  const subject = typeof snapshot?.subject === "string" ? snapshot.subject : "";
+  const board = objects.find((item) => String(item?.id ?? "") === subject);
+  const layout = pinboardLayoutFromBoard(board);
+  if (!subject || Object.keys(layout).length === 0) return objects;
+  return objects.map((item) => {
+    const id = String(item?.id ?? "");
+    if (!id || !isPinboardNoteSummary(item, subject, layout)) return item;
+    return {
+      ...item,
+      catalogState: {
+        ...(item.catalogState ?? {}),
+        pinboard_note: {
+          ...(item.catalogState?.pinboard_note ?? {}),
+          ...pinboardNoteStateFromSummary(item, layout[id])
+        }
+      }
+    };
+  });
 }
 
 function scopedSummaryToLegacyObject(summary: any) {
@@ -1212,6 +1242,122 @@ function projectPinboard(world: any, meta: any) {
     palette,
     viewport: props.viewport && typeof props.viewport === "object" && !Array.isArray(props.viewport) ? props.viewport : { w: 960, h: 560 }
   };
+}
+
+function pinboardModel(): PinboardRenderModel | undefined {
+  // Transitional hybrid while the board renderer is migrating. In scoped mode
+  // projection owns note state; legacy `state.world.pinboard` remains only for
+  // missing metadata and non-migrated callers until the componentized board
+  // renderer removes this fallback entirely.
+  const legacy = state.world?.pinboard;
+  if (!scopedProjectionEnabled) return legacy;
+  const boardId = pinboardSpace();
+  if (!boardId) return legacy;
+  const projected = ui.observe(boardId);
+  if (!projected && legacy) return legacy;
+  const board = projected
+    ? {
+      id: boardId,
+      name: projected.name ?? legacy?.board?.name ?? boardId,
+      owner: projected.owner ?? legacy?.board?.owner,
+      parent: projected.parent ?? legacy?.board?.parent,
+      location: projected.location ?? legacy?.board?.location,
+      props: { ...(legacy?.board?.props ?? {}), ...(projected.props ?? {}) }
+    }
+    : legacy?.board;
+  if (!board) return undefined;
+  const props = board.props ?? {};
+  const palette = pinboardPalette(props.palette ?? legacy?.palette);
+  state.pinboardNewColor = normalizePinboardStickyColor(state.pinboardNewColor, palette);
+  const layout = pinboardLayoutFromBoard(board);
+  const noteIds = pinboardProjectedNoteIds(boardId, layout, legacy?.notes);
+  return {
+    board,
+    notes: normalizePinboardNotes(noteIds.map((id) => pinboardProjectedNote(id, layout[id], legacy?.notes)).filter(Boolean), legacy?.notes),
+    present: Array.isArray(props.subscribers) ? props.subscribers.map(String) : Array.isArray(legacy?.present) ? legacy.present.map(String) : [],
+    palette,
+    viewport: props.viewport && typeof props.viewport === "object" && !Array.isArray(props.viewport) ? props.viewport : legacy?.viewport ?? { w: 960, h: 560 }
+  };
+}
+
+function pinboardLayoutFromBoard(board: any): Record<string, any> {
+  const layout = board?.props?.layout;
+  return layout && typeof layout === "object" && !Array.isArray(layout) ? layout : {};
+}
+
+function pinboardProjectedNoteIds(boardId: string, layout: Record<string, any>, legacyNotes: any[] = []): string[] {
+  const ids = new Set<string>();
+  for (const id of Object.keys(layout)) ids.add(id);
+  for (const note of Array.isArray(legacyNotes) ? legacyNotes : []) {
+    const id = String(note?.id ?? "");
+    if (id) ids.add(id);
+  }
+  const snapshot = pinboardOverlaySnapshot();
+  for (const item of overlaySnapshotObjects(snapshot)) {
+    const id = String(item?.id ?? "");
+    if (id && isPinboardNoteSummary(item, boardId, layout)) ids.add(id);
+  }
+  return [...ids];
+}
+
+function pinboardProjectedNote(id: string, layoutEntry: any, legacyNotes: any[] = []): any | undefined {
+  const projected = ui.observe(id);
+  const previous = Array.isArray(legacyNotes) ? legacyNotes.find((note) => String(note?.id ?? "") === id) : undefined;
+  const noteState = projected?.catalogState.pinboard_note ?? {};
+  const entry = layoutEntry && typeof layoutEntry === "object" && !Array.isArray(layoutEntry) ? layoutEntry : {};
+  if (!projected && !previous && Object.keys(entry).length === 0) return undefined;
+  // Priority is deliberate: observation-reduced catalogState is the current
+  // UI model; projection props carry static readable note fields; legacy is
+  // the compatibility cache; board layout fills placement defaults.
+  return {
+    id,
+    name: projected?.name ?? previous?.name ?? id,
+    owner: projected?.owner ?? previous?.owner ?? previous?.author,
+    author: noteState.author ?? projected?.owner ?? previous?.author ?? previous?.owner,
+    writers: noteState.writers ?? projected?.props?.writers ?? previous?.writers,
+    text: noteState.text ?? projected?.props?.text ?? previous?.text,
+    color: noteState.color ?? projected?.props?.color ?? previous?.color,
+    x: noteState.x ?? entry.x ?? previous?.x,
+    y: noteState.y ?? entry.y ?? previous?.y,
+    w: noteState.w ?? entry.w ?? previous?.w,
+    h: noteState.h ?? entry.h ?? previous?.h,
+    z: noteState.z ?? entry.z ?? previous?.z,
+    created_at: noteState.created_at ?? previous?.created_at,
+    updated_at: noteState.updated_at ?? previous?.updated_at,
+    updated_by: noteState.updated_by ?? previous?.updated_by
+  };
+}
+
+function pinboardOverlaySnapshot(): any {
+  const board = pinboardSpace();
+  if (!board) return undefined;
+  return state.scopedProjection?.overlaySnapshots?.[`pinboard:${board}`];
+}
+
+function isPinboardNoteSummary(item: any, boardId: string, layout: Record<string, any>): boolean {
+  const id = String(item?.id ?? "");
+  if (!id) return false;
+  // Overlay snapshots do not yet carry catalog-specific `kind: "pin"`
+  // metadata, so the bridge recognizes pins by layout membership first, then
+  // by location plus class summary. Replace this with catalog-provided
+  // snapshot transforms when UCM component loading owns pinboard rendering.
+  if (Object.prototype.hasOwnProperty.call(layout, id)) return true;
+  if (item?.location === boardId && (item?.parent === "$pin" || item?.parent === "$note")) return true;
+  const ancestors = Array.isArray(item?.ancestors) ? item.ancestors.map(String) : [];
+  return item?.location === boardId && (ancestors.includes("$pin") || ancestors.includes("$note"));
+}
+
+function pinboardNoteStateFromSummary(item: any, layoutEntry: any): Record<string, unknown> {
+  const entry = layoutEntry && typeof layoutEntry === "object" && !Array.isArray(layoutEntry) ? layoutEntry : {};
+  const props = item?.props && typeof item.props === "object" && !Array.isArray(item.props) ? item.props : {};
+  const out: Record<string, unknown> = {};
+  for (const key of ["x", "y", "z", "w", "h"]) if (entry[key] !== undefined) out[key] = entry[key];
+  for (const key of ["text", "color", "writers"]) if (props[key] !== undefined && props[key] !== null) out[key] = props[key];
+  if (typeof item?.owner === "string") {
+    out.owner = item.owner;
+    out.author = item.owner;
+  }
+  return out;
 }
 
 function pinboardNotesFromContents(world: any, boardId: string | undefined, layoutValue: any) {
@@ -2369,6 +2515,7 @@ function pinboardObservationNeedsNotesRefresh(type: string) {
 function applyPinboardPlacementObservation(observation: any): boolean {
   const type = String(observation?.type ?? "");
   if (type !== "pin_moved" && type !== "pin_resized" && type !== "note_moved" && type !== "note_resized") return false;
+  if (scopedProjectionEnabled) return false;
   const id = String(observation?.pin ?? observation?.id ?? "");
   const notes = state.world?.pinboard?.notes;
   if (!id || !Array.isArray(notes)) return false;
@@ -3145,7 +3292,7 @@ function actorLabel(id: string | undefined) {
 }
 
 function renderPinboard() {
-  const pinboard = state.world?.pinboard;
+  const pinboard = pinboardModel();
   const board = pinboard?.board;
   const present = Array.isArray(pinboard?.present) ? pinboard.present : [];
   const inBoard = pinboardActorPresent();
@@ -3185,7 +3332,7 @@ function renderPinboard() {
       </div>
       <aside class="panel pinboard-presence">
         <h2>Presence</h2>
-        <div data-pinboard-map-shell>${renderPinboardMap(notes, present, width, height)}</div>
+        <div data-pinboard-map-shell>${renderPinboardMap(notes, present, width, height, pinboard.palette)}</div>
       </aside>
     </section>
   `;
@@ -3213,21 +3360,21 @@ function renderSpaceChatPanel(space: string) {
   return `<${tag} class="panel space-chat-panel" data-space-chat-panel data-space-chat-space="${escapeHtml(space)}" style="height:${height}px"></${tag}>`;
 }
 
-function renderPinboardMap(notes: any[], present: string[], width: number, height: number) {
+function renderPinboardMap(notes: any[], present: string[], width: number, height: number, palette: string[] = pinboardModel()?.palette ?? []) {
   const model = pinboardMapModel(notes, present, width, height);
   return `
     <div class="pinboard-map" data-pinboard-map data-min-x="${roundCss(model.minX)}" data-min-y="${roundCss(model.minY)}" data-span-x="${roundCss(model.spanX)}" data-span-y="${roundCss(model.spanY)}" aria-label="Pinboard overview">
-      ${renderPinboardMapNotes(notes, model)}
+      ${renderPinboardMapNotes(notes, model, palette)}
       ${renderPinboardMapViewports(present, model, width, height)}
       ${present.length === 0 ? `<p class="pinboard-map-empty">No one is here.</p>` : ""}
     </div>
   `;
 }
 
-function renderPinboardMapNotes(notes: any[], model: PinboardMapModel) {
+function renderPinboardMapNotes(notes: any[], model: PinboardMapModel, palette: string[]) {
   return notes.map((note: any) => {
     const id = String(note?.id ?? "");
-    const color = pinNoteColor(note, state.world?.pinboard?.palette);
+    const color = pinNoteColor(note, palette);
     return `<div class="pinboard-map-note pin-note-${escapeHtml(color)}" data-pinboard-map-note="${escapeHtml(id)}" style="${pinboardMapBoxStyle(pinNoteRecordBox(note), model)}"></div>`;
   }).join("");
 }
@@ -3366,6 +3513,18 @@ function pinboardPlacementOptimistic(id: string, patch: { x?: number; y?: number
   };
 }
 
+function pinboardNoteOptimistic(id: string, patch: Record<string, unknown>): ProjectionCallOptions | undefined {
+  if (!id || Object.keys(patch).length === 0) return undefined;
+  return {
+    optimistic: {
+      id: `pinboard:${id}:note`,
+      patches: [{ subject: id, catalogState: { pinboard_note: patch } }],
+      ttlMs: PINBOARD_OPTIMISTIC_TTL_MS,
+      reconcile: "drop_on_applied"
+    }
+  };
+}
+
 function applyProjectedPinPatch<T extends { x: number; y: number; w: number; h: number }>(id: string, base: T): T {
   ui.prune();
   const projected = ui.observe(id)?.catalogState.pinboard_note;
@@ -3427,7 +3586,8 @@ function pinNoteWritable(note: any, editable: boolean): boolean {
 function pinNoteAction(note: any, editable: boolean): { verb: "take" | "eject"; label: string; text: string } | null {
   if (!editable || !state.actor) return null;
   const owner = typeof note?.owner === "string" ? note.owner : typeof note?.author === "string" ? note.author : "";
-  const boardOwner = typeof state.world?.pinboard?.board?.owner === "string" ? state.world.pinboard.board.owner : "";
+  const board = pinboardModel()?.board;
+  const boardOwner = typeof board?.owner === "string" ? board.owner : "";
   if (owner === state.actor) return { verb: "take", label: "Take note", text: "x" };
   if (boardOwner === state.actor) return { verb: "eject", label: "Eject note", text: "x" };
   return null;
@@ -3453,7 +3613,7 @@ function normalizePinboardStickyColor(value: unknown, palette: any): string {
   return colors[0] ?? "white";
 }
 
-function rememberPinboardNewColor(value: unknown, palette: any = state.world?.pinboard?.palette) {
+function rememberPinboardNewColor(value: unknown, palette: any = pinboardModel()?.palette) {
   const color = normalizePinboardStickyColor(value, palette);
   state.pinboardNewColor = color;
   writeStorage(pinboardNewColorKey, color);
@@ -3492,7 +3652,7 @@ function bindPinboard() {
       const text = (textInput?.value ?? state.pinboardNewText).trim();
       if (!text) return;
       const placement = newPinNotePlacement();
-      const color = normalizePinboardStickyColor(colorInput?.value, state.world?.pinboard?.palette);
+      const color = normalizePinboardStickyColor(colorInput?.value, pinboardModel()?.palette);
       rememberPinboardNewColor(color);
       pinboardCall("add_note", [text, color, placement.x, placement.y, placement.w, placement.h]);
       state.pinboardNewText = "";
@@ -3513,14 +3673,15 @@ function bindPinboard() {
       const text = input.value;
       if (!id || text === input.dataset.original) return;
       input.dataset.original = text;
-      pinboardTargetCall(id, "set_text", [text.split(/\r?\n/)]);
+      const lines = text.split(/\r?\n/);
+      pinboardTargetCall(id, "set_text", [lines], pinboardNoteOptimistic(id, { text: lines }));
     });
   });
   document.querySelectorAll<HTMLSelectElement>("[data-pin-note-color]").forEach((select) => {
     select.addEventListener("change", () => {
       const id = select.dataset.pinNoteColor ?? "";
       rememberPinboardNewColor(select.value);
-      if (id) pinboardTargetCall(id, "set_color", [select.value]);
+      if (id) pinboardTargetCall(id, "set_color", [select.value], pinboardNoteOptimistic(id, { color: select.value === "white" ? null : select.value }));
     });
   });
   document.querySelectorAll<HTMLButtonElement>("[data-pin-note-action]").forEach((button) => {
@@ -3629,7 +3790,7 @@ function applySpaceChatHeight(panel: HTMLElement, height: number) {
 
 function bringPinNoteToTop(id: string) {
   if (!id) return;
-  const notes = Array.isArray(state.world?.pinboard?.notes) ? state.world.pinboard.notes : [];
+  const notes = pinboardModel()?.notes ?? [];
   let max = 0;
   for (const n of notes) {
     const z = pinNoteNumber(n?.z, 1);
@@ -3676,7 +3837,7 @@ function refreshPinboardMap() {
   const shell = document.querySelector<HTMLElement>("[data-pinboard-map-shell]");
   const data = pinboardMapData();
   if (!shell || !data) return;
-  shell.innerHTML = renderPinboardMap(data.notes, data.present, data.width, data.height);
+  shell.innerHTML = renderPinboardMap(data.notes, data.present, data.width, data.height, data.palette);
   bindPinboardMap();
 }
 
@@ -3713,15 +3874,16 @@ function updatePinboardMapViewports() {
   }
 }
 
-function pinboardMapData(): { notes: any[]; present: string[]; width: number; height: number } | undefined {
-  const pinboard = state.world?.pinboard;
+function pinboardMapData(): { notes: any[]; present: string[]; width: number; height: number; palette: string[] } | undefined {
+  const pinboard = pinboardModel();
   if (!pinboard) return undefined;
   const viewport = pinboard?.viewport ?? { w: 960, h: 560 };
   return {
     width: pinNoteNumber(viewport.w, 960),
     height: pinNoteNumber(viewport.h, 560),
     present: Array.isArray(pinboard?.present) ? pinboard.present : [],
-    notes: Array.isArray(pinboard?.notes) ? pinboard.notes : []
+    notes: Array.isArray(pinboard?.notes) ? pinboard.notes : [],
+    palette: pinboardPalette(pinboard?.palette)
   };
 }
 
@@ -3890,7 +4052,8 @@ function pinboardViewportChanged(next: PinNoteBox & { scale: number }, prev: (Pi
 
 function pinboardActorPresent() {
   const board = pinboardSpace();
-  return Boolean(state.actor && board && state.world?.session?.current_location === board);
+  const currentLocation = scopedProjectionEnabled ? state.scopedProjection?.session?.current_location : state.world?.session?.current_location;
+  return Boolean(state.actor && board && currentLocation === board);
 }
 
 function panPinboardBy(dx: number, dy: number) {
@@ -4079,8 +4242,14 @@ function setPinboardPresent(result: any) {
       : Array.isArray(result?.present_actors)
         ? result.present_actors
         : [];
+  const presentIds = idsFromRefsOrSummaries(present);
+  const boardId = pinboardSpace();
+  if (boardId) ui.applyCanonical([{ subject: boardId, props: { subscribers: presentIds } }]);
+  // Compatibility write for the legacy pinboard branch. The projection write
+  // above is the real scoped-model update; this side goes away with the
+  // remaining `state.world.pinboard` fallback.
   if (!state.world?.pinboard) return;
-  state.world.pinboard.present = idsFromRefsOrSummaries(present);
+  state.world.pinboard.present = presentIds;
   const board = state.world.pinboard.board;
   if (board?.props) board.props.subscribers = state.world.pinboard.present;
   const presentActors = new Set(state.world.pinboard.present);
@@ -4101,7 +4270,7 @@ function pinboardTargetCall(target: string, verb: string, args: any[] = [], opti
 
 function refreshPinboardNotes(options: { force?: boolean } = {}) {
   const board = pinboardSpace();
-  if (!board || !canSendDirect() || !state.world?.pinboard) return;
+  if (!board || !canSendDirect()) return;
   if (pinboardNotesRefreshPending && options.force !== true) return;
   pinboardNotesRefreshPending = true;
   window.setTimeout(() => {
@@ -4109,9 +4278,8 @@ function refreshPinboardNotes(options: { force?: boolean } = {}) {
   }, 2500);
   direct(board, "list_notes", [], (result) => {
     pinboardNotesRefreshPending = false;
-    if (!Array.isArray(result) || !state.world?.pinboard) return;
-    state.world.pinboard.notes = normalizePinboardNotes(result, state.world.pinboard.notes);
-    ui.ingestWorld(state.world);
+    if (!Array.isArray(result)) return;
+    applyPinboardNotesCanonical(board, result);
     if (state.tab === "pinboard") render();
   }, () => {
     pinboardNotesRefreshPending = false;
@@ -4119,6 +4287,43 @@ function refreshPinboardNotes(options: { force?: boolean } = {}) {
     // failure (cold remote DO, network blip) ate this list_notes call.
     pinboardTextHydrationRequested = false;
   });
+}
+
+function applyPinboardNotesCanonical(board: string, result: any[]) {
+  const previous = pinboardModel()?.notes ?? state.world?.pinboard?.notes ?? [];
+  const notes = normalizePinboardNotes(result, previous);
+  const layout: Record<string, any> = {};
+  const patches: ProjectionPatch[] = [];
+  for (const note of notes) {
+    const id = String(note?.id ?? "");
+    if (!id) continue;
+    layout[id] = {
+      x: pinNoteNumber(note?.x, 48),
+      y: pinNoteNumber(note?.y, 48),
+      w: pinNoteNumber(note?.w, 180),
+      h: pinNoteNumber(note?.h, 110),
+      z: pinNoteNumber(note?.z, 1)
+    };
+    patches.push({
+      subject: id,
+      fields: {
+        name: typeof note?.name === "string" ? note.name : undefined,
+        owner: typeof note?.owner === "string" ? note.owner : typeof note?.author === "string" ? note.author : undefined
+      },
+      catalogState: { pinboard_note: pinboardNoteState(note) }
+    });
+  }
+  patches.unshift({ subject: board, props: { layout } });
+  ui.applyCanonical(patches);
+  if (state.world?.pinboard) state.world.pinboard.notes = notes;
+}
+
+function pinboardNoteState(note: any): Record<string, unknown> {
+  const fields: Record<string, unknown> = {};
+  for (const key of ["x", "y", "z", "w", "h", "text", "color", "author", "owner", "writers", "created_at", "updated_at", "updated_by"]) {
+    if (note?.[key] !== undefined) fields[key] = note[key];
+  }
+  return fields;
 }
 
 function pinNoteNumber(value: any, fallback: number) {

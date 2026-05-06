@@ -624,9 +624,12 @@ Status: initial overlay-snapshot bridge implemented.
 Open after this slice: the current renderers still consume a compatibility
 world assembled from scoped snapshots. Dubspace still uses compatibility
 metadata for object ids and layout assembly, but its control state no longer
-depends on the compatibility object map. Full Phase 4 still needs native
-framework reads for pinboard/taskspace renderers and proper observation
-reducers for task creation/movement and pin add/delete/text edits.
+depends on the compatibility object map. Pinboard note rendering now reads note
+layout/text/color through the framework projection; overlay snapshots seed
+`catalogState.pinboard_note`, `list_notes` folds authoritative note records into
+canonical projection, and note text/color edits use the same optimistic layer as
+move/resize. Full Phase 4 still needs taskspace native framework reads and
+proper observation reducers for task creation/movement.
 Bundled demo object ids are used only as a transitional route allowlist; custom
 installed worlds need a runtime scoped-route feed before their object URLs can
 default to scoped mode. Chat, dubspace, and pinboard `leave`/`out` verbs now
@@ -635,7 +638,8 @@ return move-shaped results with `here_request`; the client-side
 collapsed into the ordinary move-result path.
 
 - Finish dubspace by moving object-id/frame assembly out of `state.world`.
-- Migrate pinboard rendering to generic projection state.
+- Finish pinboard by removing the remaining compatibility-world id/source
+  fallbacks once the componentized board renderer lands.
 - Migrate taskspace to overlay snapshot plus observation reducers.
 - Migrate mini-chat/current-room UI to `here` and observation reducers.
 
@@ -670,6 +674,8 @@ Framework/client tests:
   projection.
 - pinboard move/resize uses generic optimistic patches, not pinboard-only
   pending state.
+- pinboard text/color edits reduce through `catalogState.pinboard_note`, and
+  stale overlay snapshots do not overwrite optimistic note text.
 - move result replaces `here` atomically and does not call `/api/state`.
 - reconnect calls `/api/me`, ingests scoped snapshots, and replays gaps.
 - `/api/me` + WS race: observations emitted after the snapshot cursor are

@@ -6662,7 +6662,79 @@ export class WooWorld {
     }));
     for (const actor of stale) this.updateSpaceSubscriberLocal(space, actor, false);
     const keptSet = new Set(kept);
-    return subscribers.filter((actor) => keptSet.has(actor));
+    const survivingActors = subscribers.filter((actor) => keptSet.has(actor));
+    // Sibling scrub: drop session_subscribers rows whose session has been
+    // reaped on this DO but whose row was never cleaned up because
+    // `removeSessionPresence` walks only the local object map and has no
+    // way to learn that a different DO recently expired a session it shares.
+    // Conservative scope — only sessions present in this DO's table and
+    // already expired. Bridge-era and cross-host rows whose session was
+    // never synced here are left alone; the actor-level scrub above is
+    // the authority on those.
+    this.scrubExpiredSessionSubscribersForSpace(space);
+    return survivingActors;
+  }
+
+  /**
+   * Drop entries in `<space>.session_subscribers` whose session is present
+   * in this DO's session table AND already expired. Recomputes the
+   * actor-level `subscribers` mirror from the surviving rows so both views
+   * stay consistent. Invalidates the presence index when anything changes.
+   * Caller is expected to have already paid the per-space scrub throttle.
+   *
+   * Intentionally narrow: rows whose session is missing from `this.sessions`
+   * may legitimately belong to a different DO that hasn't synced the session
+   * here yet, so dropping them would race cross-host setup. The actor-level
+   * scrub already handles dropping subscribers whose remote-host
+   * actorSessionLocations no longer reports this space; the broadcast layer
+   * (broadcastLiveEvent) handles the data-pollution case where rows remain
+   * but don't resolve to live sockets.
+   *
+   * `legacy:<actor>` placeholder entries are kept regardless: they are
+   * synthesized by `updateSpaceSubscriberLocal` for bridge-era hosts that
+   * have no per-session attribution.
+   */
+  private scrubExpiredSessionSubscribersForSpace(space: ObjRef): boolean {
+    if (!this.objects.has(space)) return false;
+    const raw = this.propOrNull(space, "session_subscribers");
+    if (!Array.isArray(raw) || raw.length === 0) return false;
+    const now = Date.now();
+    let changed = false;
+    const out: WooValue[] = [];
+    for (const entry of raw) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        changed = true;
+        continue;
+      }
+      const map = entry as Record<string, WooValue>;
+      const sessionId = typeof map.session === "string" ? map.session : "";
+      const actor = typeof map.actor === "string" ? (map.actor as ObjRef) : "";
+      if (!sessionId || !actor) {
+        changed = true;
+        continue;
+      }
+      if (sessionId.startsWith("legacy:")) {
+        out.push(entry);
+        continue;
+      }
+      const session = this.sessions.get(sessionId);
+      if (session && this.sessionExpired(session, now)) {
+        changed = true;
+        continue;
+      }
+      out.push(entry);
+    }
+    if (!changed) return false;
+    const nextActors = Array.from(new Set(out
+      .map((entry) => (entry as Record<string, WooValue>).actor)
+      .filter((actor): actor is ObjRef => typeof actor === "string")
+    )).sort();
+    this.withPersistenceDeferred(() => {
+      this.setProp(space, "session_subscribers", out as unknown as WooValue);
+      this.setProp(space, "subscribers", nextActors as unknown as WooValue);
+    });
+    if (this.presenceIndexBuilt) this.invalidatePresenceIndex();
+    return true;
   }
 
   private async defaultLookSelf(ctx: CallContext): Promise<WooValue> {

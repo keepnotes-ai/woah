@@ -729,6 +729,77 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
     }
   });
 
+  it("scrubs session_subscribers rows whose session is in this DO's table and expired", async () => {
+    // Regression: rows in `<space>.session_subscribers` whose session has
+    // expired on this DO sit there forever once the actor-level scrub no
+    // longer reaches them — `removeSessionPresence` is only called when
+    // `reapSession` runs on this DO, and that loop is racy on cold-start
+    // hosts. The session-level sibling scrub now drops any expired-in-table
+    // row alongside the actor-level pass, recomputing the `subscribers`
+    // mirror from the survivors.
+    //
+    // Scope is intentionally narrow: rows whose session is unknown to this
+    // DO are left alone, since they may legitimately belong to a different
+    // DO that hasn't synced the session here. The data pollution observed
+    // in production (`session-N` counter rows whose sessions had been
+    // reaped everywhere) is dealt with by broadcastLiveEvent's actor-keyed
+    // fallback in src/worker/persistent-object-do.ts; only DO replacement
+    // or an explicit wizard sweep clears those rows from disk.
+    const harness = make();
+    try {
+      const world = harness.world;
+      const live = world.auth("guest:conf-session-scrub-live");
+      world.createObject({ id: "conf_session_scrub_room", name: "Session Scrub Room", parent: "$chatroom", owner: "$wiz" });
+      world.setProp("conf_session_scrub_room", "features", ["$conversational"]);
+      const expiredAuth = world.auth("guest:conf-session-scrub-expired");
+      const expired = world.sessions.get(expiredAuth.id);
+      if (!expired) throw new Error("expected expired session in table");
+      expired.expiresAt = Date.now() - 60_000;
+      expired.lastDetachAt = Date.now() - 60_000;
+      // Pre-populate: live row, expired-in-table row, malformed row,
+      // `legacy:` placeholder, and an unknown-session row representing a
+      // hypothetical cross-host bridge subscriber. The unknown row must
+      // survive — see scope note above.
+      world.setProp("conf_session_scrub_room", "session_subscribers", [
+        { session: live.id, actor: live.actor },
+        { session: expired.id, actor: expiredAuth.actor },
+        { session: "", actor: "guest_blank" },
+        { session: `legacy:${live.actor}`, actor: live.actor },
+        { session: "session-cross-host", actor: "guest_remote" }
+      ]);
+      world.setProp("conf_session_scrub_room", "subscribers", [
+        live.actor,
+        expiredAuth.actor,
+        "guest_blank",
+        "guest_remote"
+      ]);
+      world.setActorPresence(live.actor, "conf_session_scrub_room", true);
+      world.object(live.actor).location = "conf_session_scrub_room";
+      world.sessions.get(live.id)!.currentLocation = "conf_session_scrub_room";
+
+      // First call paid the per-space throttle and runs both scrubs.
+      const looked = await world.directCall("conf-session-scrub-look", live.actor, "conf_session_scrub_room", "look", []);
+      expect(looked.op, looked.op === "error" ? JSON.stringify(looked.error) : "").toBe("result");
+
+      const remainingRows = world.getProp("conf_session_scrub_room", "session_subscribers") as Array<{ session: string; actor: string }>;
+      expect(remainingRows.map((row) => row.session).sort()).toEqual([
+        live.id,
+        `legacy:${live.actor}`,
+        "session-cross-host"
+      ].sort());
+      // Both scrubs collaborated to recompute `subscribers`: the actor-level
+      // pass dropped guest_blank (no live presence anywhere); the session
+      // pass dropped expiredAuth.actor; guest_remote stays because its row
+      // is still in session_subscribers.
+      expect((world.getProp("conf_session_scrub_room", "subscribers") as ObjRef[]).sort()).toEqual([
+        live.actor,
+        "guest_remote"
+      ].sort());
+    } finally {
+      harness.cleanup();
+    }
+  });
+
   it("resolves commands against a remote current room and cross-host room contents", async () => {
     const homeHarness = make();
     const roomHarness = make();

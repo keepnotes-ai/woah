@@ -148,6 +148,27 @@ describe("recycle", () => {
     expect(world.object(grand).children.has(middle)).toBe(false);
   });
 
+  it("does not displace contents whose actual location has drifted away from obj (cache-stale safety)", async () => {
+    const world = createWorld();
+    const { actor } = builderActor(world);
+    const container = world.createAuthoredObject(actor, { parent: "$thing", name: "Container" });
+    const item = world.createAuthoredObject(actor, { parent: "$thing", name: "Item" });
+    const elsewhere = world.createAuthoredObject(actor, { parent: "$thing", name: "Elsewhere" });
+
+    // Put item in container, then drift the cache: item's real location
+    // moves but container.contents still mentions it. Per objects.md §4.3,
+    // location is the source of truth; contents is a cache that may drift.
+    world.moveAuthoredObject(actor, item, container);
+    expect(world.object(container).contents.has(item)).toBe(true);
+    world.object(item).location = elsewhere;
+
+    await recycleVia(world, actor, container, { force: true });
+    expect(world.objects.has(container)).toBe(false);
+    // The item's location was NOT obj at recycle time, so it must NOT be
+    // moved to $nowhere by recycle's contents-displacement step.
+    expect(world.object(item).location).toBe(elsewhere);
+  });
+
   it("with force: true, displaces contents to $nowhere (sink semantics)", async () => {
     const world = createWorld();
     const { actor } = builderActor(world);
@@ -516,6 +537,54 @@ describe("recycle", () => {
     expect(result.op).toBe("error");
     if (result.op === "error") expect(result.error.code).toBe("E_PERM");
     expect(world.objects.has(klass)).toBe(true);
+  });
+
+  it("directory_reconcile_corenames recursively scrubs lists and maps", async () => {
+    const world = createWorld();
+    const { actor: wiz } = wizActor(world);
+
+    const a = world.createAuthoredObject(wiz, { parent: "$thing", name: "A" });
+    const b = world.createAuthoredObject(wiz, { parent: "$thing", name: "B" });
+    const c = world.createAuthoredObject(wiz, { parent: "$thing", name: "C" });
+    world.defineProperty("$system", { name: "ref_list", defaultValue: [], owner: "$wiz", perms: "rw", typeHint: "list<obj>" });
+    world.defineProperty("$system", { name: "ref_map", defaultValue: {}, owner: "$wiz", perms: "rw", typeHint: "map<str,obj>" });
+    world.setProp("$system", "ref_list", [a, b, c]);
+    world.setProp("$system", "ref_map", { primary: a, fallback: b });
+
+    // Tombstone a directly (without going through recycle, so the
+    // post-commit sweep doesn't fire) and then run the janitor.
+    world.tombstones.add(a);
+    const cleared = world.reconcileTombstoneRefsInSystem();
+    expect(cleared).toContain("ref_list");
+    expect(cleared).toContain("ref_map");
+    expect(world.getProp("$system", "ref_list")).toEqual([b, c]);
+    expect(world.getProp("$system", "ref_map")).toEqual({ fallback: b });
+  });
+
+  it("wiz:force_recycle re-checks A4 after the handler runs (host-only impl is satisfied)", async () => {
+    const world = createWorld();
+    const { actor: wiz } = wizActor(world);
+
+    const klass = world.createAuthoredObject(wiz, { parent: "$thing", name: "Class with handler" });
+    world.object(klass).flags.fertile = true;
+    installVerbAs(world, wiz, klass, "recycle",
+      `verb :recycle() rx { observe({ "type": "force_recycle_handler", "obj": this }); return 0; }`,
+      null
+    );
+    const inst = world.createAuthoredObject(wiz, { parent: klass, name: "Instance" });
+
+    const result = await world.directCall(`force-handler-${Date.now()}`, wiz, wiz, "force_recycle", [inst, {}]);
+    expect(result.op).toBe("result");
+    if (result.op === "result") {
+      // The handler observation came through, demonstrating that the
+      // handler ran. The post-handler A4 recheck then ran (single-host
+      // worlds have no remote refs, so the recheck is a no-op pass) and
+      // the apply phase committed.
+      const obs = result.observations.filter((o) => o.type === "force_recycle_handler");
+      expect(obs).toHaveLength(1);
+    }
+    expect(world.objects.has(inst)).toBe(false);
+    expect(world.tombstones.has(inst)).toBe(true);
   });
 
   it("verb dispatch falls back to inherited verb after the defining ancestor is recycled (RC3.7)", async () => {

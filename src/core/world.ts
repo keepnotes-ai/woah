@@ -528,20 +528,68 @@ export class WooWorld {
    * runs against the Directory's `corename` table per
    * spec/reference/persistence.md §14.2.
    *
+   * Walks scalar, list, and map values: a scalar tombstoned ref becomes
+   * null; list elements that point at tombstones are removed; map entries
+   * whose value is tombstoned are removed (keys are not interpreted as
+   * ULIDs). Names of properties whose value structure changed are
+   * returned, sorted.
+   *
    * Idempotent: safe to call multiple times; never-tombstoned and missing
    * values are no-ops.
    */
   reconcileTombstoneRefsInSystem(): string[] {
-    const cleared: string[] = [];
+    const cleared = new Set<string>();
     const sys = this.objects.get("$system");
-    if (!sys) return cleared;
+    if (!sys) return [];
     for (const [name, value] of sys.properties) {
-      if (typeof value === "string" && this.tombstones.has(value)) {
-        cleared.push(name);
-        this.setProp("$system", name, null);
+      const next = this.scrubTombstoneRefs(value);
+      if (!valuesEqual(value, next)) {
+        cleared.add(name);
+        this.setProp("$system", name, next);
       }
     }
-    return cleared.sort();
+    return Array.from(cleared).sort();
+  }
+
+  /**
+   * Recursively rewrite a value, replacing scalar tombstoned ULID
+   * references with null and pruning them from list/map containers.
+   * Returns the value unchanged if no rewrite was needed.
+   */
+  private scrubTombstoneRefs(value: WooValue): WooValue {
+    if (typeof value === "string") {
+      return this.tombstones.has(value) ? null : value;
+    }
+    if (Array.isArray(value)) {
+      const out: WooValue[] = [];
+      let changed = false;
+      for (const entry of value) {
+        if (typeof entry === "string" && this.tombstones.has(entry)) {
+          changed = true;
+          continue;
+        }
+        const next = this.scrubTombstoneRefs(entry);
+        if (!valuesEqual(entry, next)) changed = true;
+        out.push(next);
+      }
+      return changed ? out as WooValue : value;
+    }
+    if (value && typeof value === "object") {
+      const src = value as Record<string, WooValue>;
+      const out: Record<string, WooValue> = {};
+      let changed = false;
+      for (const [key, entry] of Object.entries(src)) {
+        if (typeof entry === "string" && this.tombstones.has(entry)) {
+          changed = true;
+          continue;
+        }
+        const next = this.scrubTombstoneRefs(entry);
+        if (!valuesEqual(entry, next)) changed = true;
+        out[key] = next;
+      }
+      return changed ? out as WooValue : value;
+    }
+    return value;
   }
 
   defineProperty(obj: ObjRef, def: Omit<PropertyDef, "version"> & { version?: number }): PropertyDef {
@@ -2413,29 +2461,8 @@ export class WooWorld {
     // $recycle_handler_error observation; recycle proceeds.
     await this.invokeRecycleHandler(objRef, ctx);
 
-    // Apply step 1a: post-handler A4 re-check. The handler may have moved
-    // an object into obj.contents or otherwise altered the graph since
-    // pre-flight. Re-verify cluster collocation; if violated, abort.
-    if (await this.remoteHostForObject(objRef)) {
-      throw wooError("E_CROSS_HOST_WRITE", `recycle: handler moved obj across clusters: ${objRef}`, { actor, obj: objRef });
-    }
-    const objAfter = this.object(objRef);
-    if (objAfter.parent && objAfter.parent !== "$nowhere" && await this.remoteHostForObject(objAfter.parent)) {
-      throw wooError("E_CROSS_HOST_WRITE", `recycle: handler reparented across clusters: ${objRef} -> ${objAfter.parent}`, { actor, obj: objRef, parent: objAfter.parent });
-    }
-    if (objAfter.location && objAfter.location !== "$nowhere" && await this.remoteHostForObject(objAfter.location)) {
-      throw wooError("E_CROSS_HOST_WRITE", `recycle: handler relocated across clusters: ${objRef} -> ${objAfter.location}`, { actor, obj: objRef, location: objAfter.location });
-    }
-    for (const child of objAfter.children) {
-      if (child !== "$nowhere" && await this.remoteHostForObject(child)) {
-        throw wooError("E_CROSS_HOST_WRITE", `recycle: handler introduced cross-cluster child: ${objRef} -> ${child}`, { actor, obj: objRef, child });
-      }
-    }
-    for (const content of objAfter.contents) {
-      if (content !== "$nowhere" && await this.remoteHostForObject(content)) {
-        throw wooError("E_CROSS_HOST_WRITE", `recycle: handler introduced cross-cluster content: ${objRef} -> ${content}`, { actor, obj: objRef, content });
-      }
-    }
+    // Apply step 1a: post-handler A4 re-check.
+    await this.assertPostHandlerCollocation(actor, objRef);
 
     this.recycleObjectLocal(objRef);
 
@@ -2537,10 +2564,11 @@ export class WooWorld {
     }
     const sessions_killed = sessionsToKill.length;
 
-    // Apply: handler, parked-task kill, graft/displace, storage delete,
-    // tombstone, post-commit corename sweep. Same path as ordinary
-    // recycle.
+    // Apply: handler, post-handler A4 recheck, parked-task kill,
+    // graft/displace, storage delete, tombstone, post-commit corename
+    // sweep. Same path as ordinary recycle.
     await this.invokeRecycleHandler(objRef, ctx);
+    await this.assertPostHandlerCollocation(actor, objRef);
     this.recycleObjectLocal(objRef);
     try {
       this.reconcileTombstoneRefsInSystem();
@@ -2582,6 +2610,41 @@ export class WooWorld {
    * to the resolved verb's owner (standard programmer discipline), this =
    * obj, caller = obj. Recycle proceeds regardless of handler outcome.
    */
+  /**
+   * Apply step 1a: re-verify A4 cluster collocation after the :recycle
+   * handler has run. The handler may have moved obj into another cluster,
+   * reparented it, relocated it, or introduced cross-cluster
+   * children/contents — pre-flight only checked the world as it was
+   * before the handler. If the recheck fails, abort: the handler's
+   * intra-cluster mutations roll back with the host transaction;
+   * cross-cluster mutations are explicitly out of scope (§RC3.1).
+   *
+   * Used by both ordinary recycle and wiz_force_recycle so they enforce
+   * the same atomicity invariant.
+   */
+  private async assertPostHandlerCollocation(actor: ObjRef, objRef: ObjRef): Promise<void> {
+    if (await this.remoteHostForObject(objRef)) {
+      throw wooError("E_CROSS_HOST_WRITE", `recycle: handler moved obj across clusters: ${objRef}`, { actor, obj: objRef });
+    }
+    const objAfter = this.object(objRef);
+    if (objAfter.parent && objAfter.parent !== "$nowhere" && await this.remoteHostForObject(objAfter.parent)) {
+      throw wooError("E_CROSS_HOST_WRITE", `recycle: handler reparented across clusters: ${objRef} -> ${objAfter.parent}`, { actor, obj: objRef, parent: objAfter.parent });
+    }
+    if (objAfter.location && objAfter.location !== "$nowhere" && await this.remoteHostForObject(objAfter.location)) {
+      throw wooError("E_CROSS_HOST_WRITE", `recycle: handler relocated across clusters: ${objRef} -> ${objAfter.location}`, { actor, obj: objRef, location: objAfter.location });
+    }
+    for (const child of objAfter.children) {
+      if (child !== "$nowhere" && await this.remoteHostForObject(child)) {
+        throw wooError("E_CROSS_HOST_WRITE", `recycle: handler introduced cross-cluster child: ${objRef} -> ${child}`, { actor, obj: objRef, child });
+      }
+    }
+    for (const content of objAfter.contents) {
+      if (content !== "$nowhere" && await this.remoteHostForObject(content)) {
+        throw wooError("E_CROSS_HOST_WRITE", `recycle: handler introduced cross-cluster content: ${objRef} -> ${content}`, { actor, obj: objRef, content });
+      }
+    }
+  }
+
   private async invokeRecycleHandler(objRef: ObjRef, ctx?: CallContext): Promise<void> {
     let verbExists = false;
     try {
@@ -4179,13 +4242,23 @@ export class WooWorld {
       }
     }
 
-    // Step 4: displace contents to $nowhere. $nowhere.contents is not
-    // maintained (per spec/semantics/bootstrap.md §B2.15 sink semantics), so
-    // we set only the local `c.location` and skip the back-reference write.
+    // Step 4: displace contents to $nowhere. Per spec/semantics/recycle.md
+    // §RC3 step 4: "for each contained `c` whose `location == obj`". The
+    // location field is the source of truth; obj.contents is a cache that
+    // may drift (objects.md §4.3). A stale cache entry whose actual
+    // location is somewhere else must NOT be re-located by recycle —
+    // verify before mutating. $nowhere.contents is not maintained (sink
+    // semantics, bootstrap.md §B2.15), so we set only the local
+    // `c.location` and skip the back-reference write.
     const contentsSnapshot = Array.from(obj.contents);
     for (const content of contentsSnapshot) {
       if (!this.objects.has(content)) continue;
       const contentObj = this.object(content);
+      if (contentObj.location !== objRef) {
+        // Stale cache entry — drop it from obj.contents but leave the
+        // referenced object's location alone.
+        continue;
+      }
       contentObj.location = "$nowhere";
       contentObj.modified = Date.now();
       this.persistObject(content);

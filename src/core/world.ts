@@ -506,6 +506,35 @@ export class WooWorld {
     return this.tombstones.has(id);
   }
 
+  /**
+   * Sweep $system's own properties for any value pointing at a tombstoned
+   * ULID, and clear it (set to null). Returns the list of property names
+   * whose value was cleared.
+   *
+   * Per spec/semantics/recycle.md §RC3 step 10 ("forget the corename
+   * binding") and §RC5 (dangling-ref janitor). In the single-host backend,
+   * a "corename" is just an ordinary property on $system whose value is
+   * an ULID (e.g., `$system.help_dbs` holding `[$help_db_main]`). When
+   * the CF backend lands its separate Directory DO, this reconciliation
+   * runs against the Directory's `corename` table per
+   * spec/reference/persistence.md §14.2.
+   *
+   * Idempotent: safe to call multiple times; never-tombstoned and missing
+   * values are no-ops.
+   */
+  reconcileTombstoneRefsInSystem(): string[] {
+    const cleared: string[] = [];
+    const sys = this.objects.get("$system");
+    if (!sys) return cleared;
+    for (const [name, value] of sys.properties) {
+      if (typeof value === "string" && this.tombstones.has(value)) {
+        cleared.push(name);
+        this.setProp("$system", name, null);
+      }
+    }
+    return cleared.sort();
+  }
+
   defineProperty(obj: ObjRef, def: Omit<PropertyDef, "version"> & { version?: number }): PropertyDef {
     this.assertOrdinaryPropertyName(def.name);
     const target = this.object(obj);
@@ -2372,6 +2401,19 @@ export class WooWorld {
     }
 
     this.recycleObjectLocal(objRef);
+
+    // Step 10: post-commit corename removal. In the single-host backend,
+    // `$foo` IS the object's id, so `objects.delete(objRef)` already
+    // unbinds the corename. As a defensive sweep we also walk $system's
+    // own properties and clear any whose value is the tombstoned ULID — a
+    // catalog or wizard verb that stamped `$system.my_link = obj` will see
+    // `null` after recycle. Per spec/semantics/recycle.md §RC3 step 10.
+    // Best-effort and idempotent; failure here does NOT abort recycle.
+    try {
+      this.reconcileTombstoneRefsInSystem();
+    } catch {
+      // Ignored: see janitor contract above.
+    }
     return result;
   }
 
@@ -5091,7 +5133,7 @@ export class WooWorld {
     if (!this.canCarryFeatures(objRef)) throw wooError("E_NOTAPPLICABLE", `${objRef} cannot carry features`, objRef);
   }
 
-  private isWizard(actor: ObjRef): boolean {
+  isWizard(actor: ObjRef): boolean {
     return this.canBypassPerms(actor);
   }
 

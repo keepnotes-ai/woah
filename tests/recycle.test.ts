@@ -270,6 +270,51 @@ describe("recycle", () => {
     }
   });
 
+  it("clears stale $system property bindings after recycle (step 10 sweep)", async () => {
+    const world = createWorld();
+    const { actor: wiz } = wizActor(world);
+
+    const target = world.createAuthoredObject(wiz, { parent: "$thing", name: "Target" });
+    // Stamp a corename-shaped binding on $system.
+    world.defineProperty("$system", { name: "my_special_obj", defaultValue: null, owner: "$wiz", perms: "rw", typeHint: "obj" });
+    world.setProp("$system", "my_special_obj", target);
+    expect(world.getProp("$system", "my_special_obj")).toBe(target);
+
+    await recycleVia(world, wiz, target);
+
+    // After recycle, the binding should be cleared so $system.my_special_obj
+    // no longer points at a tombstoned ULID.
+    expect(world.getProp("$system", "my_special_obj")).toBeNull();
+    expect(world.tombstones.has(target)).toBe(true);
+  });
+
+  it("directory_reconcile_corenames is idempotent and reports cleared bindings", async () => {
+    const world = createWorld();
+    const { actor: wiz } = wizActor(world);
+
+    const a = world.createAuthoredObject(wiz, { parent: "$thing", name: "A" });
+    const b = world.createAuthoredObject(wiz, { parent: "$thing", name: "B" });
+    world.defineProperty("$system", { name: "link_a", defaultValue: null, owner: "$wiz", perms: "rw", typeHint: "obj" });
+    world.defineProperty("$system", { name: "link_b", defaultValue: null, owner: "$wiz", perms: "rw", typeHint: "obj" });
+    world.setProp("$system", "link_a", a);
+    world.setProp("$system", "link_b", b);
+
+    // Recycle clears link_a as part of step 10.
+    await recycleVia(world, wiz, a);
+    expect(world.getProp("$system", "link_a")).toBeNull();
+    expect(world.getProp("$system", "link_b")).toBe(b);
+
+    // Tombstone b directly to simulate a missed step-10 sweep, then run
+    // the wizard janitor.
+    world.tombstones.add(b);
+    const cleared = world.reconcileTombstoneRefsInSystem();
+    expect(cleared).toContain("link_b");
+    expect(world.getProp("$system", "link_b")).toBeNull();
+
+    // Idempotent: running again with no tombstoned bindings returns [].
+    expect(world.reconcileTombstoneRefsInSystem()).toEqual([]);
+  });
+
   it("kills parked tasks anchored to the recycled object", async () => {
     const world = createWorld();
     const { actor: wiz } = wizActor(world);

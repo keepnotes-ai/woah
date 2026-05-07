@@ -574,6 +574,7 @@ const VALID_BUILTINS = new Set([
   "has_flag",
   "isa",
   "is_recycled",
+  "directory_reconcile_corenames",
   "random",
   "contents",
   "location",

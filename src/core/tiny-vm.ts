@@ -109,7 +109,7 @@ const MAX_RUNTIME_LOCALS = 1_024;
 const MAX_RUNTIME_STACK = 4_096;
 const BUILTIN_NAMES = [
   "length", "keys", "values", "has", "typeof", "to_string", "min", "max", "floor", "ceil", "round", "abs",
-  "now", "create", "move", "moveto", "chparent", "has_flag", "isa", "is_recycled", "random", "contents", "location", "task_perms",
+  "now", "create", "move", "moveto", "chparent", "has_flag", "isa", "is_recycled", "directory_reconcile_corenames", "random", "contents", "location", "task_perms",
   "caller_perms", "set_task_perms", "set_presence", "observe_to_space", "tell",
   "current_location", "current_session", "session_location", "all_locations", "primary_session",
   "is_connected", "idle_seconds",
@@ -918,6 +918,15 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
       case "is_recycled": {
         if (builtinArgs.length !== 1) throw wooError("E_INVARG", "is_recycled expects one object");
         return frame.ctx.world.isRecycled(assertObj(builtinArgs[0]));
+      }
+      case "directory_reconcile_corenames": {
+        // Wizard-only janitor that walks $system's own properties and
+        // clears any whose value is a tombstoned ULID. Returns the list of
+        // property names cleared. Idempotent. Per spec §RC3 step 10 and
+        // §RC5 dangling-ref janitor.
+        if (builtinArgs.length !== 0) throw wooError("E_INVARG", "directory_reconcile_corenames expects no arguments");
+        if (!frame.ctx.world.isWizard(frame.ctx.progr)) throw wooError("E_PERM", "wizard authority required");
+        return frame.ctx.world.reconcileTombstoneRefsInSystem();
       }
       case "random": {
         const n = numeric(builtinArgs[0], "random argument");

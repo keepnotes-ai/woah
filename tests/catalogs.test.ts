@@ -2877,12 +2877,12 @@ describe("local catalogs", () => {
       if (delivered.op !== "result") return;
       const dRes = delivered.result as { delivered: boolean; note: string; text: string };
       expect(dRes.delivered).toBe(true);
-      expect(dRes.text).toContain("delivers a note to your inventory");
+      expect(dRes.text).toContain("hands you a note");
       expect(world.object(dRes.note).location).toBe(requester);
       expect(world.getProp(dRes.note, "produced_by")).toBe(blockId);
       expect(delivered.observations).toEqual(expect.arrayContaining([
-        expect.objectContaining({ type: "text", target: requester, text: expect.stringContaining("delivers a note to your inventory") }),
-        expect.objectContaining({ type: "delivered", block: blockId, requester, note: dRes.note, text: expect.stringContaining("delivers a note") })
+        expect.objectContaining({ type: "text", target: requester, text: expect.stringContaining("hands you a note") }),
+        expect.objectContaining({ type: "delivered", block: blockId, requester, note: dRes.note, text: expect.stringContaining("hands you a note") })
       ]));
       expect((world.getProp(blockId, "pending_orders") as unknown[]).length).toBe(0);
 
@@ -3136,12 +3136,12 @@ describe("local catalogs", () => {
       expect(delivered.op).toBe("result");
       if (delivered.op !== "result") return;
       const noteId = (delivered.result as { note: string }).note;
-      expect(delivered.result).toMatchObject({ text: expect.stringContaining("delivers a note to your inventory") });
+      expect(delivered.result).toMatchObject({ text: expect.stringContaining("hands you a note") });
       expect(world.object(noteId).location).toBe(requester);
       expect(world.getProp(noteId, "produced_by")).toBe(blockId);
       expect(world.getProp(noteId, "text")).toEqual(["Today the stars suggest sandwiches."]);
       expect(delivered.observations).toEqual(expect.arrayContaining([
-        expect.objectContaining({ type: "text", target: requester, text: expect.stringContaining("delivers a note to your inventory") })
+        expect.objectContaining({ type: "text", target: requester, text: expect.stringContaining("hands you a note") })
       ]));
     });
 

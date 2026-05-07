@@ -2446,6 +2446,121 @@ export class WooWorld {
   }
 
   /**
+   * Wizard-only force_recycle. Per spec/semantics/recycle.md §RC6.1.
+   *
+   * Bypasses most of the §RC6 reserved-list (universal classes other than
+   * the hard floor; live actors with explicit session teardown).
+   * Bypasses neither:
+   *   - The §RC2 wizard authority (actor must have wizard flag).
+   *   - The hard floor: $system, $root, $nowhere (not recoverable from
+   *     inside the running world).
+   *   - Pre-flight A3 (anchored descendants).
+   *   - Pre-flight A4 (cluster collocation): even a wizard cannot
+   *     atomically recycle across clusters in v1.
+   *
+   * For an actor target with live sessions, terminates each session
+   * (endSession) before invoking the apply phase. Records a
+   * wiz_force_recycle wizard_action audit entry and emits a
+   * wiz_force_recycle observation on the outer call frame.
+   */
+  async wizForceRecycle(actor: ObjRef, objRef: ObjRef, opts: WooValue, ctx?: CallContext): Promise<WooValue> {
+    if (!this.isWizard(actor)) throw wooError("E_PERM", "wizard authority required for force_recycle", { actor, obj: objRef });
+    const options = progOptions(opts);
+    const dryRun = optionBool(options, "dry_run", false);
+    const reason = optionMaybeString(options, "reason") ?? null;
+
+    // Hard floor — even force_recycle refuses these.
+    const hardFloor = new Set(["$system", "$root", "$nowhere"]);
+    if (hardFloor.has(objRef)) {
+      throw wooError("E_INVARG", `${objRef} cannot be force-recycled from inside the running world`, objRef);
+    }
+
+    const obj = this.object(objRef);
+
+    // A3 anchored descendants still applies.
+    const anchored = this.findAnchoredDescendants(objRef);
+    if (anchored.length > 0) throw wooError("E_NACC", `${objRef} has anchored descendants`, { obj: objRef, descendants: anchored as WooValue });
+
+    // A4 cluster collocation still applies.
+    if (await this.remoteHostForObject(objRef)) {
+      throw wooError("E_CROSS_HOST_WRITE", `cross-host force_recycle is not atomic: ${objRef}`, { actor, obj: objRef });
+    }
+    if (obj.parent && obj.parent !== "$nowhere" && await this.remoteHostForObject(obj.parent)) {
+      throw wooError("E_CROSS_HOST_WRITE", `force_recycle would cross clusters via parent: ${objRef} -> ${obj.parent}`, { actor, obj: objRef, parent: obj.parent });
+    }
+    if (obj.location && obj.location !== "$nowhere" && await this.remoteHostForObject(obj.location)) {
+      throw wooError("E_CROSS_HOST_WRITE", `force_recycle would cross clusters via location: ${objRef} -> ${obj.location}`, { actor, obj: objRef, location: obj.location });
+    }
+    for (const child of obj.children) {
+      if (child !== "$nowhere" && await this.remoteHostForObject(child)) {
+        throw wooError("E_CROSS_HOST_WRITE", `force_recycle would cross clusters via child: ${objRef} -> ${child}`, { actor, obj: objRef, child });
+      }
+    }
+    for (const content of obj.contents) {
+      if (content !== "$nowhere" && await this.remoteHostForObject(content)) {
+        throw wooError("E_CROSS_HOST_WRITE", `force_recycle would cross clusters via content: ${objRef} -> ${content}`, { actor, obj: objRef, content });
+      }
+    }
+
+    const sessionsToKill = this.inheritsFrom(objRef, "$actor") ? this.liveSessionsForActor(objRef) : [];
+    const impact: Record<string, WooValue> = {
+      id: objRef,
+      parent: obj.parent,
+      location: obj.location,
+      child_count: obj.children.size,
+      children: Array.from(obj.children).sort(),
+      contents_count: obj.contents.size,
+      contents: Array.from(obj.contents).sort(),
+      own_verbs: obj.verbs.length,
+      own_properties: obj.propertyDefs.size,
+      sessions_to_kill: sessionsToKill.map((s) => s.id) as WooValue
+    };
+
+    if (dryRun) {
+      return { ok: true, dry_run: true, id: objRef, impact: impact as WooValue, sessions_killed: 0 };
+    }
+
+    // Terminate live sessions before recycle so the apply phase sees an
+    // unbound actor (and any in-flight host_calls return E_GONE per
+    // failures.md §F7).
+    for (const session of sessionsToKill) {
+      this.endSession(session.id);
+    }
+    const sessions_killed = sessionsToKill.length;
+
+    // Apply: handler, parked-task kill, graft/displace, storage delete,
+    // tombstone, post-commit corename sweep. Same path as ordinary
+    // recycle.
+    await this.invokeRecycleHandler(objRef, ctx);
+    this.recycleObjectLocal(objRef);
+    try {
+      this.reconcileTombstoneRefsInSystem();
+    } catch {
+      // Best-effort: see step 10 contract.
+    }
+
+    // Audit. Per the spec, this is the only path that records a
+    // wiz_force_recycle wizard_action and emits a wiz_force_recycle
+    // observation on the outer call.
+    this.recordWizardAction(actor, "force_recycle", { obj: objRef, reason: reason as WooValue, sessions_killed });
+    if (ctx) {
+      const event: Observation = {
+        type: "wiz_force_recycle",
+        actor,
+        obj: objRef,
+        reason: reason as WooValue,
+        sessions_killed,
+        ts: Date.now(),
+        source: objRef
+      };
+      if (ctx.observe) ctx.observe(event);
+      else ctx.observations.push(event);
+    }
+
+    return { ok: true, dry_run: false, id: objRef, impact: impact as WooValue, sessions_killed };
+  }
+
+  /**
    * Apply step 1: dispatch :recycle on `obj` if defined. Resolves via
    * inherited verb-lookup so a handler on any ancestor fires.
    *

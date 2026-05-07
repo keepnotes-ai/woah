@@ -597,6 +597,7 @@ const VALID_BUILTINS = new Set([
   "builder_create_object",
   "builder_chparent",
   "builder_recycle",
+  "wiz_force_recycle",
   "builder_set_property",
   "builder_inspect",
   "builder_search",

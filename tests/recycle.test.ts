@@ -402,6 +402,92 @@ describe("recycle", () => {
     expect(world.objects.has(target)).toBe(false);
   });
 
+  it("wiz:force_recycle accepts a universal class that ordinary recycle refuses", async () => {
+    const world = createWorld();
+    const { actor: wiz } = wizActor(world);
+
+    // Create an isolated descendant of $sequenced_log so the universal
+    // class itself has no children that block recycle. We then build a
+    // sibling class to force_recycle.
+    const klass = world.createAuthoredObject(wiz, { parent: "$sequenced_log", name: "Targetable Log" });
+    expect(world.objects.has(klass)).toBe(true);
+
+    // Ordinary recycle works on klass (it's not in the reserved list).
+    // To exercise force_recycle's bypass, we recycle $sequenced_log itself
+    // — which the reserved list normally refuses, but force_recycle
+    // permits provided no descendants remain.
+    await recycleVia(world, wiz, klass);
+
+    const result = await world.directCall(`force-${Date.now()}`, wiz, wiz, "force_recycle", ["$sequenced_log", { reason: "test teardown" }]);
+    expect(result.op).toBe("result");
+    expect(world.objects.has("$sequenced_log")).toBe(false);
+    expect(world.tombstones.has("$sequenced_log")).toBe(true);
+
+    // Audit recorded.
+    const actions = world.getProp("$system", "wizard_actions") as Array<Record<string, unknown>>;
+    const force = actions.find((a) => a.action === "force_recycle");
+    expect(force).toBeDefined();
+    expect(force!.obj).toBe("$sequenced_log");
+    expect(force!.reason).toBe("test teardown");
+  });
+
+  it("wiz:force_recycle refuses the hard floor ($system, $root, $nowhere) with E_INVARG", async () => {
+    const world = createWorld();
+    const { actor: wiz } = wizActor(world);
+
+    for (const reserved of ["$system", "$root", "$nowhere"]) {
+      const result = await world.directCall(`force-floor-${reserved}`, wiz, wiz, "force_recycle", [reserved, {}]);
+      expect(result.op).toBe("error");
+      if (result.op === "error") expect(result.error.code).toBe("E_INVARG");
+      expect(world.objects.has(reserved)).toBe(true);
+    }
+  });
+
+  it("wiz:force_recycle terminates live sessions on actor target", async () => {
+    const world = createWorld();
+    const { actor: wiz } = wizActor(world);
+
+    // Spawn a guest with a live session.
+    const guest = world.auth("guest:force-recycle-target");
+    const guestActor = guest.actor;
+    expect(world.hasLiveSessions(guestActor)).toBe(true);
+    expect(world.sessions.has(guest.id)).toBe(true);
+
+    const result = await world.directCall(`force-actor-${Date.now()}`, wiz, wiz, "force_recycle", [guestActor, {}]);
+    expect(result.op).toBe("result");
+    if (result.op === "result") {
+      const r = result.result as Record<string, unknown>;
+      expect(r.sessions_killed).toBe(1);
+    }
+    // Actor gone, session reaped.
+    expect(world.objects.has(guestActor)).toBe(false);
+    expect(world.tombstones.has(guestActor)).toBe(true);
+    expect(world.sessions.has(guest.id)).toBe(false);
+
+    // Observation emitted on the outer call.
+    if (result.op === "result") {
+      const obs = result.observations.filter((o) => o.type === "wiz_force_recycle");
+      expect(obs).toHaveLength(1);
+      expect(obs[0]).toMatchObject({ obj: guestActor, sessions_killed: 1 });
+    }
+  });
+
+  it("wiz:force_recycle requires wizard authority (E_PERM for non-wizards)", async () => {
+    const world = createWorld();
+    const { actor: wiz } = wizActor(world);
+    const programmer = world.auth("guest:programmer");
+    world.object(programmer.actor).owner = programmer.actor;
+    world.object(programmer.actor).flags.programmer = true;
+    world.chparentAuthoredObject("$wiz", programmer.actor, "$programmer");
+
+    const klass = world.createAuthoredObject(wiz, { parent: "$thing", name: "Class" });
+
+    const result = await world.directCall(`force-perm-${Date.now()}`, programmer.actor, programmer.actor, "force_recycle", [klass, {}]);
+    expect(result.op).toBe("error");
+    if (result.op === "error") expect(result.error.code).toBe("E_PERM");
+    expect(world.objects.has(klass)).toBe(true);
+  });
+
   it("verb dispatch falls back to inherited verb after the defining ancestor is recycled (RC3.7)", async () => {
     const world = createWorld();
     const { actor: wiz } = wizActor(world);

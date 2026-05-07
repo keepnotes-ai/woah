@@ -787,14 +787,50 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
         `legacy:${live.actor}`,
         "session-cross-host"
       ].sort());
-      // Both scrubs collaborated to recompute `subscribers`: the actor-level
-      // pass dropped guest_blank (no live presence anywhere); the session
-      // pass dropped expiredAuth.actor; guest_remote stays because its row
-      // is still in session_subscribers.
+      // Both scrubs collaborated to recompute `subscribers`. The actor pass
+      // dropped guest_blank — note that the drop happens in
+      // updateSpaceSubscriberLocal's parse step (the malformed empty-session
+      // row is filtered when the session pass rebuilds `subscribers` from
+      // surviving session_subscribers rows), not via the actor pass's
+      // present=false call. The session pass dropped expiredAuth.actor.
+      // guest_remote stays because its row is still in session_subscribers.
       expect((world.getProp("conf_session_scrub_room", "subscribers") as ObjRef[]).sort()).toEqual([
         live.actor,
         "guest_remote"
       ].sort());
+
+      // Re-running look within the SUBSCRIBER_SCRUB_FLOOR_MS window must NOT
+      // re-trigger the scrub. Plant a row that the scrub would otherwise
+      // remove and verify the throttle holds it in place. The throttle is
+      // the only thing keeping write amplification bounded for chatty rooms.
+      const survivors = world.getProp("conf_session_scrub_room", "session_subscribers") as WooValue;
+      const replant = (survivors as Array<Record<string, WooValue>>).concat([{ session: expired.id, actor: expiredAuth.actor }]);
+      world.setProp("conf_session_scrub_room", "session_subscribers", replant as unknown as WooValue);
+      const lookedAgain = await world.directCall("conf-session-scrub-look-throttled", live.actor, "conf_session_scrub_room", "look", []);
+      expect(lookedAgain.op).toBe("result");
+      const stillThere = world.getProp("conf_session_scrub_room", "session_subscribers") as Array<{ session: string }>;
+      expect(stillThere.map((row) => row.session)).toContain(expired.id);
+
+      // Sanity: when reapSession runs through removeSessionPresence first,
+      // there's nothing left for the new scrub to do. The session and its
+      // row both go away through the existing path; this pins that the
+      // sibling scrub stays a safety net rather than the primary cleanup.
+      world.setProp("conf_session_scrub_room", "session_subscribers", survivors);
+      const reapedActor = "guest_reaped" as ObjRef;
+      const reapedSession = "session-conf-reaped";
+      world.createObject({ id: reapedActor, name: reapedActor, parent: "$guest", owner: "$wiz" });
+      world.ensureSessionForActor(reapedSession, reapedActor, "guest", Date.now() + 60_000);
+      world.setSpaceSubscriber("conf_session_scrub_room", reapedActor, true, reapedSession);
+      const beforeReap = world.getProp("conf_session_scrub_room", "session_subscribers") as Array<{ session: string }>;
+      expect(beforeReap.map((row) => row.session)).toContain(reapedSession);
+      const reapedRecord = world.sessions.get(reapedSession);
+      if (reapedRecord) {
+        reapedRecord.expiresAt = Date.now() - 60_000;
+        reapedRecord.lastDetachAt = Date.now() - 60_000;
+      }
+      world.reapExpiredSessions();
+      const afterReap = world.getProp("conf_session_scrub_room", "session_subscribers") as Array<{ session: string }>;
+      expect(afterReap.map((row) => row.session)).not.toContain(reapedSession);
     } finally {
       harness.cleanup();
     }

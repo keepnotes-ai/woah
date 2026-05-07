@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { installVerbAs } from "../src/core/authoring";
 import { createWorld } from "../src/core/bootstrap";
 import { isErrorValue } from "../src/core/types";
 
@@ -20,6 +21,7 @@ describe("recycle", () => {
     obj.owner = actor;
     obj.flags.wizard = true;
     obj.flags.programmer = true;
+    world.chparentAuthoredObject("$wiz", actor, "$wiz");
     return { session, actor };
   }
 
@@ -211,5 +213,89 @@ describe("recycle", () => {
     const leaf = world.createAuthoredObject(ownerActor, { parent: "$thing", name: "Leaf" });
     await expect(recycleVia(world, stranger.actor, leaf)).rejects.toMatchObject({ code: "E_PERM" });
     expect(world.objects.has(leaf)).toBe(true);
+  });
+
+  it(":recycle handler fires when defined; emits an observation as a side effect", async () => {
+    const world = createWorld();
+    const { actor: wiz } = wizActor(world);
+
+    const klass = world.createAuthoredObject(wiz, { parent: "$thing", name: "Recyclable Class" });
+    world.object(klass).flags.fertile = true;
+    const installed = installVerbAs(world, wiz, klass, "recycle",
+      `verb :recycle() rx {\n  observe({ "type": "recycled", "obj": this });\n  return 0;\n}`,
+      null
+    );
+    expect(installed.ok).toBe(true);
+
+    const inst = world.createAuthoredObject(wiz, { parent: klass, name: "Instance A" });
+    // Sanity: the handler resolves through inheritance.
+    const resolved = world.resolveVerb(inst, "recycle");
+    expect(resolved.verb.name).toBe("recycle");
+    expect(resolved.definer).toBe(klass);
+
+    // Drive recycle through a verb dispatch so observations are visible on
+    // the outer call's frame.
+    const result = await world.directCall(`recycle-handler-${Date.now()}`, wiz, wiz, "recycle", [inst, {}]);
+    expect(result.op).toBe("result");
+    expect(world.objects.has(inst)).toBe(false);
+    expect(world.tombstones.has(inst)).toBe(true);
+    if (result.op === "result") {
+      const recycled = result.observations.filter((o) => o.type === "recycled");
+      expect(recycled).toHaveLength(1);
+      expect(recycled[0]).toMatchObject({ obj: inst });
+    }
+  });
+
+  it("inherited :recycle handler fires for descendants (LambdaCore pattern)", async () => {
+    const world = createWorld();
+    const { actor: wiz } = wizActor(world);
+
+    const klass = world.createAuthoredObject(wiz, { parent: "$thing", name: "Base Class" });
+    world.object(klass).flags.fertile = true;
+    const sub = world.createAuthoredObject(wiz, { parent: klass, name: "Sub Class" });
+    world.object(sub).flags.fertile = true;
+    installVerbAs(world, wiz, klass, "recycle",
+      `verb :recycle() rx {\n  observe({ "type": "recycled", "obj": this });\n  return 0;\n}`,
+      null
+    );
+
+    const inst = world.createAuthoredObject(wiz, { parent: sub, name: "Sub Instance" });
+    const result = await world.directCall(`recycle-inherit-${Date.now()}`, wiz, wiz, "recycle", [inst, {}]);
+    expect(result.op).toBe("result");
+    expect(world.objects.has(inst)).toBe(false);
+    if (result.op === "result") {
+      const recycled = result.observations.filter((o) => o.type === "recycled");
+      expect(recycled).toHaveLength(1);
+      expect(recycled[0]).toMatchObject({ obj: inst });
+    }
+  });
+
+  it(":recycle handler raise is caught; recycle proceeds and $recycle_handler_error is observed", async () => {
+    const world = createWorld();
+    const { actor: wiz } = wizActor(world);
+
+    const klass = world.createAuthoredObject(wiz, { parent: "$thing", name: "Raising Class" });
+    world.object(klass).flags.fertile = true;
+    const installed = installVerbAs(world, wiz, klass, "recycle",
+      `verb :recycle() rx { raise { code: "E_INVARG", message: "handler said no", value: this }; }`,
+      null
+    );
+    expect(installed.ok).toBe(true);
+    const inst = world.createAuthoredObject(wiz, { parent: klass, name: "Bad Citizen" });
+
+    // Drive recycle through the verb path so observations land on the
+    // dispatch frame.
+    const result = await world.directCall(`recycle-raise-${Date.now()}`, wiz, wiz, "recycle", [inst, {}]);
+    expect(result.op).toBe("result");
+    expect(world.objects.has(inst)).toBe(false);
+    expect(world.tombstones.has(inst)).toBe(true);
+
+    // The handler raise was caught and surfaced as a $recycle_handler_error
+    // observation on the outer call's observation list.
+    if (result.op === "result") {
+      const errObs = result.observations.filter((o) => o.type === "$recycle_handler_error");
+      expect(errObs).toHaveLength(1);
+      expect(errObs[0]).toMatchObject({ obj: inst, code: "E_INVARG" });
+    }
   });
 });

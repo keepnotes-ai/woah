@@ -1031,7 +1031,7 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
         return await frame.ctx.world.builderChparent(frame.ctx.actor, assertObj(builtinArgs[0]), assertObj(builtinArgs[1]), builtinArgs[2] ?? null, frame.ctx.definer);
       case "builder_recycle":
         if (builtinArgs.length < 1 || builtinArgs.length > 2) throw wooError("E_INVARG", "builder_recycle expects object and optional opts");
-        return await frame.ctx.world.builderRecycle(frame.ctx.actor, assertObj(builtinArgs[0]), builtinArgs[1] ?? null, frame.ctx.definer);
+        return await frame.ctx.world.builderRecycle(frame.ctx.actor, assertObj(builtinArgs[0]), builtinArgs[1] ?? null, frame.ctx.definer, frame.ctx);
       case "builder_set_property":
         if (builtinArgs.length < 3 || builtinArgs.length > 4) throw wooError("E_INVARG", "builder_set_property expects object, name, value, and optional opts");
         return await frame.ctx.world.builderSetProperty(frame.ctx.actor, assertObj(builtinArgs[0]), assertString(builtinArgs[1]), builtinArgs[2], builtinArgs[3] ?? null, frame.ctx.definer);

@@ -2274,7 +2274,7 @@ export class WooWorld {
     return result;
   }
 
-  async builderRecycle(actor: ObjRef, objRef: ObjRef, opts: WooValue, surfaceClass: ObjRef): Promise<WooValue> {
+  async builderRecycle(actor: ObjRef, objRef: ObjRef, opts: WooValue, surfaceClass: ObjRef, ctx?: CallContext): Promise<WooValue> {
     this.assertBuilderActor(actor, surfaceClass);
     const options = progOptions(opts);
     const dryRun = optionBool(options, "dry_run", false);
@@ -2342,8 +2342,103 @@ export class WooWorld {
     }
     const result = { ok: true, dry_run: dryRun, id: objRef, impact: impact as WooValue };
     if (dryRun) return result;
+
+    // Apply step 1: fire :recycle handler. Errors caught and surfaced as a
+    // $recycle_handler_error observation; recycle proceeds.
+    await this.invokeRecycleHandler(objRef, ctx);
+
+    // Apply step 1a: post-handler A4 re-check. The handler may have moved
+    // an object into obj.contents or otherwise altered the graph since
+    // pre-flight. Re-verify cluster collocation; if violated, abort.
+    if (await this.remoteHostForObject(objRef)) {
+      throw wooError("E_CROSS_HOST_WRITE", `recycle: handler moved obj across clusters: ${objRef}`, { actor, obj: objRef });
+    }
+    const objAfter = this.object(objRef);
+    if (objAfter.parent && objAfter.parent !== "$nowhere" && await this.remoteHostForObject(objAfter.parent)) {
+      throw wooError("E_CROSS_HOST_WRITE", `recycle: handler reparented across clusters: ${objRef} -> ${objAfter.parent}`, { actor, obj: objRef, parent: objAfter.parent });
+    }
+    if (objAfter.location && objAfter.location !== "$nowhere" && await this.remoteHostForObject(objAfter.location)) {
+      throw wooError("E_CROSS_HOST_WRITE", `recycle: handler relocated across clusters: ${objRef} -> ${objAfter.location}`, { actor, obj: objRef, location: objAfter.location });
+    }
+    for (const child of objAfter.children) {
+      if (child !== "$nowhere" && await this.remoteHostForObject(child)) {
+        throw wooError("E_CROSS_HOST_WRITE", `recycle: handler introduced cross-cluster child: ${objRef} -> ${child}`, { actor, obj: objRef, child });
+      }
+    }
+    for (const content of objAfter.contents) {
+      if (content !== "$nowhere" && await this.remoteHostForObject(content)) {
+        throw wooError("E_CROSS_HOST_WRITE", `recycle: handler introduced cross-cluster content: ${objRef} -> ${content}`, { actor, obj: objRef, content });
+      }
+    }
+
     this.recycleObjectLocal(objRef);
     return result;
+  }
+
+  /**
+   * Apply step 1: dispatch :recycle on `obj` if defined. Resolves via
+   * inherited verb-lookup so a handler on any ancestor fires.
+   *
+   * Errors are caught:
+   *   - E_VERBNF: silent (no handler is fine; this is the spec default).
+   *   - other errors: surfaced as a $recycle_handler_error observation on
+   *     the outer frame (or logged if no ctx is available).
+   *
+   * Per spec/semantics/recycle.md §RC4, the handler runs with progr equal
+   * to the resolved verb's owner (standard programmer discipline), this =
+   * obj, caller = obj. Recycle proceeds regardless of handler outcome.
+   */
+  private async invokeRecycleHandler(objRef: ObjRef, ctx?: CallContext): Promise<void> {
+    let verbExists = false;
+    try {
+      this.resolveVerb(objRef, "recycle");
+      verbExists = true;
+    } catch (err) {
+      if (isErrorValue(err) && err.code === "E_VERBNF") return;
+      throw err;
+    }
+    if (!verbExists) return;
+
+    const handlerCtx: CallContext = ctx
+      ? { ...ctx, caller: objRef, callerPerms: ctx.progr }
+      : {
+          world: this,
+          space: this.object(objRef).anchor ?? "#-1",
+          seq: -1,
+          session: null,
+          actor: objRef,
+          player: objRef,
+          caller: objRef,
+          callerPerms: this.object(objRef).owner,
+          progr: this.object(objRef).owner,
+          thisObj: objRef,
+          verbName: "recycle",
+          definer: objRef,
+          message: { actor: objRef, target: objRef, verb: "recycle", args: [] },
+          observations: [],
+          hostMemo: createHostOperationMemo(),
+          observe: () => {}
+        };
+
+    try {
+      await this.dispatch(handlerCtx, objRef, "recycle", []);
+    } catch (err) {
+      if (isErrorValue(err) && err.code === "E_VERBNF") return;
+      const code = isErrorValue(err) ? err.code : "E_INTERNAL";
+      const message = isErrorValue(err) ? err.message ?? "" : err instanceof Error ? err.message : String(err);
+      const event: Observation = {
+        type: "$recycle_handler_error",
+        obj: objRef,
+        code,
+        message,
+        source: objRef
+      };
+      if (ctx) {
+        if (ctx.observe) ctx.observe(event);
+        else ctx.observations.push(event);
+      }
+      // Recycle proceeds either way.
+    }
   }
 
   /**

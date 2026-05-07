@@ -21,7 +21,15 @@
           "direct_callable": true,
           "skip_presence_check": true,
           "arg_spec": { "args": [] },
-          "source": "verb :look_self() rxd { let len = 0; try { len = length(this:text()); } except err { len = 0; } return { id: this, title: this:title(), description: this.description, text_length: len, location: location(this) }; }"
+          "source": "verb :look_self() rxd { let summary = this:text_summary(96); return { id: this, title: this:title(), description: this.description, text_length: summary[\"length\"], location: location(this) }; }"
+        },
+        {
+          "name": "text_summary",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "arg_spec": { "args": ["limit"] },
+          "source": "verb :text_summary(limit) rxd { return note_text_summary(this, limit); }"
         },
         {
           "name": "text",

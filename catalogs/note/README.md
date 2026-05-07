@@ -47,7 +47,8 @@ Identity (`.name`) and cosmetic (`.description`) are inherited from
 ## Verbs
 
 ```
-:text                   permission-checking getter for the text
+:text                   permission-checking getter for the full text
+:text_summary(limit)    bounded display summary {lines, length, preview, truncated}
 :read                   show the text and emit a note_read observation
 :set_text(str)          replace the entire text (writers only); enforces 65536-char cap
 :write(line)            append a line (writers only); inserts a newline if non-empty
@@ -62,9 +63,11 @@ Identity (`.name`) and cosmetic (`.description`) are inherited from
 `:title` is inherited from `$root` and just returns `this.name`. There
 is no first-line-is-title heuristic.
 
-`.text` is private (`perms: ""`); always go through `:text()` from
-non-wizard callers. This keeps `$encrypted_note` and other
-privacy-respecting subclasses possible without changing callers.
+`.text` is private (`perms: ""`); always go through `:text()` for full
+body reads, or `:text_summary(limit)` for bounded display previews. The
+private property keeps `$encrypted_note` and other privacy-respecting
+subclasses possible without changing callers — they override the verbs
+rather than touching `.text` directly.
 
 ## Use it
 

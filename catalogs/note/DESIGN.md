@@ -31,10 +31,14 @@ $note < $portable < $thing < $root
 ```
 
 `.text` is `perms ""` deliberately. Direct property reads are denied;
-the public API is the `:text()` verb, which gates via
-`:is_readable_by`. This keeps the property model open for
+the public API for full note bodies is the `:text()` verb, which gates
+via `:is_readable_by`. Bounded display surfaces (inventory entries,
+card previews, list views) call `:text_summary(limit)` instead, which
+returns `{lines, length, preview, truncated}` without forcing every
+consumer to read the full body. This keeps the property model open for
 `$encrypted_note < $note` and similar privacy-respecting subclasses
-without changing callers — they already go through the verb.
+without changing callers — they override the verbs rather than touching
+`.text` directly.
 
 Properties inherited from `$portable`:
 - `.portable = true` — eligible for `:take`/`:drop` between rooms and
@@ -62,7 +66,8 @@ Properties inherited from `$portable`:
 
 | Verb | Purpose |
 | --- | --- |
-| `text` | Permission-checking getter for `.text`. Public API for non-wizard callers. |
+| `text` | Permission-checking getter for the full `.text`. Public API for non-wizard callers. |
+| `text_summary(limit)` | Permission-checking bounded display summary. Returns `{lines, length, preview, truncated}` without forcing the caller to materialize the full text. Subclasses that transform text for readers should override this alongside `:text()`. |
 | `read` / `r@ead` | Call `:text()`, emit a `note_read` observation, return the text. |
 | `set_text(str)` | Replace text. Enforces a 65536-char cap. Permission: `:is_writable_by(actor)`. |
 | `write(line)` / `w@rite` | LambdaMOO-style append-line. Inserts a newline before the line if the text is non-empty. Enforces the same 65536-char cap as `:set_text`. Permission: `:is_writable_by(actor)`. |
@@ -70,8 +75,8 @@ Properties inherited from `$portable`:
 | `add_writer(who)` / `rm_writer(who)` | Manage `.writers`. Owner or wizard only. |
 | `is_readable_by(actor)` | Default `true`. Override in subclasses to restrict. |
 | `is_writable_by(actor)` | Owner, members of `.writers`, or wizard. |
-| `look` / `look_self` | Inherited from `$root` for `look`; `:look_self` returns `{id, title, description, text_length, location}`. The text body is *not* in the look surface — it's read-via-:read. |
-| `title` | Inherited from `$root`; returns `this.name`. No heuristic. |
+| `look` / `look_self` | Inherited from `$root` for `look`; `:look_self` returns `{id, title, description, text_length, location}` (text length comes from `:text_summary` so subclasses that gate read can hide it). The text body is *not* in the look surface — it's read via `:read`. |
+| `title` | Inherited from `$root`; returns `this.name`. No heuristic — there is no "name + first line" mixing. |
 
 ## Bounding the body
 

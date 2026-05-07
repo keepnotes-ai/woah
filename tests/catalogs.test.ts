@@ -2950,7 +2950,7 @@ describe("local catalogs", () => {
       expect(world.getProp(dRes.note, "produced_by")).toBe(blockId);
       expect(delivered.observations).toEqual(expect.arrayContaining([
         expect.objectContaining({ type: "text", target: requester, text: expect.stringContaining("delivers a note to your inventory") }),
-        expect.objectContaining({ type: "delivered", block: blockId, requester, note: dRes.note, text: expect.stringContaining("delivers a note") })
+        expect.objectContaining({ type: "delivered", block: blockId, requester, note: dRes.note, text: expect.stringContaining("delivers a note to your inventory") })
       ]));
       expect((world.getProp(blockId, "pending_orders") as unknown[]).length).toBe(0);
 
@@ -3212,6 +3212,93 @@ describe("local catalogs", () => {
       expect(delivered.observations).toEqual(expect.arrayContaining([
         expect.objectContaining({ type: "text", target: requester, text: expect.stringContaining("delivers a note to your inventory") })
       ]));
+    });
+
+    it("$dispensed_note rejects oversize text at the producer rather than rendering an unbounded inventory line", async () => {
+      const world = createWorld({ catalogs: false });
+      installLocalCatalogs(world, ["horoscope"]);
+      const roomId = "obj_test_horo_long_room";
+      world.createObject({ id: roomId, name: roomId, parent: "$space", owner: "$wiz", location: null });
+      const requester = world.auth("guest:horo-long-requester").actor;
+      const blockId = "obj_test_horo_long_block";
+      world.createObject({ id: blockId, name: blockId, parent: "$horoscope_block", owner: "$wiz", location: roomId });
+      world.setProp(blockId, "rate_limit_seconds", 0);
+      world.setProp(blockId, "block_cooldown_seconds", 0);
+
+      const ordered = await world.directCall("horo-long-order", requester, blockId, "order", ["gemini"]);
+      expect(ordered.op).toBe("result");
+      if (ordered.op !== "result") return;
+      const orderId = (ordered.result as { order_id: string }).order_id;
+      // v0.2 caps $note.text at 65536 chars in :set_text. The dispenser
+      // routes text through that verb, so an oversize body fails at the
+      // producer instead of leaking into the requester's inventory.
+      const huge = "Gemini ".repeat(180_000);
+      const delivered = await world.directCall("horo-long-deliver", blockId, blockId, "deliver", [orderId, "Horoscope: Gemini", huge]);
+      expect(delivered.op).toBe("error");
+      if (delivered.op === "error") expect(delivered.error.code).toBe("E_INVARG");
+      // No note minted; inventory stays clean.
+      const inventory = await world.directCall("horo-long-inventory", requester, requester, "inventory", []);
+      expect(inventory.op).toBe("result");
+      if (inventory.op !== "result") return;
+      const result = inventory.result as { items: Array<{ id: string; title: string }>; text: string };
+      expect(result.items).toEqual([]);
+    });
+
+    it("$note text_summary is overridable, and look_self honours the override", async () => {
+      const world = createWorld({ catalogs: false });
+      installLocalCatalogs(world, ["note"]);
+      const requester = world.auth("guest:redacted-note-reader").actor;
+      const noteClass = "obj_test_redacted_note_class";
+      world.createObject({ id: noteClass, name: "$redacted_note", parent: "$note", owner: "$wiz", location: null });
+      expect(installVerb(world, noteClass, "text_summary", `verb :text_summary(limit) rxd {
+        return { lines: 7, length: 0, preview: "REDACTED", truncated: true };
+      }`, null).ok).toBe(true);
+
+      const noteId = "obj_test_redacted_note";
+      world.createObject({ id: noteId, name: "Private note", parent: noteClass, owner: "$wiz", location: requester });
+      world.setProp(noteId, "text", "secret ".repeat(20_000));
+
+      // The override wins for any direct caller of :text_summary.
+      const summary = await world.directCall("redacted-note-summary", requester, noteId, "text_summary", [96]);
+      expect(summary.op).toBe("result");
+      if (summary.op === "result") {
+        expect(summary.result).toMatchObject({ lines: 7, preview: "REDACTED", truncated: true });
+      }
+
+      // look_self routes through :text_summary for text_length, so a redacted
+      // override surfaces 0 instead of the raw secret length.
+      const looked = await world.directCall("redacted-note-look", requester, noteId, "look_self", []);
+      expect(looked.op).toBe("result");
+      if (looked.op === "result") {
+        expect(looked.result).toMatchObject({
+          id: noteId,
+          title: "Private note",
+          text_length: 0
+        });
+      }
+    });
+
+    it("note_text_summary rejects non-note objects before reading raw private text", async () => {
+      const world = createWorld({ catalogs: false });
+      installLocalCatalogs(world, ["note"]);
+      const requester = world.auth("guest:note-summary-probe").actor;
+      const nonNoteId = "obj_test_not_a_note_with_text";
+      world.createObject({ id: nonNoteId, name: "Not a note", parent: "$thing", owner: "$wiz", location: requester });
+      world.defineProperty(nonNoteId, { name: "text", defaultValue: "", owner: "$wiz", perms: "", typeHint: "str" });
+      world.setProp(nonNoteId, "text", "private text that must not leak");
+      expect(installVerb(world, nonNoteId, "is_readable_by", `verb :is_readable_by(actor_obj) rxd {
+        return true;
+      }`, null).ok).toBe(true);
+      expect(installVerb(world, requester, "probe_note_summary", `verb :probe_note_summary(obj) rxd {
+        return note_text_summary(obj, 512);
+      }`, null).ok).toBe(true);
+
+      const result = await world.directCall("note-summary-nonnote", requester, requester, "probe_note_summary", [nonNoteId]);
+      expect(result.op).toBe("error");
+      if (result.op === "error") {
+        expect(result.error.code).toBe("E_TYPE");
+        expect(result.error.message).toContain("$note descendant");
+      }
     });
 
     it("$weather_block installs cleanly and ships the configured tier lists", async () => {

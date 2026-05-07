@@ -6592,6 +6592,36 @@ export class WooWorld {
     }
   }
 
+  async noteTextSummary(ctx: CallContext, note: ObjRef, rawLimit: number): Promise<Record<string, WooValue>> {
+    // TODO(note-catalog): this substrate helper knows about $note's raw .text
+    // property and :is_readable_by verb. It exists to keep note display
+    // summaries bounded without materializing full note bodies in the Tiny VM;
+    // the catalog-facing contract should remain the overridable
+    // $note:text_summary(limit) verb.
+    if (!this.objects.has(note) || !this.inheritsFrom(note, "$note")) {
+      throw wooError("E_TYPE", `note_text_summary target must be a $note descendant: ${note}`, note);
+    }
+    const readable = await this.dispatch(
+      { ...ctx, caller: ctx.thisObj, callerPerms: ctx.progr },
+      note,
+      "is_readable_by",
+      [ctx.actor]
+    );
+    if (readable !== true) throw wooError("E_PERM", "cannot read note", note);
+
+    const limit = Math.max(0, Math.min(512, Math.floor(rawLimit)));
+    const raw = this.object(note).properties.get("text");
+    const lines = Array.isArray(raw) ? raw : [];
+    const first = typeof lines[0] === "string" ? lines[0] : "";
+    let preview = first;
+    let truncated = false;
+    if (preview.length > limit) {
+      preview = limit > 3 ? `${preview.slice(0, limit - 3)}...` : preview.slice(0, limit);
+      truncated = true;
+    }
+    return { lines: lines.length, preview, truncated };
+  }
+
   // Cross-host-aware display name. The local stub of a remote object
   // (created by ensureInternalActor on cross-host /__internal/remote-dispatch)
   // carries `name = id` rather than the authoritative display name, so we

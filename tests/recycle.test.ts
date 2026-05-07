@@ -372,6 +372,51 @@ describe("recycle", () => {
     expect(world.objects.has(target)).toBe(false);
   });
 
+  it("verb dispatch falls back to inherited verb after the defining ancestor is recycled (RC3.7)", async () => {
+    const world = createWorld();
+    const { actor: wiz } = wizActor(world);
+
+    const grand = world.createAuthoredObject(wiz, { parent: "$thing", name: "Grand" });
+    world.object(grand).flags.fertile = true;
+    installVerbAs(world, wiz, grand, "label", "verb :label() rx { return \"grand\"; }", null);
+
+    const middle = world.createAuthoredObject(wiz, { parent: grand, name: "Middle" });
+    world.object(middle).flags.fertile = true;
+    installVerbAs(world, wiz, middle, "label", "verb :label() rx { return \"middle\"; }", null);
+
+    const inst = world.createAuthoredObject(wiz, { parent: middle, name: "Instance" });
+    expect(world.resolveVerb(inst, "label").definer).toBe(middle);
+
+    // Recycle middle. The :label verb that lived on middle is gone with
+    // the storage delete; child grafts up to grand. The next resolve from
+    // inst now finds grand's :label, with no stale-cache window.
+    await recycleVia(world, wiz, middle, { force: true });
+    expect(world.objects.has(middle)).toBe(false);
+    expect(world.tombstones.has(middle)).toBe(true);
+    expect(world.object(inst).parent).toBe(grand);
+
+    const resolved = world.resolveVerb(inst, "label");
+    expect(resolved.definer).toBe(grand);
+  });
+
+  it("dispatching to a tombstoned definer surfaces E_OBJNF (no stale-dispatch window)", async () => {
+    const world = createWorld();
+    const { actor: wiz } = wizActor(world);
+
+    const target = world.createAuthoredObject(wiz, { parent: "$thing", name: "Target" });
+    installVerbAs(world, wiz, target, "ping", "verb :ping() rx { return \"pong\"; }", null);
+    expect(world.resolveVerb(target, "ping").definer).toBe(target);
+
+    await recycleVia(world, wiz, target);
+
+    // Cached or stale callers that still hold the target ULID and try to
+    // dispatch fail at frame setup with E_OBJNF — the lookup path raises
+    // before any user code can run on a dead reference.
+    const result = await world.directCall(`stale-${Date.now()}`, wiz, target, "ping", []);
+    expect(result.op).toBe("error");
+    if (result.op === "error") expect(result.error.code).toBe("E_OBJNF");
+  });
+
   it(":recycle handler raise is caught; recycle proceeds and $recycle_handler_error is observed", async () => {
     const world = createWorld();
     const { actor: wiz } = wizActor(world);

@@ -3935,6 +3935,23 @@ export class WooWorld {
   private recycleObjectLocal(objRef: ObjRef): void {
     const obj = this.object(objRef);
     this.scrubEditorSessionsForObject(objRef);
+
+    // Step 2: kill parked tasks anchored to obj. Any task whose parked_on,
+    // awaiting_player, or origin is obj is removed. Per
+    // spec/semantics/recycle.md §RC3 step 2 and failures.md §F7. Awaiting
+    // consumers see E_INTRPT when they next look up the task; the parked-task
+    // table is the single source of truth, so deleting the row is enough.
+    const killedTasks: string[] = [];
+    for (const [id, task] of this.parkedTasks) {
+      if (task.parked_on === objRef || task.awaiting_player === objRef || task.origin === objRef) {
+        killedTasks.push(id);
+      }
+    }
+    for (const id of killedTasks) {
+      this.parkedTasks.delete(id);
+      this.deletePersistedTask(id);
+    }
+
     const parent = obj.parent;
     const location = obj.location;
 

@@ -203,6 +203,36 @@ describe("recycle", () => {
     expect(world.isRecycled(aliasB)).toBe(true);
   });
 
+  it("rejects recycle of an actor with at least one live session (E_PERM)", async () => {
+    const world = createWorld();
+    const { actor: wiz } = wizActor(world);
+    // The wizActor itself has a live session (from world.auth). It also
+    // descends from $actor by definition.
+    expect(world.hasLiveSessions(wiz)).toBe(true);
+
+    await expect(recycleVia(world, wiz, wiz)).rejects.toMatchObject({ code: "E_PERM" });
+    expect(world.objects.has(wiz)).toBe(true);
+  });
+
+  it("permits recycle of an actor whose sessions have all expired", async () => {
+    const world = createWorld();
+    const { actor: wiz } = wizActor(world);
+
+    // Spawn a second actor and let its session lapse, simulating an
+    // unbound actor object. expireAllSessions is not exposed, so we
+    // delete the session entry directly to model the same condition.
+    const secondary = world.auth("guest:soon-stale");
+    const secondaryActor = secondary.actor;
+    world.sessions.delete(secondary.id);
+    expect(world.hasLiveSessions(secondaryActor)).toBe(false);
+
+    // Wizard (or owner) recycles the unbound actor without force; engine
+    // grafts it under $actor's parent ($root) and tombstones it.
+    await recycleVia(world, wiz, secondaryActor);
+    expect(world.objects.has(secondaryActor)).toBe(false);
+    expect(world.tombstones.has(secondaryActor)).toBe(true);
+  });
+
   it("non-owner non-wizard cannot recycle (E_PERM)", async () => {
     const world = createWorld();
     const { actor: ownerActor } = builderActor(world);

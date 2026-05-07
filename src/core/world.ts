@@ -1407,6 +1407,30 @@ export class WooWorld {
     return true;
   }
 
+  /**
+   * Returns true iff `actor` has at least one live session. Used by recycle
+   * pre-flight (§RC6) to decide whether an actor is currently bound and
+   * therefore unrecyclable through ordinary tools.
+   */
+  hasLiveSessions(actor: ObjRef): boolean {
+    const now = Date.now();
+    for (const session of this.sessions.values()) {
+      if (session.actor === actor && !this.sessionExpired(session, now)) return true;
+    }
+    return false;
+  }
+
+  /** Returns the live sessions bound to `actor` (sorted by id for stability). */
+  liveSessionsForActor(actor: ObjRef): Session[] {
+    const now = Date.now();
+    const out: Session[] = [];
+    for (const session of this.sessions.values()) {
+      if (session.actor === actor && !this.sessionExpired(session, now)) out.push(session);
+    }
+    out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    return out;
+  }
+
   primarySessionForActor(actor: ObjRef): Session | null {
     let best: Session | null = null;
     for (const session of this.sessions.values()) {
@@ -2314,12 +2338,16 @@ export class WooWorld {
     const obj = this.object(objRef);
     this.assertCanBuildOwnedObject(actor, objRef);
 
-    // Pre-flight A2 (reserved). The §RC6 forbidden list. Live actors are
-    // approximated by blocking all $actor descendants at the wrapper layer
-    // (session-binding tracking is not yet implemented; widening the check
-    // is safer than narrowing).
+    // Pre-flight A2 (reserved). The §RC6 forbidden list. Live-actor
+    // detection is the real session-binding check: an actor with at least
+    // one live session is unrecyclable through ordinary tools per §RC6.
+    // Recycling an actor with no live sessions is permitted (subject to
+    // the §RC2 wizard/owner check enforced above by
+    // assertCanBuildOwnedObject).
     this.assertNotReservedForRecycle(objRef);
-    if (this.inheritsFrom(objRef, "$actor")) throw wooError("E_PERM", "actors cannot be recycled through builder tools", { actor, obj: objRef });
+    if (this.inheritsFrom(objRef, "$actor") && this.hasLiveSessions(objRef)) {
+      throw wooError("E_PERM", "actor has live sessions; cannot be recycled through builder tools", { actor, obj: objRef });
+    }
 
     // Pre-flight A3 (anchored descendants).
     const anchored = this.findAnchoredDescendants(objRef);

@@ -10,6 +10,7 @@ export type SqlRow = Record<string, unknown>;
 
 export const SQL_DELETE_TABLES = [
   "world_meta",
+  "tombstone",
   "task",
   "space_snapshot",
   "space_message",
@@ -146,6 +147,15 @@ export const SQL_SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS world_meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
+  )`,
+  // Recycled ULIDs. Per-host (each anchor cluster owns its own table).
+  // Survives backup/restore. Per spec/reference/persistence.md §14.2.1.
+  // Rows are immutable once written; recycle inserts in the same SQLite
+  // transaction as the storage-row deletes.
+  `CREATE TABLE IF NOT EXISTS tombstone (
+    id TEXT PRIMARY KEY,
+    recycled_at INTEGER NOT NULL,
+    reason TEXT
   )`
 ] as const;
 

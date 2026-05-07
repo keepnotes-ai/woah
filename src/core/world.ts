@@ -305,6 +305,7 @@ type PersistenceDirtyState = {
   deletedSessions: Set<string>;
   dirtyTasks: Set<string>;
   deletedTasks: Set<string>;
+  dirtyTombstones: Set<ObjRef>;
   dirtyCounters: boolean;
   dirty: boolean;
 };
@@ -347,6 +348,7 @@ export class WooWorld {
   private deletedSessions = new Set<string>();
   private dirtyTasks = new Set<string>();
   private deletedTasks = new Set<string>();
+  private dirtyTombstones = new Set<ObjRef>();
   private dirtyCounters = false;
   // Tombstoned ULIDs from `recycle()`. Distinct from `objects` having no row,
   // which can also mean "never existed". Per spec/semantics/recycle.md §RC3.9.
@@ -383,7 +385,14 @@ export class WooWorld {
   }
 
   enableIncrementalPersistence(): void {
-    if (this.objectRepository) this.incrementalPersistenceEnabled = true;
+    if (!this.objectRepository) return;
+    this.incrementalPersistenceEnabled = true;
+    // Rehydrate tombstones from the persistence layer so dangling-ref
+    // checks survive process restart. Per spec/reference/persistence.md
+    // §14.2.1.
+    for (const id of this.objectRepository.loadTombstones()) {
+      this.tombstones.add(id);
+    }
   }
 
   setHostBridge(bridge: HostBridge | null): void {
@@ -4196,6 +4205,7 @@ export class WooWorld {
     this.objects.delete(objRef);
     this.tombstones.add(objRef);
     this.deletePersistedObject(objRef);
+    this.persistTombstone(objRef);
     if (this.presenceIndexBuilt) this.invalidatePresenceIndex();
     this.persist();
   }
@@ -4742,6 +4752,7 @@ export class WooWorld {
       deletedSessions: new Set(this.deletedSessions),
       dirtyTasks: new Set(this.dirtyTasks),
       deletedTasks: new Set(this.deletedTasks),
+      dirtyTombstones: new Set(this.dirtyTombstones),
       dirtyCounters: this.dirtyCounters,
       dirty: this.persistenceDirty
     };
@@ -4755,6 +4766,7 @@ export class WooWorld {
     this.deletedSessions = new Set(state.deletedSessions);
     this.dirtyTasks = new Set(state.dirtyTasks);
     this.deletedTasks = new Set(state.deletedTasks);
+    this.dirtyTombstones = new Set(state.dirtyTombstones);
     this.dirtyCounters = state.dirtyCounters;
     this.persistenceDirty = state.dirty;
   }
@@ -4768,6 +4780,7 @@ export class WooWorld {
       this.deletedSessions.size > 0 ||
       this.dirtyTasks.size > 0 ||
       this.deletedTasks.size > 0 ||
+      this.dirtyTombstones.size > 0 ||
       this.dirtyCounters
     );
   }
@@ -4798,6 +4811,24 @@ export class WooWorld {
     const startedAt = Date.now();
     repo.deleteObject(objRef);
     this.recordMetric({ kind: "storage_direct_write", what: "object_delete", ms: Date.now() - startedAt });
+  }
+
+  /**
+   * Persist a tombstone for `id` to the active repository. Per
+   * spec/reference/persistence.md §14.2.1: write-once, idempotent on
+   * repeat. Best-effort with deferred-persistence: tombstones flushed at
+   * the next persist tick when persistencePaused/persistenceDeferred is
+   * non-zero, just like dirty objects.
+   */
+  private persistTombstone(objRef: ObjRef): void {
+    this.bumpMutationVersion();
+    const repo = this.activeObjectRepository();
+    if (!repo) return;
+    if (this.persistencePaused > 0 || this.persistenceDeferred > 0) {
+      this.dirtyTombstones.add(objRef);
+      return;
+    }
+    repo.saveTombstone(objRef, Date.now(), null);
   }
 
   private persistProperty(objRef: ObjRef, name: string): void {
@@ -4928,6 +4959,7 @@ export class WooWorld {
     const deletedSessions = Array.from(this.deletedSessions);
     const dirtyTasks = Array.from(this.dirtyTasks);
     const deletedTasks = Array.from(this.deletedTasks);
+    const dirtyTombstones = Array.from(this.dirtyTombstones);
     const dirtyCounters = this.dirtyCounters;
     const startedAt = Date.now();
     repo.transaction(() => {
@@ -4959,6 +4991,8 @@ export class WooWorld {
         repo.saveMeta("parkedTaskCounter", String(this.parkedTaskCounter));
         repo.saveMeta("sessionCounter", String(this.sessionCounter));
       }
+      const now = Date.now();
+      for (const id of dirtyTombstones) repo.saveTombstone(id, now, null);
     });
     for (const objRef of dirtyObjects) this.dirtyObjects.delete(objRef);
     for (const objRef of deletedObjects) this.deletedObjects.delete(objRef);
@@ -4971,6 +5005,7 @@ export class WooWorld {
     for (const sessionId of deletedSessions) this.deletedSessions.delete(sessionId);
     for (const taskId of dirtyTasks) this.dirtyTasks.delete(taskId);
     for (const taskId of deletedTasks) this.deletedTasks.delete(taskId);
+    for (const id of dirtyTombstones) this.dirtyTombstones.delete(id);
     if (dirtyCounters) this.dirtyCounters = false;
     this.persistenceDirty = this.hasDirtyPersistence();
     const persistedProps = dirtyProperties.filter(({ objRef }) => !deletedObjectSet.has(objRef) && !dirtyObjectSet.has(objRef));

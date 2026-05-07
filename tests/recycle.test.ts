@@ -86,6 +86,36 @@ describe("recycle", () => {
     expect(reborn.isRecycled(leaf)).toBe(true);
   });
 
+  it("recycled ULIDs round-trip through SQLite (incremental persistence)", async () => {
+    const { LocalSQLiteRepository } = await import("../src/server/sqlite-repository");
+    const { mkdtempSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+
+    const dir = mkdtempSync(join(tmpdir(), "recycle-tombstone-"));
+    const dbPath = join(dir, "world.db");
+    try {
+      // First boot: recycle a leaf, persist tombstone via incremental save.
+      const repo = new LocalSQLiteRepository(dbPath);
+      const world = createWorld({ repository: repo });
+      const { actor } = builderActor(world);
+      const leaf = world.createAuthoredObject(actor, { parent: "$thing", name: "Leaf" });
+      await recycleVia(world, actor, leaf);
+      world.persist(true);
+      expect(repo.loadTombstones()).toContain(leaf);
+      repo.close();
+
+      // Second boot: tombstone is rehydrated from SQLite.
+      const repo2 = new LocalSQLiteRepository(dbPath);
+      const world2 = createWorld({ repository: repo2 });
+      expect(world2.isRecycled(leaf)).toBe(true);
+      expect(world2.tombstones.has(leaf)).toBe(true);
+      repo2.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("refuses to recycle an object with children unless force: true (E_RECMOVE)", async () => {
     const world = createWorld();
     const { actor } = builderActor(world);

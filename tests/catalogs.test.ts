@@ -3153,6 +3153,7 @@ describe("local catalogs", () => {
       const requester = world.auth("guest:horo-long-requester").actor;
       const blockId = "obj_test_horo_long_block";
       world.createObject({ id: blockId, name: blockId, parent: "$horoscope_block", owner: "$wiz", location: roomId });
+      world.setProp(blockId, "name", "Horoscope machine");
       world.setProp(blockId, "rate_limit_seconds", 0);
       world.setProp(blockId, "block_cooldown_seconds", 0);
 
@@ -3172,10 +3173,12 @@ describe("local catalogs", () => {
       if (inventory.op !== "result") return;
       const result = inventory.result as { items: Array<{ id: string; title: string }>; text: string };
       expect(result.items).toEqual([
-        expect.objectContaining({ id: noteId, title: expect.stringMatching(/^obj_obj_test_horo_long_room_\d+: Gemini /) })
+        expect.objectContaining({ id: noteId, title: expect.stringMatching(/^Horoscope: gemini: Gemini /) })
       ]);
       expect(result.items[0].title.length).toBeLessThanOrEqual(140);
       expect(result.text.length).toBeLessThanOrEqual(170);
+      expect(world.getProp(noteId, "name")).toBe("Horoscope: gemini");
+      expect(world.getProp(noteId, "description")).toBe("A note from Horoscope machine in response to: gemini");
       expect(inventory.observations[0]).toMatchObject({
         type: "text",
         target: requester,

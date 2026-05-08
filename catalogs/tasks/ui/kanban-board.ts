@@ -276,7 +276,7 @@ export class WooTasksKanbanElement extends HTMLElement {
     const actorNames = this.collectActorNames(woo, projected);
     let listing: unknown;
     try {
-      listing = await woo.call(subject, "listing", []);
+      listing = await woo.directCall(subject, "listing", []);
     } catch {
       return;
     }
@@ -288,7 +288,7 @@ export class WooTasksKanbanElement extends HTMLElement {
     if (actor) {
       await Promise.all(tasks.map(async (task) => {
         try {
-          const result = await woo.call(subject, "available_actions", [task.id, actor]);
+          const result = await woo.directCall(subject, "available_actions", [task.id, actor]);
           if (Array.isArray(result)) {
             task.actions = result.flatMap((row) => {
               const parsed = readActionRow(row);
@@ -447,7 +447,7 @@ export class WooTasksKanbanElement extends HTMLElement {
     const woo = this.woo;
     if (!woo) return;
     try {
-      await woo.call(taskId, action.verb, args);
+      await woo.directCall(taskId, action.verb, args);
     } catch {
       // Errors surface as observations; live reconciliation tightens this later.
     }

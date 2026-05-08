@@ -32,9 +32,9 @@ function testWooContext(names: Record<string, string> = {}): WooContext {
     frame: { id: "test", subject: "subject", get: () => undefined, set: () => true },
     neighborhood: { subject: "subject", refs: [], related: {}, has: () => true },
     observe: (ref) => ({ id: ref, name: names[ref] ?? ref, props: {}, catalogState: {} }),
-    call: async () => undefined,
-    send: async () => undefined,
     directCall: async () => undefined,
+    send: async () => undefined,
+    call: async () => undefined,
     emit: () => true
   };
 }
@@ -102,7 +102,7 @@ describe("bundled catalog UI components", () => {
       frame: { id: "test", subject: "the_taskboard", get: () => undefined, set: () => true },
       neighborhood: { subject: "the_taskboard", refs: [], related: {}, has: () => true },
       observe: (ref) => ({ id: ref, name: ref === "the_taskboard" ? "Taskboard" : ref === "guest_1" ? "Guest 1" : ref, props: {}, catalogState: {} }),
-      call: async (target, verb, args = []) => {
+      directCall: async (target, verb, args = []) => {
         calls.push({ target, verb, args });
         if (verb === "listing") return listing;
         if (verb === "available_actions") return [{ verb: "claim", label: "Claim", args: [] }];
@@ -110,7 +110,7 @@ describe("bundled catalog UI components", () => {
         return undefined;
       },
       send: async () => undefined,
-      directCall: async () => undefined,
+      call: async () => undefined,
       emit: () => true
     };
     const element = document.createElement("woo-tasks-kanban") as HTMLElement & { woo?: WooContext; subject?: string; refresh?: () => Promise<void> };
@@ -141,13 +141,13 @@ describe("bundled catalog UI components", () => {
       frame: { id: "test", subject: "the_taskboard", get: () => undefined, set: () => true },
       neighborhood: { subject: "the_taskboard", refs: [], related: {}, has: () => true },
       observe: (ref) => ({ id: ref, name: ref === "the_taskboard" ? "Taskboard" : ref, props: {}, catalogState: {} }),
-      call: async (target, verb, args = []) => {
+      directCall: async (target, verb, args = []) => {
         calls.push({ target, verb, args });
         if (verb === "listing") return [];
         return null;
       },
       send: async () => undefined,
-      directCall: async () => undefined,
+      call: async () => undefined,
       emit: () => true
     };
     const element = document.createElement("woo-tasks-kanban") as HTMLElement & { woo?: WooContext; subject?: string; data?: any };
@@ -203,13 +203,13 @@ describe("bundled catalog UI components", () => {
       frame: { id: "test", subject: "the_taskboard", get: () => undefined, set: () => true },
       neighborhood: { subject: "the_taskboard", refs: [], related: {}, has: () => true },
       observe: (ref) => ({ id: ref, name: ref === "the_taskboard" ? "Taskboard" : ref, props: {}, catalogState: {} }),
-      call: async (target, verb, args = []) => {
+      directCall: async (target, verb, args = []) => {
         calls.push({ target, verb, args });
         if (verb === "listing") return [];
         return null;
       },
       send: async () => undefined,
-      directCall: async () => undefined,
+      call: async () => undefined,
       emit: () => true
     };
     const element = document.createElement("woo-tasks-kanban") as HTMLElement & { woo?: WooContext; subject?: string; data?: any };
@@ -273,7 +273,7 @@ describe("bundled catalog UI components", () => {
       frame: { id: "test", subject: "the_taskboard", get: () => undefined, set: () => true },
       neighborhood: { subject: "the_taskboard", refs: [], related: {}, has: () => true },
       observe: (ref) => ({ id: ref, name: ref === "the_taskboard" ? "Taskboard" : ref, props: {}, catalogState: {} }),
-      call: async (_target, verb) => {
+      directCall: async (_target, verb) => {
         if (verb === "listing") {
           listingCalls += 1;
           return [];
@@ -281,7 +281,7 @@ describe("bundled catalog UI components", () => {
         return [];
       },
       send: async () => undefined,
-      directCall: async () => undefined,
+      call: async () => undefined,
       emit: () => true
     };
     vi.useFakeTimers();

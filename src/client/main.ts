@@ -3041,6 +3041,18 @@ function receiveChatEvent(observation: any, shouldRender = true) {
   if (kind === "left" && typeof observation.actor === "string") {
     state.chatPresent = state.chatPresent.filter((id) => id !== observation.actor);
   }
+  // `taken` / `dropped` (and `entered` / `left`) are room-broadcasts that the
+  // server's audience computation excludes the doer from (world.ts'
+  // observationAudienceActors). The originator still receives them in their
+  // DirectResultFrame.observations envelope by design, so the doer-exclusion
+  // has to be applied here before the chat line is pushed; the verb's own
+  // tell(actor, …) line ("You drop X.") already covers the doer's view.
+  if (
+    (kind === "taken" || kind === "dropped" || kind === "entered" || kind === "left")
+    && typeof observation.actor === "string"
+    && state.actor
+    && observation.actor === state.actor
+  ) return;
   pushChatLine({
     kind,
     actor: typeof observation.actor === "string" ? observation.actor : undefined,

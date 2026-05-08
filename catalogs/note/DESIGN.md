@@ -69,8 +69,8 @@ Properties inherited from `$portable`:
 | `text` | Permission-checking getter for the full `.text`. Public API for non-wizard callers. |
 | `text_summary(limit)` | Permission-checking bounded display summary. Returns `{lines, length, preview, truncated}` without forcing the caller to materialize the full text. Subclasses that transform text for readers should override this alongside `:text()`. |
 | `read` / `r@ead` | Call `:text()`, emit a `note_read` observation, return the text. |
-| `set_text(str)` | Replace text. Enforces a 65536-char cap. Permission: `:is_writable_by(actor)`. |
-| `write(line)` / `w@rite` | LambdaMOO-style append-line. Inserts a newline before the line if the text is non-empty. Enforces the same 65536-char cap as `:set_text`. Permission: `:is_writable_by(actor)`. |
+| `set_text(str)` | Replace text. Enforces a 262144-char cap. Permission: `:is_writable_by(actor)`. |
+| `write(line)` / `w@rite` | LambdaMOO-style append-line. Inserts a newline before the line if the text is non-empty. Enforces the same 262144-char cap as `:set_text`. Permission: `:is_writable_by(actor)`. |
 | `erase` / `er@ase` | LambdaMOO-style clear. Sets the text to `""`. Permission: `:is_writable_by(actor)`. |
 | `add_writer(who)` / `rm_writer(who)` | Manage `.writers`. Owner or wizard only. Mutating calls emit `note_writers_changed` so UIs can update edit affordances without rehydration. |
 | `is_readable_by(actor)` | Default `true`. Override in subclasses to restrict. |
@@ -80,7 +80,7 @@ Properties inherited from `$portable`:
 
 ## Bounding the body
 
-`.text` is capped at 65536 characters. Both `:set_text` and `:write` raise
+`.text` is capped at 262144 characters. Both `:set_text` and `:write` raise
 `E_INVARG` if the resulting text would exceed the cap. This is the
 single point of bound enforcement; downstream renderers and the room
 command matcher rely on it (e.g., `:look_self` returns `text_length`

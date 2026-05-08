@@ -27,7 +27,7 @@ A note has three explicit slots:
 |---|---|---|
 | **identity** | `name` (inherited from `$root`) | Inventory listing; verb-targeting; the short label that distinguishes one note from another. |
 | **cosmetic** | `description` (inherited from `$root`) | What `look at note` shows. Optional; left empty by default. |
-| **content** | `text` (string, markdown by convention, capped at 65536 characters) | What `read note` shows. The payload. |
+| **content** | `text` (string, markdown by convention, capped at 262144 characters) | What `read note` shows. The payload. |
 
 The substrate never derives one from another. Producers set `name` and
 `text` at creation. Authors edit `name` and `text`. The cosmetic
@@ -39,7 +39,7 @@ See [DESIGN.md](DESIGN.md) for the app design and behavior contract.
 
 `$note < $portable < $thing < $root`
 
-Properties: `.text` (string, perms `""`, capped at 65536 characters),
+Properties: `.text` (string, perms `""`, capped at 262144 characters),
 `.writers` (list of additional writer objects beyond the owner).
 Identity (`.name`) and cosmetic (`.description`) are inherited from
 `$root`.
@@ -50,7 +50,7 @@ Identity (`.name`) and cosmetic (`.description`) are inherited from
 :text                   permission-checking getter for the full text
 :text_summary(limit)    bounded display summary {lines, length, preview, truncated}
 :read                   show the text and emit a note_read observation
-:set_text(str)          replace the entire text (writers only); enforces 65536-char cap
+:set_text(str)          replace the entire text (writers only); enforces 262144-char cap
 :write(line)            append a line (writers only); inserts a newline if non-empty
 :erase                  clear the text (writers only)
 :add_writer(who)        add a writer (owner or wizard only)
@@ -106,7 +106,7 @@ first text line onto the name. v0.2 keeps the property name `text` but
 changes the type to a single string, drops the heuristic, and bounds the
 text size:
 
-- `text: list<str>` → `text: str` (markdown, capped at 65536 characters)
+- `text: list<str>` → `text: str` (markdown, capped at 262144 characters)
 - `:title()` → inherited from `$root`, returns `this.name`
 - `:set_text(lines)` → `:set_text(str)` — same name, different argument shape
 - `:write(line)` keeps its LambdaMOO semantics (append a line, inserting

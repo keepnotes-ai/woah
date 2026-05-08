@@ -115,7 +115,7 @@ builtin first requires `note` to be a local `$note` descendant and raises
 `E_TYPE` otherwise. It then calls `note:is_readable_by(actor)` and raises
 `E_PERM` if it does not return true. The reference implementation then reads
 the note object's raw `.text` property locally. As of `$note` v0.2, `.text` is
-a single markdown string capped at 65536 characters by `:set_text`/`:write`;
+a single markdown string capped at 262144 characters by `:set_text`/`:write`;
 the v0.1 `list<str>` shape is tolerated by joining string elements with `\n`,
 so summary calls during a partial upgrade still succeed. `length` is the
 character count of the resolved text, `lines` is the number of `\r?\n`-split

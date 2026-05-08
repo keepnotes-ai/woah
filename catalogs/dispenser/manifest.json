@@ -2,7 +2,7 @@
   "name": "dispenser",
   "version": "0.2.0",
   "spec_version": "v1",
-  "description": "Dispenser block base class — a $block subclass that produces $dispensed_note artifacts in response to public :order requests. The verb appends to a persistent queue, returns a ticket synchronously, and lets the plug drain the queue on its own cadence; :deliver(order_id, name, text) creates a note with the producer-supplied name and markdown text (capped at 65536 characters) and moves it into the requester's inventory. Subclass for concrete dispenser kinds (horoscope, recipe-of-the-day, ...).",
+  "description": "Dispenser block base class — a $block subclass that produces $dispensed_note artifacts in response to public :order requests. The verb appends to a persistent queue, returns a ticket synchronously, and lets the plug drain the queue on its own cadence; :deliver(order_id, name, text) creates a note with the producer-supplied name and markdown text (capped at 262144 characters) and moves it into the requester's inventory. Subclass for concrete dispenser kinds (horoscope, recipe-of-the-day, ...).",
   "license": "MIT",
   "depends": ["@local:block", "@local:note"],
   "classes": [
@@ -18,7 +18,7 @@
     {
       "local_name": "$dispenser_block",
       "parent": "$block",
-      "description": "Base class for plug-driven artifact dispensers. Public :order(request) appends a record to pending_orders and returns {order_id, queued, text, ts}; the plug drains the queue and calls :deliver(order_id, name, text) to produce a $note in the requester's inventory. The plug supplies the note's listing name and markdown text — name is the inventory label (e.g. 'Horoscope: Capricorn'), text is the payload (capped at 65536 characters by $note.set_text).\n\nGuest sessions can be minted without bound, so the per-requester rate limit (rate_limit_seconds) is not sufficient on its own — three additional caps prevent unbounded queues and AI-quota burn from anonymous floods: max_pending_orders (queue length), max_request_chars (per-request size), and block_cooldown_seconds (block-wide minimum between any two orders, regardless of requester). All four are owner-writable. Set rate_limit_seconds=0 / block_cooldown_seconds=0 to disable a tier; set max_* to 0 for unbounded.",
+      "description": "Base class for plug-driven artifact dispensers. Public :order(request) appends a record to pending_orders and returns {order_id, queued, text, ts}; the plug drains the queue and calls :deliver(order_id, name, text) to produce a $note in the requester's inventory. The plug supplies the note's listing name and markdown text — name is the inventory label (e.g. 'Horoscope: Capricorn'), text is the payload (capped at 262144 characters by $note.set_text).\n\nGuest sessions can be minted without bound, so the per-requester rate limit (rate_limit_seconds) is not sufficient on its own — three additional caps prevent unbounded queues and AI-quota burn from anonymous floods: max_pending_orders (queue length), max_request_chars (per-request size), and block_cooldown_seconds (block-wide minimum between any two orders, regardless of requester). All four are owner-writable. Set rate_limit_seconds=0 / block_cooldown_seconds=0 to disable a tier; set max_* to 0 for unbounded.",
       "properties": [
         { "name": "system_prompt", "type": "str", "default": "", "perms": "r" },
         { "name": "rate_limit_seconds", "type": "int", "default": 60, "perms": "r" },

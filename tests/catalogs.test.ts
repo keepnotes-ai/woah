@@ -943,7 +943,7 @@ describe("local catalogs", () => {
     }
   });
 
-  it("$note exposes LambdaMOO write/erase facades, an add_writer/rm_writer pair, and bounds text at 65536 chars", async () => {
+  it("$note exposes LambdaMOO write/erase facades, an add_writer/rm_writer pair, and bounds text at 262144 chars", async () => {
     const world = createWorld();
     const owner = world.auth("guest:note-write-owner");
     const collaborator = world.auth("guest:note-write-collab");
@@ -974,15 +974,15 @@ describe("local catalogs", () => {
     await call("note-set", owner, owner.actor, "set_text", ["just-one-line"]);
     expect(world.getProp(noteId, "text")).toBe("just-one-line");
 
-    // The 65536-char cap rejects oversize text on both :set_text and :write.
-    const huge = "x".repeat(70_000);
+    // The 262144-char cap rejects oversize text on both :set_text and :write.
+    const huge = "x".repeat(270_000);
     const oversize = await call("note-set-huge", owner, owner.actor, "set_text", [huge]);
     expect(observationsError(oversize)).toBe("E_INVARG");
     expect(world.getProp(noteId, "text")).toBe("just-one-line");
-    await call("note-fill", owner, owner.actor, "set_text", ["x".repeat(60_000)]);
-    const overflowAppend = await call("note-write-overflow", owner, owner.actor, "write", ["y".repeat(10_000)]);
+    await call("note-fill", owner, owner.actor, "set_text", ["x".repeat(260_000)]);
+    const overflowAppend = await call("note-write-overflow", owner, owner.actor, "write", ["y".repeat(5_000)]);
     expect(observationsError(overflowAppend)).toBe("E_INVARG");
-    expect(world.getProp(noteId, "text")).toBe("x".repeat(60_000));
+    expect(world.getProp(noteId, "text")).toBe("x".repeat(260_000));
 
     // Writers list management is owner-or-wizard gated.
     expect(world.getProp(noteId, "writers")).toEqual([]);
@@ -1004,7 +1004,7 @@ describe("local catalogs", () => {
     expect(world.getProp(noteId, "writers")).toEqual([collaborator.actor]);
     // The collaborator can now write through :is_writable_by.
     await call("note-collab-write", collaborator, collaborator.actor, "write", ["from-collab"]);
-    expect(world.getProp(noteId, "text")).toBe("x".repeat(60_000) + "\nfrom-collab");
+    expect(world.getProp(noteId, "text")).toBe("x".repeat(260_000) + "\nfrom-collab");
     // Strangers still cannot.
     const strangerWrite = await call("note-stranger-write", stranger, stranger.actor, "write", ["nope"]);
     expect(observationsError(strangerWrite)).toBe("E_PERM");
@@ -3248,7 +3248,7 @@ describe("local catalogs", () => {
       expect(ordered.op).toBe("result");
       if (ordered.op !== "result") return;
       const orderId = (ordered.result as { order_id: string }).order_id;
-      // v0.2 caps $note.text at 65536 chars in :set_text. The dispenser
+      // v0.2 caps $note.text at 262144 chars in :set_text. The dispenser
       // routes text through that verb, so an oversize body fails at the
       // producer instead of leaking into the requester's inventory.
       const huge = "Gemini ".repeat(180_000);

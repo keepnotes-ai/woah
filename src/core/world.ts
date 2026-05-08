@@ -27,7 +27,7 @@ import type { ObjectRepository, ParkedTaskRecord, SerializedObject, SerializedPr
 import { isVmReadSignal, isVmSuspendSignal, runSerializedTinyVmTask, runSerializedTinyVmTaskWithInput, runTinyVm, type SerializedVmTask } from "./tiny-vm";
 import { installCatalogManifest, updateCatalogManifest, type CatalogManifest, type CatalogMigrationManifest } from "./catalog-installer";
 import { normalizeVerbPerms } from "./verb-perms";
-import { compileVerb } from "./authoring";
+import { analyzeBytecodePurity, combineVerbPurity, compileVerb, propagateVerbPurity } from "./authoring";
 import { hashSource, randomHex, constantTimeEqual } from "./source-hash";
 
 export type NativeHandler = (ctx: CallContext, args: WooValue[]) => WooValue | Promise<WooValue>;
@@ -3002,6 +3002,11 @@ export class WooWorld {
       version
     });
     if (dryRun) return summary;
+    const finalBytecode = { ...compiled.bytecode, version };
+    // Re-classify on every install — analyzer drives purity, manifest-style
+    // claims aren't available on this surface, and a `pure` flag set by an
+    // earlier install must NOT carry over silently when the source changes.
+    const pure = combineVerbPurity(analyzeBytecodePurity(finalBytecode), undefined, `${objRef}:${selected.name}`);
     this.addVerb(objRef, {
       kind: "bytecode",
       name: selected.name,
@@ -3012,12 +3017,17 @@ export class WooWorld {
       direct_callable: parsedPerms.directCallable,
       skip_presence_check: selected.current?.skip_presence_check,
       tool_exposed: selected.current?.tool_exposed,
+      pure: pure || undefined,
+      calls: compiled.metadata?.calls,
       source,
       source_hash: compiled.source_hash ?? hashSource(source),
-      bytecode: { ...compiled.bytecode, version },
+      bytecode: finalBytecode,
       version,
       line_map: compiled.line_map ?? {}
     }, { append: selected.append, slot: selected.current ? selected.slot : undefined });
+    // Run propagation so a transitively-pure new verb (and any callers that
+    // depend on it) get their flag updated to match the call graph.
+    propagateVerbPurity(this);
     return summary;
   }
 

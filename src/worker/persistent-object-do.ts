@@ -543,9 +543,10 @@ export class PersistentObjectDO {
             world.touchSessionInput(sessionId);
             const session = { sessionId, actor };
             const host = await this.resolveObjectHost(target, WORLD_HOST);
+            const { pure } = this.resolveDispatchPath(world, target, verb, host, WORLD_HOST);
             return host === WORLD_HOST
               ? await world.directCall(undefined, actor, target, verb, args)
-              : await this.forwardWsDirect(world, host, undefined, session, target, verb, args);
+              : await this.forwardWsDirect(world, host, undefined, session, target, verb, args, { pure });
           }
         },
         broadcasts: {
@@ -1101,8 +1102,16 @@ export class PersistentObjectDO {
       },
       dispatch: async (ctx, target, verbName, args, startAt) => {
         const host = await hostForObject(startAt ?? target, ctx.hostMemo);
-        if (!host || host === localHost) return await world.hostDispatch(ctx, target, verbName, args, startAt);
-        const response = await this.forwardInternalChecked<{
+        const resolvedHost = host ?? localHost;
+        const { pure, path } = this.resolveDispatchPath(world, target, verbName, resolvedHost, localHost);
+        if (path === "local") return await world.hostDispatch(ctx, target, verbName, args, startAt);
+        // Pure verbs route through forwardInternalReadChecked for its 2.5s
+        // read deadline. A timed-out look_self surfaces as E_TIMEOUT to the
+        // caller and frees the host queue rather than wedging it.
+        const forward = pure
+          ? this.forwardInternalReadChecked.bind(this)
+          : this.forwardInternalChecked.bind(this);
+        const response = await forward<{
           result: WooValue;
             observations?: Observation[];
             audience_actors?: ObjRef[];
@@ -1110,7 +1119,7 @@ export class PersistentObjectDO {
             audience_sessions?: string[];
             observation_session_audiences?: string[][];
             deferred_host_effects?: DeferredHostEffect[];
-        }>(host, "/__internal/remote-dispatch", {
+        }>(resolvedHost, "/__internal/remote-dispatch", {
           ctx: this.serializedCallContext(ctx),
           target,
           verb: verbName,
@@ -2073,6 +2082,7 @@ export class PersistentObjectDO {
       direct: async (frameId, session, target, verb, args) => {
         world.touchSessionInput(session.sessionId);
         const host = await this.resolveObjectHost(target, WORLD_HOST);
+        const { pure } = this.resolveDispatchPath(world, target, verb, host, WORLD_HOST);
         return host === WORLD_HOST
             ? await world.directCall(
                 frameId,
@@ -2082,7 +2092,7 @@ export class PersistentObjectDO {
                 args,
                 { sessionId: session.sessionId }
               )
-          : await this.forwardWsDirect(world, host, frameId, session, target, verb, args);
+          : await this.forwardWsDirect(world, host, frameId, session, target, verb, args, { pure });
       },
       replay: async (frameId, session, space, fromValue, limitValue) => {
         // Replay is recovery, not user input — does NOT touch lastInputAt.
@@ -2189,15 +2199,43 @@ export class PersistentObjectDO {
     session: { sessionId: string; actor: ObjRef },
     target: ObjRef,
     verb: string,
-    args: WooValue[]
+    args: WooValue[],
+    options: { pure?: boolean } = {}
   ): Promise<DirectResultFrame | ErrorFrame> {
     const body = this.forwardBody(world, session, { frame_id: frameId, target, verb, args });
-    const result = await this.forwardInternal<((DirectResultFrame & { deferred_host_effects?: DeferredHostEffect[] }) | ErrorFrame)>(host, "/__internal/ws-direct", body);
+    // Pure verbs get the read deadline; mutating verbs keep the no-timeout
+    // path (changing that requires idempotency at the destination, not yet
+    // available — see review-feedback discussion).
+    const timeoutMs = options.pure === true ? this.hostReadRpcTimeoutMs() : undefined;
+    const result = await this.forwardInternal<((DirectResultFrame & { deferred_host_effects?: DeferredHostEffect[] }) | ErrorFrame)>(host, "/__internal/ws-direct", body, { timeoutMs });
     if (result.op === "result" && Array.isArray(result.deferred_host_effects)) {
       await world.applyDeferredHostEffects(result.deferred_host_effects);
       delete result.deferred_host_effects;
     }
     return result;
+  }
+
+  // Helper used at every cross-host verb-dispatch site to (a) probe verb
+  // purity from the local class registry and (b) emit a `dispatch_resolved`
+  // event so we always have a tail trace of the verb routed to which host
+  // along which path. Uses the full resolveVerb walk (parent chain + feature
+  // chain), matching the way the dispatcher itself resolves at run time —
+  // otherwise feature-contributed pure verbs would silently take the
+  // mutating path. Best-effort: when the verb can't be resolved locally
+  // (instance-only verb on a host we don't seed), defaults to `pure=false`
+  // (mutating path), matching pre-flag conservative behavior.
+  private resolveDispatchPath(world: WooWorld | null | undefined, target: ObjRef, verb: string, resolvedHost: string, localHost: string): { pure: boolean; path: "local" | "read" | "mutating" } {
+    const local = resolvedHost === localHost;
+    let pure = false;
+    if (world) {
+      try {
+        const resolved = world.resolveVerb(target, verb);
+        if (resolved.verb.pure === true) pure = true;
+      } catch { /* not resolvable locally; mutating fallback */ }
+    }
+    const path: "local" | "read" | "mutating" = local ? "local" : (pure ? "read" : "mutating");
+    world?.recordMetric({ kind: "dispatch_resolved", target, verb, host: resolvedHost, path, pure });
+    return { pure, path };
   }
 
   private async executeWsCommand(
@@ -2214,9 +2252,10 @@ export class PersistentObjectDO {
 
     if (plan.route === "direct") {
       const host = await this.resolveObjectHost(plan.target, WORLD_HOST);
+      const { pure } = this.resolveDispatchPath(world, plan.target, plan.verb, host, WORLD_HOST);
       const result = host === WORLD_HOST
         ? await world.directCall(frameId, session.actor, plan.target, plan.verb, plan.args, { sessionId: session.sessionId })
-        : await this.forwardWsDirect(world, host, frameId, session, plan.target, plan.verb, plan.args);
+        : await this.forwardWsDirect(world, host, frameId, session, plan.target, plan.verb, plan.args, { pure });
       return result.op === "result" ? { ...result, command: plan } as DirectResultFrame : result;
     }
 

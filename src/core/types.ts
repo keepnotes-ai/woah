@@ -148,6 +148,24 @@ export type VerbDef =
       direct_callable?: boolean;
       skip_presence_check?: boolean;
       tool_exposed?: boolean;
+      // Declares the verb performs no observable state mutation: no property
+      // writes, no moveto, no observe-with-side-effects, no recycle, no host
+      // effects. May be set by the static analyzer (derived from bytecode +
+      // call graph) OR by a catalog manifest assertion — see `pure_declared`
+      // for the manifest-declared bit alone.
+      pure?: boolean;
+      // True iff the catalog manifest currently asserts `pure: true` for this
+      // verb. Distinct from `pure` (which can also be true via call-graph
+      // propagation). Drift detection compares this flag, so a catalog can
+      // remove a `pure: true` declaration without changing the source.
+      pure_declared?: boolean;
+      // Verb-call sites recorded by the DSL compiler. Used to (a) validate
+      // every `this:name()` resolves on the definer's class chain at
+      // install time and (b) propagate purity transitively across the
+      // call graph. An empty array means "compiled with the extractor, no
+      // call sites" (e.g. PASS-only or no calls); `undefined` means the
+      // metadata predates the extractor and should be treated as opaque.
+      calls?: VerbCallSite[];
     }
   | {
       kind: "native";
@@ -166,6 +184,9 @@ export type VerbDef =
       direct_callable?: boolean;
       skip_presence_check?: boolean;
       tool_exposed?: boolean;
+      pure?: boolean;
+      pure_declared?: boolean;
+      calls?: VerbCallSite[];
     };
 
 export type PropertyDef = {
@@ -233,7 +254,14 @@ export type MetricEvent =
   | { kind: "host_task_long_running"; id: number; label: string; elapsed_ms: number }
   // Logged when a cross-host RPC fires (the `cross_host_rpc` end event only
   // logs on settle, so a wedged fetch leaves no trace at all).
-  | { kind: "cross_host_rpc_start"; route: string; host: string };
+  | { kind: "cross_host_rpc_start"; route: string; host: string }
+  // Emitted on every verb dispatch from the worker's host bridge, so each
+  // dispatch leaves a trace of (a) where it routed and (b) which path it
+  // took. `path` is "local" when the destination is the same host, "read"
+  // for a remote pure verb (forwardInternalReadChecked, 2.5s timeout), and
+  // "mutating" for a remote impure verb (forwardInternalChecked, no
+  // timeout). Critical for diagnosing wedges that previously left no trail.
+  | { kind: "dispatch_resolved"; target: ObjRef; verb: string; host: string; path: "local" | "read" | "mutating"; pure: boolean };
 
 export type SequencedMessage = {
   space: ObjRef;
@@ -284,6 +312,13 @@ export type CompileDiagnostic = {
   };
 };
 
+// One verb-call site recorded by the DSL compiler. `name` is the verb name
+// at the call site (`this:name(...)` → `name`). `this_call` is true when the
+// receiver is the literal `this` keyword (statically resolvable on the
+// definer's class chain), false for any other receiver expression where the
+// target class is not knowable at compile time.
+export type VerbCallSite = { name: string; this_call: boolean };
+
 export type CompileResult = {
   ok: boolean;
   diagnostics: CompileDiagnostic[];
@@ -294,6 +329,7 @@ export type CompileResult = {
     name?: string;
     perms?: string;
     arg_spec?: Record<string, WooValue>;
+    calls?: VerbCallSite[];
   };
 };
 

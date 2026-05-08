@@ -1654,3 +1654,16 @@ textarea {
     transition: none;
   }
 }
+
+/* The default .space-chat-shell height (`100dvh - 5.25rem`) reserves 3.25rem
+   above the shell for a sibling toolbar, like pinboard's and dubspace's.
+   Tasks renders the title/header inside the shell instead, so the shell
+   should fill the full main content area (.main has 1rem padding on top
+   and bottom). Without this override the chat panel stops 3.25rem above
+   the viewport bottom. */
+woo-tasks-kanban {
+  display: block;
+}
+woo-tasks-kanban > .space-chat-shell {
+  height: calc(100dvh - 2rem);
+}

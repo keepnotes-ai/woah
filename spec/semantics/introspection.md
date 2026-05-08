@@ -51,7 +51,7 @@ Adds:
 - `last_snapshot_seq`: int
 - `recent_message_count`: int (e.g., last 100)
 
-### `$taskspace:describe()`
+### `$task_registry:describe()`
 
 Inherits `$space:describe()`, adds:
 - `task_count`: int (total tasks in the space)
@@ -104,11 +104,11 @@ For collections an agent might want to enumerate, the convention is a verb retur
 
 | Pattern | Example | Purpose |
 |---|---|---|
-| `:list_X()` | `$taskspace:list_tasks()` | All members of category X. |
-| `:open_X()` | `$taskspace:open_tasks()` | Filtered to a domain-specific status. |
-| `:by_X(value)` | `$taskspace:by_assignee(actor)` | Filtered by predicate. |
+| `:list_X()` | `$task_registry:list_tasks()` | All members of category X. |
+| `:open_X()` | `$task_registry:open_tasks()` | Filtered to a domain-specific status. |
+| `:by_X(value)` | `$task_registry:by_assignee(actor)` | Filtered by predicate. |
 
-These are application code, not runtime. The convention exists so agents can reason: "if I'm looking at a `$taskspace`, I expect `:list_tasks()` and the open/claimed/done variants."
+These are application code, not runtime. The convention exists so agents can reason: "if I'm looking at a `$task_registry`, I expect `:list_tasks()` and the open/claimed/done variants."
 
 For very large collections, paginate: `:list_tasks(offset, limit)` returning `{items, total, has_more}`.
 
@@ -128,7 +128,7 @@ A typical first interaction for a fresh agent:
 7. agent calls a verb via op: "call" with a structured message
 ```
 
-This loop requires no out-of-band knowledge about the world. It works on dubspace, taskspace, future demos. The schema-discovery part (`event_schema(obj, type)`) lets agents construct valid event payloads when they need to reason about possible observations.
+This loop requires no out-of-band knowledge about the world. It works on dubspace, tasks, future demos. The schema-discovery part (`event_schema(obj, type)`) lets agents construct valid event payloads when they need to reason about possible observations.
 
 ---
 

@@ -183,7 +183,7 @@ If the caller lacks read permission on source, `source` and `line_map` are
 omitted but the summary is still returned when the verb itself is discoverable.
 
 There is still no global object enumeration. The browser starts from known
-roots (`$system`, `$root_object`, `$room`, `$dubspace`, `$taskspace`), then walks
+roots (`$system`, `$root_object`, `$room`, `$dubspace`, `$task_registry`), then walks
 `children`, `contents`, and owner-maintained `created` lists.
 
 ---

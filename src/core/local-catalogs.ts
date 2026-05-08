@@ -36,7 +36,6 @@ const LOCAL_CATALOG_AGENT_TOOL_EXPOSURE_REPAIR_MIGRATION = "2026-05-01-agent-too
 const LOCAL_CATALOG_CHAT_NAVIGATION_TOOL_EXPOSURE_MIGRATION = "2026-05-01-chat-navigation-tool-exposure";
 const LOCAL_CATALOG_COCKATOO_TOOL_EXPOSURE_MIGRATION = "2026-05-01-cockatoo-tool-exposure";
 const LOCAL_CATALOG_CHAT_NOWHERE_PORTABLES_REPAIR_MIGRATION = "2026-05-01-chat-nowhere-portables-repair";
-const LOCAL_CATALOG_TASKSPACE_VERBS_REPAIR_MIGRATION = "2026-05-01-taskspace-verbs-repair";
 const LOCAL_CATALOG_PINBOARD_LOOK_OBSERVATION_MIGRATION = "2026-05-01-pinboard-look-observation";
 const LOCAL_CATALOG_PINBOARD_ACTIVITY_TEXT_MIGRATION = "2026-05-01-pinboard-activity-text";
 const LOCAL_CATALOG_PINBOARD_VIEWPORT_PRESENCE_MIGRATION = "2026-05-01-pinboard-viewport-presence";
@@ -57,8 +56,6 @@ const LOCAL_CATALOG_CHAT_COMMAND_PLAN_SOURCE_REPAIR_MIGRATION = "2026-05-03-chat
 const LOCAL_CATALOG_CHAT_ACTOR_HUH_SOURCE_REPAIR_MIGRATION = "2026-05-06-chat-actor-huh-source-repair";
 const LOCAL_CATALOG_CHAT_LOOK_AT_COMMAND_REPAIR_MIGRATION = "2026-05-06-chat-look-at-command-repair";
 const LOCAL_CATALOG_CHAT_LOOK_AT_TRY_MIGRATION = "2026-05-03-chat-look-at-collect-prop-try";
-const LOCAL_CATALOG_TASKSPACE_LIST_TASKS_GUARD_MIGRATION = "2026-05-02-taskspace-list-tasks-guard";
-const LOCAL_CATALOG_TASKSPACE_TASK_NOTE_PARENT_MIGRATION = "2026-05-03-taskspace-task-note-parent";
 const LOCAL_CATALOG_PROG_EDITOR_ROOM_MIGRATION = "2026-05-02-prog-editor-room";
 const LOCAL_CATALOG_PROG_EDITOR_NOWHERE_MIGRATION = "2026-05-02-prog-editor-nowhere";
 const LOCAL_CATALOG_DEMO_SPACES_NO_AUTO_PRESENCE_MIGRATION = "2026-05-04-demo-spaces-no-auto-presence";
@@ -88,7 +85,6 @@ const LOCAL_CATALOG_MIGRATION_INDEX: Array<{ id: string; only?: string }> = [
   { id: LOCAL_CATALOG_CHAT_NAVIGATION_TOOL_EXPOSURE_MIGRATION, only: "chat" },
   { id: LOCAL_CATALOG_COCKATOO_TOOL_EXPOSURE_MIGRATION, only: "chat" },
   { id: LOCAL_CATALOG_CHAT_NOWHERE_PORTABLES_REPAIR_MIGRATION, only: "chat" },
-  { id: LOCAL_CATALOG_TASKSPACE_VERBS_REPAIR_MIGRATION, only: "taskspace" },
   { id: LOCAL_CATALOG_PINBOARD_LOOK_OBSERVATION_MIGRATION, only: "pinboard" },
   { id: LOCAL_CATALOG_PINBOARD_ACTIVITY_TEXT_MIGRATION, only: "pinboard" },
   { id: LOCAL_CATALOG_PINBOARD_VIEWPORT_PRESENCE_MIGRATION, only: "pinboard" },
@@ -109,8 +105,6 @@ const LOCAL_CATALOG_MIGRATION_INDEX: Array<{ id: string; only?: string }> = [
   { id: LOCAL_CATALOG_CHAT_ACTOR_HUH_SOURCE_REPAIR_MIGRATION, only: "chat" },
   { id: LOCAL_CATALOG_CHAT_LOOK_AT_COMMAND_REPAIR_MIGRATION, only: "chat" },
   { id: LOCAL_CATALOG_CHAT_LOOK_AT_TRY_MIGRATION, only: "chat" },
-  { id: LOCAL_CATALOG_TASKSPACE_LIST_TASKS_GUARD_MIGRATION, only: "taskspace" },
-  { id: LOCAL_CATALOG_TASKSPACE_TASK_NOTE_PARENT_MIGRATION, only: "taskspace" },
   { id: LOCAL_CATALOG_PROG_EDITOR_ROOM_MIGRATION, only: "prog" },
   { id: LOCAL_CATALOG_PROG_EDITOR_NOWHERE_MIGRATION, only: "prog" },
   { id: LOCAL_CATALOG_DEMO_SPACES_NO_AUTO_PRESENCE_MIGRATION },
@@ -310,7 +304,6 @@ function runLocalCatalogMigrations(world: WooWorld, names: readonly string[], cl
   run(LOCAL_CATALOG_CHAT_NAVIGATION_TOOL_EXPOSURE_MIGRATION, { allowImplementationHints: true, only: "chat" });
   run(LOCAL_CATALOG_COCKATOO_TOOL_EXPOSURE_MIGRATION, { allowImplementationHints: true, only: "demoworld" });
   run(LOCAL_CATALOG_CHAT_NOWHERE_PORTABLES_REPAIR_MIGRATION, { allowImplementationHints: true, reconcileSeedHooks: true, rehomeNowhereSeedObjects: true, only: "demoworld" });
-  run(LOCAL_CATALOG_TASKSPACE_VERBS_REPAIR_MIGRATION, { allowImplementationHints: true, only: "taskspace" });
   run(LOCAL_CATALOG_PINBOARD_LOOK_OBSERVATION_MIGRATION, { allowImplementationHints: true, only: "pinboard" });
   run(LOCAL_CATALOG_PINBOARD_ACTIVITY_TEXT_MIGRATION, { allowImplementationHints: true, only: "pinboard" });
   run(LOCAL_CATALOG_PINBOARD_VIEWPORT_PRESENCE_MIGRATION, { allowImplementationHints: true, only: "pinboard" });
@@ -331,8 +324,6 @@ function runLocalCatalogMigrations(world: WooWorld, names: readonly string[], cl
   run(LOCAL_CATALOG_CHAT_ACTOR_HUH_SOURCE_REPAIR_MIGRATION, { allowImplementationHints: true, only: "chat" });
   run(LOCAL_CATALOG_CHAT_LOOK_AT_COMMAND_REPAIR_MIGRATION, { allowImplementationHints: true, only: "chat" });
   run(LOCAL_CATALOG_CHAT_LOOK_AT_TRY_MIGRATION, { allowImplementationHints: true, only: "chat" });
-  runTaskspaceListTasksGuardMigration(world, names);
-  runTaskspaceTaskNoteParentMigration(world, names);
   run(LOCAL_CATALOG_PROG_EDITOR_ROOM_MIGRATION, { reconcileSeedHooks: true, only: "prog" });
   run(LOCAL_CATALOG_PROG_EDITOR_NOWHERE_MIGRATION, { reconcileSeedHooks: true, only: "prog" });
   runDemoSpacesNoAutoPresenceMigration(world);
@@ -700,7 +691,7 @@ function runChatTransparentFeatureMigration(world: WooWorld, names: readonly str
     });
     if (result.status === "failed") throw new Error(`local catalog schema plan failed: ${result.plan_id}`);
   }
-  for (const name of ["dubspace", "pinboard", "taskspace"]) {
+  for (const name of ["dubspace", "pinboard"]) {
     if (!names.includes(name) || !localCatalogInstalled(world, name)) continue;
     const result = runLocalCatalogSchemaPlan(world, name, LOCAL_CATALOGS.get(name)!, "gateway", "world", {
       allowImplementationHints: true,
@@ -723,7 +714,7 @@ function runChatTransparentFeatureMigration(world: WooWorld, names: readonly str
 
 function transparentFeatureConsumers(): ObjRef[] {
   const out: ObjRef[] = [];
-  for (const name of ["dubspace", "pinboard", "taskspace"]) {
+  for (const name of ["dubspace", "pinboard"]) {
     const manifest = LOCAL_CATALOGS.get(name);
     for (const hook of manifest?.seed_hooks ?? []) {
       if (hook.kind === "attach_feature" && hook.feature === "chat:$transparent" && typeof hook.consumer === "string") {
@@ -740,7 +731,7 @@ function chatTransparentFeaturePostcondition(world: WooWorld, names: readonly st
     const announce = world.objects.has("$room") ? world.ownVerbExact("$room", "announce_all_but") : null;
     if (!announce?.source.includes("hear_parent_announce")) return false;
   }
-  for (const name of ["dubspace", "pinboard", "taskspace"]) {
+  for (const name of ["dubspace", "pinboard"]) {
     if (!names.includes(name) || !localCatalogInstalled(world, name)) continue;
     const manifest = LOCAL_CATALOGS.get(name);
     for (const def of manifest?.classes ?? []) {
@@ -777,37 +768,6 @@ function runChatLookSkipPresenceMigration(world: WooWorld, names: readonly strin
     world.addVerb("$conversational", { ...look, skip_presence_check: true, version: look.version + 1 });
   }
   markMigrationApplied(world, LOCAL_CATALOG_CHAT_LOOK_SKIP_PRESENCE_MIGRATION);
-}
-
-function runTaskspaceListTasksGuardMigration(world: WooWorld, names: readonly string[]): void {
-  if (!names.includes("taskspace")) return;
-  if (!localCatalogInstalled(world, "taskspace")) return;
-  if (migrationApplied(world, LOCAL_CATALOG_TASKSPACE_LIST_TASKS_GUARD_MIGRATION)) return;
-  const listTasks = world.objects.has("$taskspace") ? world.ownVerbExact("$taskspace", "list_tasks") : null;
-  if (!listTasks || !listTasks.source.includes("isa(t, $task)")) {
-    const result = runLocalCatalogSchemaPlan(world, "taskspace", LOCAL_CATALOGS.get("taskspace")!, "gateway", "world", {
-      allowImplementationHints: true
-    });
-    if (result.status === "failed") throw new Error(`local catalog schema plan failed: ${result.plan_id}`);
-  }
-  markMigrationApplied(world, LOCAL_CATALOG_TASKSPACE_LIST_TASKS_GUARD_MIGRATION);
-}
-
-function runTaskspaceTaskNoteParentMigration(world: WooWorld, names: readonly string[]): void {
-  if (!names.includes("taskspace")) return;
-  if (!localCatalogInstalled(world, "taskspace")) return;
-  if (migrationApplied(world, LOCAL_CATALOG_TASKSPACE_TASK_NOTE_PARENT_MIGRATION)) return;
-  // The taskspace manifest now declares `$task < note:$note`. Dependency repair
-  // installs `note` first for old worlds; if a partial boot has not reached that
-  // point yet, defer until a later boot can prove the parent postcondition.
-  if (!world.objects.has("$note")) return;
-  if (!world.objects.has("$task") || world.object("$task").parent !== "$note") {
-    const result = runLocalCatalogSchemaPlan(world, "taskspace", LOCAL_CATALOGS.get("taskspace")!, "gateway", "world", {
-      allowImplementationHints: true
-    });
-    if (result.status === "failed") throw new Error(`local catalog schema plan failed: ${result.plan_id}`);
-  }
-  markMigrationApplied(world, LOCAL_CATALOG_TASKSPACE_TASK_NOTE_PARENT_MIGRATION);
 }
 
 function runAutoDetectedLocalCatalogSchemaSync(world: WooWorld, names: readonly string[], covered: ReadonlySet<string>): void {

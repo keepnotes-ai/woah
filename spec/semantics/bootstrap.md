@@ -18,8 +18,8 @@ This is the contract the implementation must produce on first start; without it,
 1. **Directory** is created first. Holds corename → ULID map and world metadata. Empty at boot until populated.
 2. **`$system` (`#0`)** is created with the reserved ULID `00000000000000000000000000`. `parent = null`.
 3. **Remaining universal seed objects** are created in dependency order: `$root` → `$actor` → `$player` → `$wiz` / `$guest`, `$sequenced_log` → `$space`, `$thing` → `$catalog`, plus `$catalog_registry` and `$nowhere`. Corenames registered in Directory.
-4. **Configured local catalogs** are installed in dependency order. The bundled set is split between foundational class libraries (`@local:help`, `@local:chat`, `@local:note`, `@local:prog`), the demo seed catalog (`@local:demoworld`), and demo applications (`@local:dubspace`, `@local:pinboard`, `@local:taskspace`); see [catalogs.md §CT15](../discovery/catalogs.md#ct15-bundled-catalogs-in-this-repo) for roles. The normative source is the catalog manifests; bootstrap no longer hard-seeds demo classes and instances directly.
-5. **Catalog scaffold and demo instances** are created by the configured local catalogs. The Living Room / Deck / Hot Tub set, `the_cockatoo`, exits, and props come from `@local:demoworld`. `the_dubspace` is seeded by `@local:dubspace` mounted in `demoworld:the_chatroom`; `the_pinboard` by `@local:pinboard` in `demoworld:the_deck`; `the_taskspace` by `@local:taskspace`. `:add_feature` calls attach `$conversational` to ordinary rooms and `$transparent` (from `chat`) to embedded demo spaces, running as wizard at boot and satisfying both attach-policy gates.
+4. **Configured local catalogs** are installed in dependency order. The bundled set is split between foundational class libraries (`@local:help`, `@local:chat`, `@local:note`, `@local:prog`), the demo seed catalog (`@local:demoworld`), and demo applications (`@local:dubspace`, `@local:pinboard`, `@local:tasks`); see [catalogs.md §CT15](../discovery/catalogs.md#ct15-bundled-catalogs-in-this-repo) for roles. The normative source is the catalog manifests; bootstrap no longer hard-seeds demo classes and instances directly.
+5. **Catalog scaffold and demo instances** are created by the configured local catalogs. The Living Room / Deck / Hot Tub set, `the_cockatoo`, exits, and props come from `@local:demoworld`. `the_dubspace` is seeded by `@local:dubspace` mounted in `demoworld:the_chatroom`; `the_pinboard` by `@local:pinboard` in `demoworld:the_deck`; `the_bug_board` by `@local:tasks`. `:add_feature` calls attach `$conversational` to ordinary rooms and `$transparent` (from `chat`) to embedded demo spaces, running as wizard at boot and satisfying both attach-policy gates.
 6. **Guest player pool** is pre-seeded so first connections don't need to mint identities.
 
 Boot is idempotent: running it twice should be a no-op (each seed is created only if its corename isn't already mapped). This makes test setup and dev-restart trivial.
@@ -321,16 +321,16 @@ hints until the VM can express them directly.
 
 ---
 
-## B4. Local catalog: Taskspace classes
+## B4. Local catalog: Tasks classes
 
-> **Non-normative.** The `taskspace` catalog is a **demo application** (see [catalogs.md §CT15](../discovery/catalogs.md#ct15-bundled-catalogs-in-this-repo)). Documented here for reader convenience; canonical source is `catalogs/taskspace/manifest.json` and [`catalogs/taskspace/DESIGN.md`](../../catalogs/taskspace/DESIGN.md). A world without the demo will not have `$taskspace` or `$task`.
+> **Non-normative.** The `tasks` catalog is a **demo application** (see [catalogs.md §CT15](../discovery/catalogs.md#ct15-bundled-catalogs-in-this-repo)). Documented here for reader convenience; canonical source is `catalogs/tasks/manifest.json` and [`catalogs/tasks/DESIGN.md`](../../catalogs/tasks/DESIGN.md). A world without the demo will not have `$task_registry` or `$task`.
 
 | Corename | Parent | Anchor | Description |
 |---|---|---|---|
-| `$taskspace` | `$space` | n/a (own host) | Base class for spaces that coordinate hierarchical work. It extends `$space` with root task ordering and task-creation behavior for asynchronous human and agent collaboration. |
-| `$task` | `$note` | n/a | Base class for taskspace work items. A task is also a note/card artifact, and stores title, description, status, assignee, requirements, artifacts, messages, parent linkage, and ordered subtasks. |
+| `$task_registry` | `$space` | n/a (own host) | Base class for spaces that coordinate hierarchical work. It extends `$space` with root task ordering and task-creation behavior for asynchronous human and agent collaboration. |
+| `$task` | `$note` | n/a | Base class for task work items. A task is also a note/card artifact, and stores title, description, status, assignee, requirements, artifacts, messages, parent linkage, and ordered subtasks. |
 
-### B4.1 `$taskspace` additional properties
+### B4.1 `$task_registry` additional properties
 
 | Property | Type | Default |
 |---|---|---|
@@ -342,20 +342,20 @@ hints until the VM can express them directly.
 |---|---|---|
 | `title` | str | `""` |
 | `description` | str | `""` |
-| `parent_task` | obj \| null | null | null = directly under taskspace root |
+| `parent_task` | obj \| null | null | null = directly under registry root |
 | `subtasks` | list<obj> | `[]` | Ordered. |
 | `status` | str | `"open"` | One of: `open`, `claimed`, `in_progress`, `blocked`, `done`. |
 | `assignee` | obj \| null | null | The claimer. |
 | `requirements` | list<map> | `[]` | `[{text: str, checked: bool}, ...]`. |
 | `artifacts` | list<map> | `[]` | `[{kind: str, ref: str, label?: str}, ...]`. |
 | `messages` | list<map> | `[]` | `[{actor: obj, ts: int, body: str}, ...]`. |
-| `space` | obj | (set at create) | The taskspace this task belongs to (for emit routing). |
+| `space` | obj | (set at create) | The task registry this task belongs to (for emit routing). |
 
-### B4.3 `$taskspace` verbs
+### B4.3 `$task_registry` verbs
 
 `:create_task(title, description)` returning the new task ref. Body is ordinary
 catalog source: `create($task, actor)`, set task properties, append to
-`root_tasks`, and emit `task_created`. Taskspace uses the generic `create`
+`root_tasks`, and emit `task_created`. The registry uses the generic `create`
 builtin; no task-specific native runtime handler is required.
 
 ### B4.4 `$task` verbs
@@ -479,20 +479,20 @@ The bootstrap step that creates demo chat surfaces ends with:
 the_chatroom:add_feature($conversational);    // running as wizard at boot
 the_dubspace:add_feature($transparent);
 the_pinboard:add_feature($transparent);
-the_taskspace:add_feature($transparent);
+the_bug_board:add_feature($transparent);
 ```
 
 ---
 
 ## B6. Demo instances
 
-> **Non-normative.** Listed here are seed instances created by the bundled **demoworld** seed catalog and the **demo application** catalogs (`dubspace`, `pinboard`, `taskspace`); see [catalogs.md §CT15](../discovery/catalogs.md#ct15-bundled-catalogs-in-this-repo) for roles. A world that installs only the foundational catalogs (`chat`, `help`, `note`, `prog`) will not have any of these instances. `$nowhere` is the exception — it is a universal seed object covered in §B2.15 and re-listed here only for the demo-comparison context.
+> **Non-normative.** Listed here are seed instances created by the bundled **demoworld** seed catalog and the **demo application** catalogs (`dubspace`, `pinboard`, `tasks`); see [catalogs.md §CT15](../discovery/catalogs.md#ct15-bundled-catalogs-in-this-repo) for roles. A world that installs only the foundational catalogs (`chat`, `help`, `note`, `prog`) will not have any of these instances. `$nowhere` is the exception — it is a universal seed object covered in §B2.15 and re-listed here only for the demo-comparison context.
 
 | Corename | Class | Anchor | Description |
 |---|---|---|---|
 | `$nowhere` | `$thing` | n/a | Seed default-home for players whose `home` is null. Holds disconnected guests after `:on_disfunc` and any object reparented to `null` location during recycle. Wizard-owned, no contents-emitted observations. |
 | `the_dubspace` | `$dubspace` | n/a (own host root) | The first runnable sound-space instance. It owns the sequenced coordination surface for four loop slots, one channel, one filter, one delay, and one default scene. |
-| `the_taskspace` | `$taskspace` | n/a (own host root) | The first runnable task coordination space. It owns the sequenced timeline and anchored task tree used by people or agents to create, claim, discuss, and complete work. Boots with `features: [$transparent]` so `:say`/`:emote`/`:enter`/`:leave` are available alongside task verbs and public speech reaches the containing audience when mounted. |
+| `the_bug_board` | `$task_registry` | n/a (own host root) | The first runnable task coordination space. It owns the sequenced timeline and anchored task tree used by people or agents to create, claim, discuss, and complete work. Boots with `features: [$transparent]` so `:say`/`:emote`/`:enter`/`:leave` are available alongside task verbs and public speech reaches the containing audience when mounted. |
 | `the_chatroom` | `$chatroom` | n/a (own host root) | The first runnable chat room. Standalone surface for testing the chat client and `$match` parser; carries `features: [$conversational]` set at boot. |
 
 For the dubspace, the demo creates the four loop slots, one channel, one filter, one delay, one percussion loop, and one scene as anchored children:
@@ -520,7 +520,7 @@ The anchored dubspace objects also carry descriptions:
 | `drum_1` | `$drum_loop` | Eight-step percussion loop for the demo dubspace. It is anchored to `the_dubspace` and stores tempo, transport state, and a shared kick/snare/hat/tone pattern. |
 | `default_scene` | `$scene` | Initial saved scene for the demo dubspace. It records a named control snapshot and gives scene recall a concrete object to read and rewrite. |
 
-For the taskspace, no instances exist at boot — tasks are created at runtime by actor calls. All tasks anchor on `the_taskspace`, so the entire project lives on one host.
+For the tasks catalog, no instances exist at boot beyond `the_bug_board` itself — tasks are created at runtime by actor calls. All tasks anchor on `the_bug_board`, so the entire project lives on one host.
 
 ---
 

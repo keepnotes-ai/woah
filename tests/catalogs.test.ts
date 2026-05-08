@@ -67,34 +67,6 @@ async function callInDubspace(
   return world.call(requestId, sessionId, "the_dubspace", request);
 }
 
-async function callInTaskspace(
-  world: ReturnType<typeof createWorld>,
-  sessionId: string,
-  requestId: string,
-  request: Message
-): Promise<AppliedFrame | DirectResultFrame | ErrorFrame> {
-  const sessionActor = world.sessions.get(sessionId)?.actor;
-  if (sessionActor !== request.actor) {
-    return world.call(requestId, sessionId, "the_taskspace", request);
-  }
-  if (!world.hasPresence(sessionActor, "the_taskspace")) {
-    const entered = await world.directCall(`enter-${requestId}`, sessionActor, "the_taskspace", "enter", []);
-    if (entered.op === "error") return entered;
-  }
-
-  let verb;
-  try {
-    ({ verb } = world.resolveVerb(request.target, request.verb));
-  } catch {
-    return world.call(requestId, sessionId, "the_taskspace", request);
-  }
-  if (verb.direct_callable === true && typeof verb.perms === "string" && verb.perms.includes("x")) {
-    return world.directCall(requestId, request.actor, request.target, request.verb, request.args);
-  }
-
-  return world.call(requestId, sessionId, "the_taskspace", request);
-}
-
 function worldVerb(world: ReturnType<typeof createWorld>, object: string, name: string) {
   const verb = world.ownVerbExact(object, name);
   expect(verb, `${object}:${name} should exist`).toBeDefined();
@@ -139,14 +111,11 @@ describe("local catalogs", () => {
     const chat = readManifest("chat");
     const dubspace = readManifest("dubspace");
     const pinboard = readManifest("pinboard");
-    const taskspace = readManifest("taskspace");
     expect(chat.depends).toEqual(["@local:help"]);
     expect(dubspace.depends).toEqual(["@local:chat", "@local:demoworld"]);
     expect(dubspace.seed_hooks).toContainEqual({ kind: "attach_feature", consumer: "the_dubspace", feature: "chat:$transparent" });
     expect(pinboard.depends).toEqual(["@local:chat", "@local:note", "@local:demoworld"]);
     expect(pinboard.seed_hooks).toContainEqual({ kind: "attach_feature", consumer: "the_pinboard", feature: "chat:$transparent" });
-    expect(taskspace.depends).toEqual(["@local:chat", "@local:note"]);
-    expect(taskspace.seed_hooks).toContainEqual({ kind: "attach_feature", consumer: "the_taskspace", feature: "chat:$transparent" });
   });
 
   it("keeps mounted demo-space enter and leave verbs portable", async () => {
@@ -616,56 +585,6 @@ describe("local catalogs", () => {
     expect(verb?.perms).toBe("rx");
     expect(verb?.direct_callable).toBe(true);
     expect((await world.directCall("catalog-shorthand-ping", "$wiz", "$shorthand_probe", "ping", [])).op).toBe("result");
-  });
-
-  it("installs taskspace from source without trusted implementation hints", async () => {
-    const world = createWorld({ catalogs: false });
-    installHelpDependency(world);
-    installCatalogManifest(world, readManifest("chat") as unknown as RuntimeCatalogManifest, {
-      tap: "@local",
-      alias: "chat",
-      allowImplementationHints: false
-    });
-    installCatalogManifest(world, readManifest("note") as unknown as RuntimeCatalogManifest, {
-      tap: "@local",
-      alias: "note",
-      allowImplementationHints: false
-    });
-    installCatalogManifest(world, readManifest("taskspace") as unknown as RuntimeCatalogManifest, {
-      tap: "github:example/woo-test",
-      alias: "taskspace",
-      allowImplementationHints: false
-    });
-
-    expect(world.ownVerb("$taskspace", "create_task")?.kind).toBe("bytecode");
-    expect(world.ownVerb("$task", "set_status")?.kind).toBe("bytecode");
-
-    const session = world.auth("guest:catalog-taskspace");
-    const created = await callInTaskspace(world, session.id, "create-task", {
-      actor: session.actor,
-      target: "the_taskspace",
-      verb: "create_task",
-      args: ["Source task", ""]
-    });
-    expect(created.op).toBe("applied");
-    const task = created.op === "applied" ? String(created.observations[0].task) : "";
-    expect(world.getProp(task, "title")).toBe("Source task");
-    expect(world.isDescendantOf(task, "$note")).toBe(true);
-
-    await callInTaskspace(world, session.id, "requirement", {
-      actor: session.actor,
-      target: task,
-      verb: "add_requirement",
-      args: ["has source verbs"]
-    });
-    const done = await callInTaskspace(world, session.id, "done", {
-      actor: session.actor,
-      target: task,
-      verb: "set_status",
-      args: ["done"]
-    });
-    expect(world.getProp(task, "status")).toBe("done");
-    if (done.op === "applied") expect(done.observations.map((obs) => obs.type)).toContain("done_premature");
   });
 
   it("installs dubspace from source without trusted implementation hints", async () => {
@@ -2415,18 +2334,18 @@ describe("local catalogs", () => {
   it("clears auto_presence on demo spaces and removes obsolete actor presence_in state", () => {
     const world = createWorld();
     expect(world.getProp("the_dubspace", "auto_presence")).toBe(false);
-    expect(world.getProp("the_taskspace", "auto_presence")).toBe(false);
+    expect(world.getProp("the_pinboard", "auto_presence")).toBe(false);
 
     // Simulate a deployed world: actors auto-present in demo spaces, spaces
     // listing those actors as subscribers, and the migration ledgers missing
     // the cleanup entries.
     const session = world.auth("guest:auto-presence-cleanup");
     world.defineProperty("$actor", { name: "presence_in", defaultValue: [], owner: "$wiz", perms: "r", typeHint: "list<obj>" });
-    world.setProp(session.actor, "presence_in", ["the_dubspace", "the_taskspace"]);
+    world.setProp(session.actor, "presence_in", ["the_dubspace", "the_pinboard"]);
     world.setProp("the_dubspace", "auto_presence", true);
-    world.setProp("the_taskspace", "auto_presence", true);
+    world.setProp("the_pinboard", "auto_presence", true);
     world.setProp("the_dubspace", "subscribers", [session.actor]);
-    world.setProp("the_taskspace", "subscribers", [session.actor]);
+    world.setProp("the_pinboard", "subscribers", [session.actor]);
     const ledger = (world.getProp("$system", "applied_migrations") as string[]).filter(
       (id) => id !== "2026-05-04-demo-spaces-no-auto-presence" && id !== "2026-05-04-drop-presence-in-property"
     );
@@ -2435,9 +2354,9 @@ describe("local catalogs", () => {
     installLocalCatalogs(world);
 
     expect(world.getProp("the_dubspace", "auto_presence")).toBe(false);
-    expect(world.getProp("the_taskspace", "auto_presence")).toBe(false);
+    expect(world.getProp("the_pinboard", "auto_presence")).toBe(false);
     expect(world.getProp("the_dubspace", "subscribers")).toEqual([]);
-    expect(world.getProp("the_taskspace", "subscribers")).toEqual([]);
+    expect(world.getProp("the_pinboard", "subscribers")).toEqual([]);
     expect(world.propOrNull(session.actor, "presence_in")).toBeNull();
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-04-demo-spaces-no-auto-presence");
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-04-drop-presence-in-property");
@@ -2446,35 +2365,6 @@ describe("local catalogs", () => {
     // demo spaces have no business pre-subscribing arriving agents.
     const fresh = world.auth("guest:auto-presence-fresh");
     expect(world.propOrNull(fresh.actor, "presence_in")).toBeNull();
-  });
-
-  it("repairs stale catalog tool exposure for agent-visible taskspace and dubspace verbs", () => {
-    const world = createWorld();
-    world.setProp("$system", "applied_migrations", [
-      "2026-04-30-source-catalog-verbs",
-      "2026-04-30-catalog-placement-metadata",
-      "2026-04-30-chat-cockatoo",
-      "2026-04-30-chat-look-contents",
-      "2026-04-30-chat-command-parser",
-      "2026-04-30-dubspace-control-guards",
-      "2026-04-30-room-look-self",
-      "2026-05-01-chat-three-room-demo",
-      "2026-05-01-chat-observation-output",
-      "2026-05-01-chat-room-contents-repair"
-    ]);
-    const createTask = world.ownVerb("$taskspace", "create_task");
-    const setControl = world.ownVerb("$dubspace", "set_control");
-    expect(createTask).toBeDefined();
-    expect(setControl).toBeDefined();
-    if (!createTask || !setControl) return;
-    world.addVerb("$taskspace", { ...createTask, tool_exposed: false, version: createTask.version + 1 });
-    world.addVerb("$dubspace", { ...setControl, tool_exposed: false, version: setControl.version + 1 });
-
-    installLocalCatalogs(world, ["chat", "taskspace", "dubspace"]);
-
-    expect(world.ownVerb("$taskspace", "create_task")?.tool_exposed).toBe(true);
-    expect(world.ownVerb("$dubspace", "set_control")?.tool_exposed).toBe(true);
-    expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-01-agent-tool-exposure-repair");
   });
 
   it("migrates the cockatoo into worlds installed before it landed", { timeout: 15000 }, async () => {
@@ -2534,24 +2424,9 @@ describe("local catalogs", () => {
       direct_callable: enter.direct_callable,
       skip_presence_check: enter.skip_presence_check
     });
-    const addSubtask = world.ownVerb("$task", "add_subtask")!;
-    world.addVerb("$task", {
-      kind: "native",
-      name: addSubtask.name,
-      aliases: addSubtask.aliases,
-      owner: addSubtask.owner,
-      perms: addSubtask.perms,
-      arg_spec: addSubtask.arg_spec,
-      source: addSubtask.source,
-      source_hash: addSubtask.source_hash,
-      version: addSubtask.version + 1,
-      line_map: addSubtask.line_map,
-      native: "add_subtask",
-      direct_callable: addSubtask.direct_callable,
-      skip_presence_check: addSubtask.skip_presence_check
-    });
 
-    installLocalCatalogs(world, ["chat", "taskspace"]);
+
+    installLocalCatalogs(world, ["chat"]);
 
     const migratedEnter = world.ownVerb("$conversational", "enter");
     expect(migratedEnter?.kind).toBe("bytecode");
@@ -2560,96 +2435,9 @@ describe("local catalogs", () => {
     const migratedLook = world.ownVerb("$conversational", "look");
     expect(migratedLook?.kind).toBe("bytecode");
     expect(migratedLook?.source).toContain("look_at");
-    expect(world.ownVerb("$task", "add_subtask")?.kind).toBe("bytecode");
-    expect(world.object("$task").parent).toBe("$note");
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-04-30-source-catalog-verbs");
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-04-30-catalog-placement-metadata");
     expect(world.getProp("$system", "applied_migrations")).toContain("2026-04-30-room-look-self");
-    expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-03-taskspace-task-note-parent");
-    expect(world.getProp("the_taskspace", "auto_presence")).toBe(false);
-    expect(world.getProp("the_taskspace", "host_placement")).toBe("self");
-
-    const session = world.auth("guest:migrated-catalog");
-    expect((await world.directCall("enter", session.actor, "the_chatroom", "enter", [])).op).toBe("result");
-    const created = await callInTaskspace(world, session.id, "create-task", {
-      actor: session.actor,
-      target: "the_taskspace",
-      verb: "create_task",
-      args: ["Migrated task", ""]
-    });
-    const task = created.op === "applied" ? String(created.observations[0].task) : "";
-    expect(world.isDescendantOf(task, "$note")).toBe(true);
-    const subtask = await callInTaskspace(world, session.id, "add-subtask", {
-      actor: session.actor,
-      target: task,
-      verb: "add_subtask",
-      args: ["Migrated subtask", ""]
-    });
-    expect(subtask.op).toBe("applied");
-  });
-
-  it("repairs chat room look presence and taskspace list guards on existing installs", async () => {
-    const world = createWorld();
-    const migrations = (world.getProp("$system", "applied_migrations") as string[])
-      .filter((id) => id !== "2026-05-02-chat-look-skip-presence" && id !== "2026-05-02-taskspace-list-tasks-guard");
-    world.setProp("$system", "applied_migrations", migrations);
-
-    const chatLook = world.ownVerbExact("$conversational", "look")!;
-    world.addVerb("$conversational", { ...chatLook, skip_presence_check: false, version: chatLook.version + 1 });
-    const listTasks = world.ownVerbExact("$taskspace", "list_tasks")!;
-    const installed = installVerb(world, "$taskspace", "list_tasks", `verb :list_tasks() rxd {
-  let out = [];
-  for t in contents(this) {
-    if (t.space == this) {
-      out = out + [{ id: t, title: t.title, status: t.status, assignee: t.assignee, parent_task: t.parent_task }];
-    }
-  }
-  return out;
-}`, listTasks.version);
-    expect(installed.ok).toBe(true);
-    world.createObject({ id: "taskspace_fixture", parent: "$thing", owner: "$wiz", location: "the_taskspace" });
-
-    installLocalCatalogs(world, ["chat", "taskspace"]);
-
-    expect(world.ownVerbExact("$conversational", "look")?.skip_presence_check).toBe(true);
-    expect(world.ownVerbExact("$taskspace", "list_tasks")?.source).toContain("isa(t, $task)");
-    const session = world.auth("guest:catalog-repair-look");
-    const deckLook = await world.directCall("deck-look-without-presence", session.actor, "the_deck", "look", []);
-    expect(deckLook.op).toBe("result");
-    const list = await callInTaskspace(world, session.id, "taskspace-list-guarded", {
-      actor: session.actor,
-      target: "the_taskspace",
-      verb: "list_tasks",
-      args: []
-    });
-    expect(list.op).toBe("result");
-  });
-
-  it("migrates installed taskspace tasks under the note class", async () => {
-    const world = createWorld();
-    const migrations = (world.getProp("$system", "applied_migrations") as string[])
-      .filter((id) => id !== "2026-05-03-taskspace-task-note-parent");
-    world.setProp("$system", "applied_migrations", migrations);
-    world.chparentAuthoredObject("$wiz", "$task", "$root");
-    expect(world.object("$task").parent).toBe("$root");
-
-    installLocalCatalogs(world, ["taskspace"]);
-
-    expect(world.object("$task").parent).toBe("$note");
-    expect(world.isDescendantOf("$task", "$note")).toBe(true);
-    expect(world.getProp("$system", "applied_migrations")).toContain("2026-05-03-taskspace-task-note-parent");
-
-    const session = world.auth("guest:task-note-parent");
-    const created = await callInTaskspace(world, session.id, "task-note-parent-create", {
-      actor: session.actor,
-      target: "the_taskspace",
-      verb: "create_task",
-      args: ["Note-shaped task", ""]
-    });
-    const task = created.op === "applied" ? String(created.observations[0].task) : "";
-    expect(task).toBeTruthy();
-    expect(world.isDescendantOf(task, "$note")).toBe(true);
-    expect(world.isDescendantOf(task, "$task")).toBe(true);
   });
 
   it("repairs stale native chat command planning on existing installs", async () => {
@@ -2725,9 +2513,9 @@ describe("local catalogs", () => {
     const world = createWorld();
     const session = world.auth("guest:catalog-state");
     const state = world.state(session.actor);
-    expect(state.catalogs.installed.map((record: any) => record.catalog)).toEqual(expect.arrayContaining(["chat", "dubspace", "taskspace"]));
+    expect(state.catalogs.installed.map((record: any) => record.catalog)).toEqual(expect.arrayContaining(["chat", "dubspace", "pinboard"]));
     expect(state.spaces).toHaveProperty("the_dubspace");
-    expect(state.spaces).toHaveProperty("the_taskspace");
+    expect(state.spaces).toHaveProperty("the_pinboard");
     expect(state.spaces).toHaveProperty("the_chatroom");
     expect((state.objects.the_dubspace as any).props.auto_presence).toBe(false);
     expect((state.objects.the_dubspace as any).location).toBe("the_chatroom");
@@ -2736,7 +2524,7 @@ describe("local catalogs", () => {
     expect(state.object_routes).toEqual(expect.arrayContaining([
       { id: "the_dubspace", host: "the_dubspace", anchor: null },
       { id: "slot_1", host: "the_dubspace", anchor: "the_dubspace" },
-      { id: "the_taskspace", host: "the_taskspace", anchor: null }
+      { id: "the_pinboard", host: "the_pinboard", anchor: null }
     ]));
   });
 

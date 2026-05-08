@@ -7,7 +7,7 @@ status: implemented
 
 > Part of the [woo specification](../../SPEC.md). Layer: **semantics**.
 
-LambdaMOO's `parse_command` did three things at once: tokenize text, resolve direct/indirect objects, and dispatch a verb with parser globals (`dobj`, `iobj`, `prepstr`, `argstr`, etc.). woo's runtime does **none** of these — verb invocations are structured messages, not parsed text. This is correct for dubspace (UI controls) and taskspace (REST/agent calls), but a chat-shaped surface (rooms with conversational text) needs the equivalent.
+LambdaMOO's `parse_command` did three things at once: tokenize text, resolve direct/indirect objects, and dispatch a verb with parser globals (`dobj`, `iobj`, `prepstr`, `argstr`, etc.). woo's runtime does **none** of these — verb invocations are structured messages, not parsed text. This is correct for dubspace (UI controls) and tasks (REST/agent calls), but a chat-shaped surface (rooms with conversational text) needs the equivalent.
 
 `$match` is a **bootstrap class**, not a runtime primitive. It scaffolds the text-to-action pipeline as ordinary verbs on a seed object, so chat surfaces don't each invent their own. Some bundled `$match` verbs are native-backed for cross-host object/verb lookup and command planning, but they remain ordinary verbs at the woocode boundary.
 

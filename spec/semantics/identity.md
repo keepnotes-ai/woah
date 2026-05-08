@@ -177,7 +177,7 @@ For bundled demos, the default policy is "any authenticated guest with a live se
 - A presence record is created by explicit movement (`:enter`, exit movement, or another `moveto(actor, space)` path), not merely by session establishment.
 - No per-verb perm gating beyond presence.
 
-This is the simplest possible policy. It works for the dubspace demo (every connected actor can wiggle every knob) and is *almost* enough for the taskspace demo, with one obvious refinement.
+This is the simplest possible policy. It works for the dubspace demo (every connected actor can wiggle every knob) and is *almost* enough for the tasks demo, with one obvious refinement.
 
 ### I7.1 The per-claimer-update pattern
 

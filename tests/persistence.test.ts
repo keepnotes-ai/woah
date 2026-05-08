@@ -47,7 +47,7 @@ async function callInDubspace(
   return world.call(requestId, sessionId, "the_dubspace", request);
 }
 
-async function callInTaskspace(
+async function callInPinboard(
   world: ReturnType<typeof createWorld>,
   sessionId: string,
   requestId: string,
@@ -55,10 +55,10 @@ async function callInTaskspace(
 ): Promise<AppliedFrame | DirectResultFrame | ErrorFrame> {
   const sessionActor = world.sessions.get(sessionId)?.actor;
   if (sessionActor !== request.actor) {
-    return world.call(requestId, sessionId, "the_taskspace", request);
+    return world.call(requestId, sessionId, "the_pinboard", request);
   }
-  if (!world.hasPresence(sessionActor, "the_taskspace")) {
-    const entered = await world.directCall(`enter-${requestId}`, sessionActor, "the_taskspace", "enter", []);
+  if (!world.hasPresence(sessionActor, "the_pinboard")) {
+    const entered = await world.directCall(`enter-${requestId}`, sessionActor, "the_pinboard", "enter", []);
     if (entered.op === "error") return entered;
   }
 
@@ -66,14 +66,14 @@ async function callInTaskspace(
   try {
     ({ verb } = world.resolveVerb(request.target, request.verb));
   } catch {
-    return world.call(requestId, sessionId, "the_taskspace", request);
+    return world.call(requestId, sessionId, "the_pinboard", request);
   }
   if (verb.direct_callable === true && typeof verb.perms === "string" && verb.perms.includes("x")) {
     const direct = await world.directCall(requestId, request.actor, request.target, request.verb, request.args);
     return direct;
   }
 
-  return world.call(requestId, sessionId, "the_taskspace", request);
+  return world.call(requestId, sessionId, "the_pinboard", request);
 }
 
 function tempDb(): { dir: string; path: string } {
@@ -172,52 +172,42 @@ describe("sqlite persistence", () => {
     const { dir, path } = tempDb();
     try {
       const gateway = createWorld();
-      const session = gateway.auth("guest:cluster-restart");
+      gateway.auth("guest:cluster-restart");
       const gatewaySeed = gateway.exportWorld();
 
       const firstRepo = new CountingLocalSQLiteRepository(path);
-      const firstSeed = scopeSerializedWorldToHost(firstRepo.load() ?? gatewaySeed, "the_taskspace");
+      const firstSeed = scopeSerializedWorldToHost(firstRepo.load() ?? gatewaySeed, "the_pinboard");
       const firstCluster = createWorldFromSerialized(firstSeed, { repository: firstRepo });
       expect(firstRepo.saves).toBeGreaterThan(0);
       firstRepo.saves = 0;
 
       const firstSession = firstCluster.auth("guest:cluster-restart");
-      const created = await callInTaskspace(
+      const created = await callInPinboard(
         firstCluster,
         firstSession.id,
         "cluster-create",
-        message(firstSession.actor, "the_taskspace", "create_task", ["Cluster persisted", "written after host seed"])
+        message(firstSession.actor, "the_pinboard", "add_note", ["Cluster persisted note"])
       );
       expect(created.op).toBe("applied");
       expect(firstRepo.saves).toBe(0);
       if (created.op !== "applied") return;
-      const task = String(created.observations.find((obs) => obs.type === "task_created")?.task ?? "");
-      expect(task).toMatch(/^obj_the_taskspace_/);
+      const noteAdded = created.observations.find((obs) => obs.type === "note_added");
+      const pin = String((noteAdded?.note as Record<string, unknown> | undefined)?.id ?? noteAdded?.pin ?? "");
+      expect(pin).toMatch(/^obj_the_pinboard_/);
       firstRepo.close();
 
       const secondRepo = new CountingLocalSQLiteRepository(path);
       const stored = secondRepo.load();
       expect(stored).not.toBeNull();
-      const secondSeed = scopeSerializedWorldToHost(stored ?? gatewaySeed, "the_taskspace");
+      const secondSeed = scopeSerializedWorldToHost(stored ?? gatewaySeed, "the_pinboard");
       const secondCluster = createWorldFromSerialized(secondSeed, { repository: secondRepo, persist: false });
       expect(secondRepo.saves).toBe(0);
       secondRepo.saves = 0;
 
-      expect(secondCluster.object(task).parent).toBe("$task");
-      expect(secondCluster.object(task).name).toBe("Cluster persisted");
-      expect(secondCluster.getProp(task, "text")).toBe("written after host seed");
-      expect(secondCluster.getProp("the_taskspace", "root_tasks")).toContain(task);
-      expect(secondCluster.replay("the_taskspace", 1, 10).map((entry) => entry.message.verb)).toEqual(["create_task"]);
-
-      const secondSession = secondCluster.auth("guest:cluster-restart");
-      const status = await callInTaskspace(
-        secondCluster,
-        secondSession.id,
-        "cluster-status",
-        message(secondSession.actor, task, "set_status", ["done"])
-      );
-      expect(status.op).toBe("applied");
-      expect(secondCluster.getProp(task, "status")).toBe("done");
+      expect(secondCluster.object(pin).parent).toBe("$pin");
+      expect(secondCluster.getProp(pin, "text")).toBe("Cluster persisted note");
+      expect(secondCluster.object(pin).location).toBe("the_pinboard");
+      expect(secondCluster.replay("the_pinboard", 1, 10).map((entry) => entry.message.verb)).toEqual(["add_note"]);
       expect(secondRepo.saves).toBe(0);
       secondRepo.close();
     } finally {

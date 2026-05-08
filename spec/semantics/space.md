@@ -124,7 +124,7 @@ Snapshots are required for deployments and features that need bounded replay, be
 - Backup export depends on snapshot+log composition ([backups.md §B2](../operations/backups.md#b2-world-export-format)).
 - Conformance includes snapshot reconstruction tests ([conformance.md §CF3](../tooling/conformance.md#cf3-required-categories)).
 
-**Triggering convention.** Short-lived spaces (e.g., the dubspace demo, where the log is bounded by control surface complexity) can skip snapshots entirely — replay from seq 1 is cheap. Long-lived spaces (e.g., the taskspace demo, where the log accumulates over weeks) need snapshots so late-joining clients and agents have a reasonable reload path. The recommended trigger is **every K calls or M minutes idle**, whichever comes first — defaults `K = 256`, `M = 10`. Concretely:
+**Triggering convention.** Short-lived spaces (e.g., the dubspace demo, where the log is bounded by control surface complexity) can skip snapshots entirely — replay from seq 1 is cheap. Long-lived spaces (e.g., the tasks demo, where the log accumulates over weeks) need snapshots so late-joining clients and agents have a reasonable reload path. The recommended trigger is **every K calls or M minutes idle**, whichever comes first — defaults `K = 256`, `M = 10`. Concretely:
 
 ```
 verb $space:on_applied(_event) {

@@ -184,5 +184,5 @@ Performance benchmarks are *not* part of conformance. The same harness can run b
 
 - **Live-system probing.** A "is this running deployment spec-compliant?" check that runs against a live world. Possible via the suite if you have a wizard-credentialed test actor; deferred.
 - **Cross-world conformance.** When federation v1 lands, the suite extends to cover multi-world scenarios. v2.
-- **UI conformance.** Whether the IDE / dubspace client / taskspace client behave correctly is *application* conformance, not runtime. Belongs to a separate UI test suite.
+- **UI conformance.** Whether the IDE / dubspace client / tasks client behave correctly is *application* conformance, not runtime. Belongs to a separate UI test suite.
 - **Property-based tests / fuzzing.** Useful complement but separate work; the conformance suite is hand-curated against the spec.

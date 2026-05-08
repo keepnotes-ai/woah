@@ -2,12 +2,10 @@ import "./styles.css";
 import chatManifest from "../../catalogs/chat/manifest.json";
 import dubspaceManifest from "../../catalogs/dubspace/manifest.json";
 import pinboardManifest from "../../catalogs/pinboard/manifest.json";
-import taskspaceManifest from "../../catalogs/taskspace/manifest.json";
 import weatherManifest from "../../catalogs/weather/manifest.json";
 import * as chatUiModule from "../../catalogs/chat/ui/chat-space";
 import * as dubspaceUiModule from "../../catalogs/dubspace/ui/dubspace-workspace";
 import * as pinboardUiModule from "../../catalogs/pinboard/ui/pinboard-board";
-import * as taskspaceUiModule from "../../catalogs/taskspace/ui/taskspace-workspace";
 import * as weatherUiModule from "../../catalogs/weather/ui/weather-badge";
 import { appliedFrameErrorObservations, chatErrorText } from "./chat-errors";
 import { createWooClientFramework, escapeHtml, liveProjectionKey, ProjectionFieldFiller, type CatalogUiPackage, type ProjectionCallOptions, type ProjectionPatch, type WooContext, type WooElement } from "./framework";
@@ -15,17 +13,16 @@ import { advanceProjectionCursor, idsFromRefsOrSummaries, scopedHerePresentActor
 import type { ChatLine, ChatSpaceData, ChatTitleBadge, SpaceChatPanelData } from "../../catalogs/chat/ui/chat-space";
 import type { DubspaceData } from "../../catalogs/dubspace/ui/dubspace-workspace";
 import type { PinboardData } from "../../catalogs/pinboard/ui/pinboard-board";
-import type { TaskspaceData } from "../../catalogs/taskspace/ui/taskspace-workspace";
 
 type AppState = {
   socket?: WebSocket;
   actor?: string;
   session?: string;
-  tab: "chat" | "dubspace" | "pinboard" | "taskspace" | "ide";
+  tab: "chat" | "dubspace" | "pinboard" | "ide";
   world?: any;
   scopedProjection?: ScopedProjectionStateModel;
   scopedObjectSummaries: Record<string, any>;
-  routedSubjects: Partial<Record<"dubspace" | "pinboard" | "taskspace", string>>;
+  routedSubjects: Partial<Record<"dubspace" | "pinboard", string>>;
   audioOn: boolean;
   clockOffset: number;
   cueSlots: Record<string, boolean>;
@@ -39,9 +36,6 @@ type AppState = {
   observations: any[];
   observationsCollapsed: boolean;
   selectedObject: string;
-  selectedTask?: string;
-  taskExpanded: Record<string, boolean>;
-  taskStatusFilter: Record<string, boolean>;
   scopedProjectionSmoke?: { me?: any; catalogs?: any; error?: string };
   pinboardNewText: string;
   pinboardNewColor: string;
@@ -134,8 +128,6 @@ const state: AppState = {
   observations: [],
   observationsCollapsed: true,
   selectedObject: "",
-  taskExpanded: {},
-  taskStatusFilter: { open: true, claimed: true, in_progress: true, blocked: true, done: false },
   pinboardNewText: "",
   pinboardNewColor: "",
   pinboardView: { x: 0, y: 0, scale: 1 },
@@ -147,13 +139,11 @@ const ui = createWooClientFramework();
 let chatRoomPin: ChatRoomPin | null = null;
 const bundledToolSeeds = {
   dubspace: bundledSeedRef(dubspaceManifest, "$dubspace"),
-  pinboard: bundledSeedRef(pinboardManifest, "$pinboard"),
-  taskspace: bundledSeedRef(taskspaceManifest, "$taskspace")
+  pinboard: bundledSeedRef(pinboardManifest, "$pinboard")
 } as const;
 const bundledCatalogManifests: Record<string, any> = {
   dubspace: dubspaceManifest,
-  pinboard: pinboardManifest,
-  taskspace: taskspaceManifest
+  pinboard: pinboardManifest
 };
 const sessionKey = "woo.session";
 const chatHistoryKey = "woo.chat.history";
@@ -180,13 +170,11 @@ const PITCH_MAX_SEMITONE = 36;
 const LOOP_DEFAULT_SEMITONES = [0, 5, 10, 15];
 const TONE_TRACK_SEMITONES = [19, 22, 24, 27];
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-const taskStatuses = ["open", "claimed", "in_progress", "blocked", "done"] as const;
 const directThrottle = new Map<string, number>();
 const pendingDirect = new Map<string, (result: any) => void>();
 const pendingFrameErrors = new Map<string, (error: any) => void>();
 const pendingCommands = new Map<string, { space: string; text: string }>();
 let pinboardNotesRefreshPending = false;
-const pendingTaskSelections = new Set<string>();
 const pendingOverlaySnapshots = new Map<string, Promise<void>>();
 let scopedProjectionLocalRevision = 0;
 const reconnectBaseDelayMs = 500;
@@ -207,10 +195,8 @@ const TAB_FROM_VIEW: Record<string, AppState["tab"]> = {
   chat: "chat",
   dubspace: "dubspace",
   pinboard: "pinboard",
-  taskspace: "taskspace",
   ide: "ide",
-  editor: "ide",
-  kanban: "taskspace"
+  editor: "ide"
 };
 let reconnectDelayMs = reconnectBaseDelayMs;
 let reconnectTimer: number | undefined;
@@ -315,7 +301,6 @@ function connect() {
       }
       forgetLiveControls(observations);
       if (observations.some((observation: any) => isDubspaceStateObservation(observation))) syncDubspaceProjectionEffects();
-      rememberTaskObservations(observations, typeof frame.id === "string" ? frame.id : undefined);
       for (const observation of observations) if (isChatObservation(observation)) receiveChatEvent(observation, false);
       state.observations.unshift({ seq: frame.seq, space: frame.space, observations, message: frame.message });
       trimObservations();
@@ -376,7 +361,6 @@ function connect() {
         pendingDirect.delete(frame.id);
         pendingCommands.delete(frame.id);
         pendingFrameErrors.delete(frame.id);
-        pendingTaskSelections.delete(frame.id);
       }
       if (frame.error?.code === "E_NOSESSION") {
         clearSession();
@@ -395,7 +379,6 @@ function connect() {
     pendingDirect.clear();
     pendingCommands.clear();
     pendingFrameErrors.clear();
-    pendingTaskSelections.clear();
     scheduleReconnect();
   });
   socket.addEventListener("error", () => {
@@ -554,7 +537,6 @@ function objectIdForTab(tab: AppState["tab"]): string {
   if (tab === "chat") return activeChatRoom();
   if (tab === "dubspace") return dubspaceSpace();
   if (tab === "pinboard") return pinboardSpace();
-  if (tab === "taskspace") return state.selectedTask && taskspaceModel()?.tasks?.[state.selectedTask] ? state.selectedTask : taskspaceSpace();
   if (tab === "ide") return state.selectedObject || defaultSelectedObject();
   return "";
 }
@@ -597,7 +579,6 @@ function routeForObjectId(objectId: string, summary?: any): AppState["tab"] {
     if (objectId === activeChatRoom()) return "chat";
     if (objectId === dubspaceSpace()) return "dubspace";
     if (objectId === pinboardSpace()) return "pinboard";
-    if (taskspaceModel()?.tasks?.[objectId] || objectId === taskspaceSpace()) return "taskspace";
     const summaryTab = tabForScopedSummary(objectId, summary ?? scopedObjectSummary(objectId));
     if (summaryTab) return summaryTab;
     return "ide";
@@ -605,31 +586,20 @@ function routeForObjectId(objectId: string, summary?: any): AppState["tab"] {
   if (objectId === activeChatRoom()) return "chat";
   if (objectId === dubspaceSpace()) return "dubspace";
   if (objectId === pinboardSpace()) return "pinboard";
-  if (taskspaceModel()?.tasks?.[objectId]) return "taskspace";
   if (state.world?.objects?.[objectId]) return "ide";
   return "chat";
 }
 
 function pinRoutedSubject(tab: AppState["tab"], subject: string) {
   if (!scopedProjectionEnabled || !subject) return;
-  if (tab === "dubspace" || tab === "pinboard" || tab === "taskspace") {
+  if (tab === "dubspace" || tab === "pinboard") {
     state.routedSubjects = { ...state.routedSubjects, [tab]: subject };
   }
 }
 
-function scopedTaskspaceSpaceForTask(taskId: string): string {
-  const task = taskspaceProjectedTask(taskId);
-  const space = task?.props?.space;
-  return typeof space === "string" && space ? space : "";
-}
-
-function routeSubjectForTab(tab: AppState["tab"], routedObject: string, summary: any): string {
+function routeSubjectForTab(tab: AppState["tab"], routedObject: string, _summary: any): string {
   if (!scopedProjectionEnabled) return "";
   if (tab === "dubspace" || tab === "pinboard") return routedObject;
-  if (tab === "taskspace") {
-    if (isCatalogObjectSummary(summary, "taskspace", "$task")) return scopedTaskspaceSpaceForTask(routedObject) || String(summary?.props?.space ?? "");
-    return routedObject;
-  }
   return "";
 }
 
@@ -641,19 +611,11 @@ async function applyLocationRoute(mode: "replace" | "push", route: RouteLocation
   const ensureTabPresence = (tab: AppState["tab"]) => {
     if (tab === "dubspace") enterDubspace();
     if (tab === "pinboard") enterPinboard();
-    if (tab === "taskspace") enterTaskspace();
   };
   const viewTab = tabFromViewHint(route.view);
   if (viewTab) {
     const summary = scopedProjectionEnabled ? await fetchScopedObjectSummary(route.objectId).catch(() => undefined) : undefined;
-    const taskspace = taskspaceModel();
-    if (viewTab === "taskspace" && (taskspace?.tasks?.[route.objectId] || isCatalogObjectSummary(summary, "taskspace", "$task"))) setSelectedTask(route.objectId, { apply: false });
     if (viewTab === "ide" && (scopedProjectionEnabled || state.world?.objects?.[route.objectId])) setSelectedObject(route.objectId, { apply: false });
-    if (viewTab === "taskspace" && !taskspace?.tasks?.[route.objectId]) setSelectedTask(firstMatchingTask(
-      Array.isArray(taskspace?.root_tasks) ? taskspace.root_tasks : [],
-      taskspace?.tasks ?? {},
-        activeTaskStatuses()
-      ), { apply: false });
     pinRoutedSubject(viewTab, routeSubjectForTab(viewTab, route.objectId, summary));
     setTab(viewTab, { mode, leaveCurrent: true }, () => {
       ensureTabPresence(viewTab);
@@ -663,14 +625,6 @@ async function applyLocationRoute(mode: "replace" | "push", route: RouteLocation
 
   const summary = scopedProjectionEnabled ? await fetchScopedObjectSummary(route.objectId).catch(() => undefined) : undefined;
   const inferredTab = routeForObjectId(route.objectId, summary);
-  if (inferredTab === "taskspace" && (taskspaceModel()?.tasks?.[route.objectId] || isCatalogObjectSummary(summary, "taskspace", "$task"))) {
-    setSelectedTask(route.objectId, { apply: false });
-    pinRoutedSubject(inferredTab, routeSubjectForTab(inferredTab, route.objectId, summary));
-    setTab(inferredTab, { mode, leaveCurrent: true }, () => {
-      ensureTabPresence(inferredTab);
-    });
-    return;
-  }
   if (inferredTab === "ide" && (scopedProjectionEnabled || state.world?.objects?.[route.objectId])) {
     setSelectedObject(route.objectId, { apply: false });
     setTab(inferredTab, { mode, leaveCurrent: true }, () => {
@@ -722,15 +676,6 @@ function setTab(tab: AppState["tab"], options: { mode?: "replace" | "push"; leav
   finalize();
 }
 
-function setSelectedTask(id: string | undefined, options: { apply?: boolean } = {}) {
-  if (typeof id !== "string" || !id) {
-    if (options.apply !== false) syncTaskSelection();
-    return;
-  }
-  state.selectedTask = id;
-  if (options.apply !== false) syncTaskSelection();
-}
-
 function setSelectedObject(id: string, options: { apply?: boolean } = {}) {
   state.selectedObject = id;
   if (scopedProjectionEnabled && id) {
@@ -775,7 +720,6 @@ async function refresh() {
   state.clockOffset = Number(state.world.server_time ?? Date.now()) - Date.now();
   state.chatPresent = Array.isArray(state.world?.chat?.present) ? state.world.chat.present : state.chatPresent;
   if (scopedProjectionSmokeEnabled) await refreshScopedProjectionSmoke();
-  syncTaskSelection();
   if (!routeInitialized) {
     routeInitialized = true;
     if (startupRoute) {
@@ -894,13 +838,12 @@ async function ensureScopedOverlayForTab(tab: AppState["tab"], options: { force?
 function overlaySubjectForTab(tab: AppState["tab"]): string {
   if (tab === "dubspace") return dubspaceSpace();
   if (tab === "pinboard") return pinboardSpace();
-  if (tab === "taskspace") return taskspaceSpace();
   return "";
 }
 
-function scopedToolSubject(surface: "dubspace" | "pinboard" | "taskspace"): string {
+function scopedToolSubject(surface: "dubspace" | "pinboard"): string {
   if (!scopedProjectionEnabled) return "";
-  const className = surface === "dubspace" ? "$dubspace" : surface === "pinboard" ? "$pinboard" : "$taskspace";
+  const className = surface === "dubspace" ? "$dubspace" : "$pinboard";
   const overlays = state.scopedProjection?.overlays ?? {};
   for (const handle of Object.values(overlays)) {
     const subject = typeof (handle as any)?.subject === "string" ? (handle as any).subject : "";
@@ -1051,7 +994,6 @@ function tabForScopedSummary(id: string, summary: any): AppState["tab"] | undefi
   if (id === activeChatRoom() || isRoomSummary(summary)) return "chat";
   if (isCatalogObjectSummary(summary, "dubspace", "$dubspace")) return "dubspace";
   if (isCatalogObjectSummary(summary, "pinboard", "$pinboard")) return "pinboard";
-  if (isCatalogObjectSummary(summary, "taskspace", "$taskspace") || isCatalogObjectSummary(summary, "taskspace", "$task")) return "taskspace";
   return undefined;
 }
 
@@ -1193,8 +1135,6 @@ function adaptWorld(raw: any) {
   world.catalogs = raw?.catalogs ?? { installed: [] };
   world.dubspaceMeta = buildDubspaceMeta(world);
   world.dubspace = projectDubspace(world, world.dubspaceMeta);
-  world.taskspaceMeta = buildTaskspaceMeta(world);
-  world.taskspace = projectTaskspace(world, world.taskspaceMeta);
   world.pinboardMeta = buildPinboardMeta(world);
   world.pinboard = projectPinboard(world, world.pinboardMeta);
   world.chatMeta = buildChatMeta(world);
@@ -1382,188 +1322,6 @@ function isCatalogObjectSummary(item: any, catalogName: string, localName: strin
   const classRef = activeCatalogClass(catalogName, localName) ?? localName;
   const ancestors = Array.isArray(item?.ancestors) ? item.ancestors.map(String) : [];
   return item?.parent === classRef || item?.parent === localName || ancestors.includes(classRef) || ancestors.includes(localName);
-}
-
-function buildTaskspaceMeta(world: any) {
-  const catalog = installedCatalog(world, "taskspace");
-  return {
-    space: firstObjectByParent(world, catalogClass(catalog, "$taskspace")) ?? installedCatalogSeed(world, "taskspace", bundledToolSeeds.taskspace),
-    taskClass: catalogClass(catalog, "$task")
-  };
-}
-
-function projectTaskspace(world: any, meta: any) {
-  const space = objectView(world, meta.space);
-  const taskIds = objectsByParent(world, meta.taskClass);
-  return {
-    root_tasks: Array.isArray(space?.props?.root_tasks) ? space.props.root_tasks : [],
-    tasks: Object.fromEntries(taskIds.map((id) => [id, objectView(world, id)]).filter(([, view]) => view))
-  };
-}
-
-function taskspaceModel(): any {
-  if (!scopedProjectionEnabled) return state.world?.taskspace;
-  const spaceId = taskspaceSpace();
-  if (!spaceId) return undefined;
-  const space = projectedObjectView(spaceId) ?? { id: spaceId, name: spaceId, props: {} };
-  const tree = scopedTaskspaceTree(spaceId);
-  const ids = new Set<string>();
-  for (const id of Array.isArray(space.props?.root_tasks) ? space.props.root_tasks : []) ids.add(String(id));
-  for (const id of Object.keys(tree.parents)) ids.add(id);
-  for (const item of overlaySnapshotObjects(taskspaceOverlaySnapshot())) {
-    const id = String(item?.id ?? "");
-    if (id && isTaskspaceTaskSummary(item)) ids.add(id);
-  }
-  if (state.selectedTask) ids.add(state.selectedTask);
-
-  const tasks: Record<string, any> = {};
-  for (const id of ids) {
-    const view = taskspaceProjectedTask(id);
-    if (view) tasks[id] = view;
-  }
-
-  const childIds = new Map<string, Set<string>>();
-  const roots = new Set<string>();
-  for (const [id, task] of Object.entries(tasks)) {
-    const parent = taskspaceTaskParent(id, task, tree.parents);
-    task.props.parent_task = parent;
-    if (parent && tasks[parent]) {
-      if (!childIds.has(parent)) childIds.set(parent, new Set());
-      childIds.get(parent)!.add(id);
-    } else {
-      roots.add(id);
-    }
-  }
-
-  for (const [id, task] of Object.entries(tasks)) {
-    const children = [...(childIds.get(id) ?? new Set<string>())];
-    task.props.subtasks = sortTaskChildren(children, id, tasks, tree.index);
-  }
-
-  return {
-    space,
-    root_tasks: sortTaskChildren([...roots], null, tasks, tree.index),
-    tasks
-  };
-}
-
-function scopedTaskspaceTree(spaceId: string): { parents: Record<string, string | null>; index: Record<string, number> } {
-  const raw = ui.observe(spaceId)?.catalogState.taskspace_tree;
-  const parents: Record<string, string | null> = {};
-  const index: Record<string, number> = {};
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { parents, index };
-  for (const [key, value] of Object.entries(raw)) {
-    if (key.startsWith("index:")) {
-      const task = key.slice("index:".length);
-      const numeric = Number(value);
-      if (task && Number.isFinite(numeric)) index[task] = numeric;
-    } else {
-      parents[key] = typeof value === "string" ? value : null;
-    }
-  }
-  return { parents, index };
-}
-
-function taskspaceTaskParent(id: string, task: any, parents: Record<string, string | null>): string | null {
-  if (Object.prototype.hasOwnProperty.call(parents, id)) return parents[id];
-  const parent = task?.props?.parent_task;
-  return typeof parent === "string" && parent ? parent : null;
-}
-
-function sortTaskChildren(ids: string[], parent: string | null, tasks: Record<string, any>, overlayIndex: Record<string, number>): string[] {
-  const baseOrder = parent
-    ? Array.isArray(tasks[parent]?.props?.subtasks) ? tasks[parent].props.subtasks.map(String) : []
-    : Array.isArray(projectedObjectView(taskspaceSpace())?.props?.root_tasks) ? projectedObjectView(taskspaceSpace())!.props.root_tasks.map(String) : [];
-  const baseIndex = new Map(baseOrder.map((id: string, index: number) => [id, index]));
-  return [...new Set(ids)].sort((a, b) => {
-    const ai = overlayIndex[a] ?? baseIndex.get(a) ?? Number.MAX_SAFE_INTEGER;
-    const bi = overlayIndex[b] ?? baseIndex.get(b) ?? Number.MAX_SAFE_INTEGER;
-    return ai - bi || String(tasks[a]?.props?.title ?? a).localeCompare(String(tasks[b]?.props?.title ?? b)) || a.localeCompare(b);
-  });
-}
-
-function taskspaceProjectedTask(id: string): any | undefined {
-  const projected = ui.observe(id);
-  const legacy = scopedProjectionEnabled ? undefined : state.world?.taskspace?.tasks?.[id];
-  if (!projected && !legacy) return undefined;
-  const overlay = projected?.catalogState.taskspace_task ?? {};
-  const props = {
-    ...(legacy?.props ?? {}),
-    ...(projected?.props ?? {})
-  };
-  for (const key of ["text", "parent_task", "status", "assignee", "space"]) {
-    if (Object.prototype.hasOwnProperty.call(overlay, key)) props[key] = (overlay as any)[key];
-  }
-  props.requirements = mergeTaskspaceRequirements(props.requirements, overlay);
-  props.messages = mergeTaskspaceMessages(props.messages, overlay);
-  props.artifacts = mergeTaskspaceArtifacts(props.artifacts, overlay);
-  return {
-    id,
-    name: projected?.name ?? legacy?.name ?? id,
-    owner: projected?.owner ?? legacy?.owner,
-    parent: projected?.parent ?? legacy?.parent,
-    location: projected?.location ?? legacy?.location,
-    props
-  };
-}
-
-function mergeTaskspaceRequirements(base: any, overlay: Record<string, unknown>): any[] {
-  const out = Array.isArray(base) ? base.map((item) => ({ ...(item && typeof item === "object" && !Array.isArray(item) ? item : {}) })) : [];
-  for (const [key, value] of Object.entries(overlay)) {
-    if (!key.startsWith("requirement:")) continue;
-    const index = Number(key.slice("requirement:".length));
-    if (!Number.isInteger(index) || index < 0 || !value || typeof value !== "object" || Array.isArray(value)) continue;
-    out[index] = { ...(out[index] ?? {}), ...(value as Record<string, unknown>) };
-  }
-  for (const [key, value] of Object.entries(overlay)) {
-    if (!key.startsWith("requirement_checked:")) continue;
-    const index = Number(key.slice("requirement_checked:".length));
-    if (!Number.isInteger(index) || index < 0) continue;
-    out[index] = { ...(out[index] ?? {}), checked: value === true };
-  }
-  return out.filter((item) => item !== undefined);
-}
-
-function mergeTaskspaceMessages(base: any, overlay: Record<string, unknown>): any[] {
-  const out = Array.isArray(base) ? [...base] : [];
-  const seen = new Set(out.map((item: any) => `message:${String(item?.ts ?? "")}:${String(item?.body ?? "")}`));
-  for (const [key, value] of Object.entries(overlay)) {
-    if (!key.startsWith("message:") || !value || typeof value !== "object" || Array.isArray(value)) continue;
-    const item = value as Record<string, unknown>;
-    const dedupe = `message:${String(item.ts ?? "")}:${String(item.body ?? "")}`;
-    if (!seen.has(dedupe)) {
-      seen.add(dedupe);
-      out.push(item);
-    }
-  }
-  return out.sort((a: any, b: any) => Number(a?.ts ?? 0) - Number(b?.ts ?? 0));
-}
-
-function mergeTaskspaceArtifacts(base: any, overlay: Record<string, unknown>): any[] {
-  const out = Array.isArray(base) ? [...base] : [];
-  const seen = new Set(out.map((item: any) => `${String(item?.kind ?? "")}:${String(item?.ref ?? "")}`));
-  for (const [key, value] of Object.entries(overlay)) {
-    if (!key.startsWith("artifact:") || !value || typeof value !== "object" || Array.isArray(value)) continue;
-    const item = value as Record<string, unknown>;
-    const dedupe = `${String(item.kind ?? "")}:${String(item.ref ?? "")}`;
-    if (!seen.has(dedupe)) {
-      seen.add(dedupe);
-      out.push(item);
-    }
-  }
-  return out;
-}
-
-function taskspaceOverlaySnapshot(): any {
-  const space = taskspaceSpace();
-  if (!space) return undefined;
-  return state.scopedProjection?.overlaySnapshots?.[`taskspace:${space}`];
-}
-
-function isTaskspaceTaskSummary(item: any): boolean {
-  const taskClass = activeCatalogClass("taskspace", "$task") ?? "$task";
-  const ancestors = Array.isArray(item?.ancestors) ? item.ancestors.map(String) : [];
-  return item?.parent === taskClass || item?.parent === "$task" || ancestors.includes(taskClass) || ancestors.includes("$task");
 }
 
 function buildPinboardMeta(world: any) {
@@ -1854,25 +1612,6 @@ function dubspaceSpace() {
     return scoped;
   }
   return String(state.world?.dubspaceMeta?.space ?? "");
-}
-
-function taskspaceSpace() {
-  if (scopedProjectionEnabled) {
-    const route = startupRoute ?? parseLocationRoute(location.pathname, location.search);
-    if (route?.view === "taskspace" && route.objectId) {
-      const routedTask = taskspaceProjectedTask(route.objectId);
-      const routedSpace = routedTask?.props?.space;
-      return typeof routedSpace === "string" && routedSpace ? routedSpace : route.objectId;
-    }
-    if (state.selectedTask) {
-      const selectedSpace = scopedTaskspaceSpaceForTask(state.selectedTask);
-      if (selectedSpace) return selectedSpace;
-    }
-    if (state.routedSubjects.taskspace) return state.routedSubjects.taskspace;
-    const scoped = scopedToolSubject("taskspace");
-    return scoped;
-  }
-  return String(state.world?.taskspaceMeta?.space ?? "");
 }
 
 function pinboardSpace() {
@@ -2269,28 +2008,6 @@ function forgetLiveControls(observations: any[]) {
   }
 }
 
-function rememberTaskObservations(observations: any[], frameId?: string) {
-  const shouldSelectCreatedTask = Boolean(frameId && pendingTaskSelections.delete(frameId));
-  for (const obs of observations) {
-    if (obs?.type === "task_created" && typeof obs.task === "string") {
-      if (shouldSelectCreatedTask) state.selectedTask = obs.task;
-      state.taskExpanded[obs.task] = true;
-      if (typeof obs.parent === "string") state.taskExpanded[obs.parent] = true;
-    }
-    if (obs?.type === "subtask_added" && typeof obs.parent === "string") state.taskExpanded[obs.parent] = true;
-    if (obs?.type === "task_moved" && typeof obs.to_parent === "string") state.taskExpanded[obs.to_parent] = true;
-  }
-}
-
-function syncTaskSelection() {
-  const taskspace = taskspaceModel();
-  const tasks = taskspace?.tasks ?? {};
-  const roots = Array.isArray(taskspace?.root_tasks) ? taskspace.root_tasks : [];
-  const active = activeTaskStatuses();
-  if (state.selectedTask && tasks[state.selectedTask] && taskMatchesStatus(tasks[state.selectedTask], active)) return;
-  state.selectedTask = firstMatchingTask(roots, tasks, active);
-}
-
 function pruneLiveControls() {
   if (!ui.prune()) return;
   audio?.sync(effectiveDubspace(), state.clockOffset);
@@ -2308,7 +2025,6 @@ function render() {
         ${navButton("chat", "Chat")}
         ${navButton("dubspace", "Dubspace")}
         ${navButton("pinboard", "Pinboard")}
-        ${navButton("taskspace", "Taskspace")}
         ${navButton("ide", "IDE")}
         <a class="github-link" href="https://github.com/hughpyle/woo" target="_blank" rel="noopener noreferrer" aria-label="woo on GitHub" title="woo on GitHub">
           <svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
@@ -2317,7 +2033,6 @@ function render() {
       <main class="main">
         ${state.tab === "dubspace" ? renderDubspace() : ""}
         ${state.tab === "pinboard" ? renderPinboard() : ""}
-        ${state.tab === "taskspace" ? renderTaskspace() : ""}
         ${state.tab === "chat" ? renderChat() : ""}
         ${state.tab === "ide" ? renderIde() : ""}
       </main>
@@ -2328,7 +2043,6 @@ function render() {
   bindCommon();
   if (state.tab === "chat") mountChatComponent();
   if (state.tab === "dubspace") bindDubspace();
-  if (state.tab === "taskspace") bindTaskspace();
   if (state.tab === "pinboard") bindPinboard();
   if (state.tab === "ide") bindIde();
   if (!restoreRenderFocus(focus) && state.tab === "chat") focusChatInput();
@@ -2429,7 +2143,6 @@ function bindCommon() {
         if (!wasDifferent) return;
         if (next === "dubspace") enterDubspace();
         if (next === "pinboard") enterPinboard();
-        if (next === "taskspace") enterTaskspace();
       });
     });
   });
@@ -2449,7 +2162,6 @@ function installBundledCatalogUi() {
     { alias: "chat", manifest: chatManifest, objects: { "$space": "$space", "$chatroom": "$chatroom" }, modules: { "chat-ui": chatUiModule } },
     { alias: "dubspace", manifest: dubspaceManifest, objects: { "$dubspace": "$dubspace" }, modules: { "dubspace-ui": dubspaceUiModule } },
     { alias: "pinboard", manifest: pinboardManifest, objects: { "$pinboard": "$pinboard" }, modules: { "pinboard-ui": pinboardUiModule } },
-    { alias: "taskspace", manifest: taskspaceManifest, objects: { "$taskspace": "$taskspace" }, modules: { "taskspace-ui": taskspaceUiModule } },
     { alias: "weather", manifest: weatherManifest, objects: { "$weather_block": "$weather_block" }, modules: { "weather-ui": weatherUiModule } }
   ] as const;
   for (const item of bundled) {
@@ -3161,7 +2873,6 @@ function chatSystemText(observation: any): string | undefined {
 function currentChatOutputSpace(): string {
   if (state.tab === "dubspace") return dubspaceSpace();
   if (state.tab === "pinboard") return pinboardSpace();
-  if (state.tab === "taskspace") return taskspaceSpace();
   return chatRoom();
 }
 
@@ -3210,7 +2921,7 @@ function markNestedSpaceDeparture(space: string) {
 }
 
 function currentTabHasChatPanel(): boolean {
-  return ["chat", "dubspace", "pinboard", "taskspace"].includes(state.tab);
+  return ["chat", "dubspace", "pinboard"].includes(state.tab);
 }
 
 function loadChatHistory(): string[] {
@@ -4633,168 +4344,6 @@ function pinNoteNumber(value: any, fallback: number) {
 function pinboardPalette(palette: any): string[] {
   const items = Array.isArray(palette) ? palette.map(String).filter(Boolean) : [];
   return items.length > 0 ? items : ["yellow", "blue", "green", "pink", "white"];
-}
-
-function renderTaskspace() {
-  const tag = toolFrameComponentTag(taskspaceSpace(), "taskspace.workspace", "taskspace");
-  if (!tag) {
-    return `
-      <section class="toolbar"><h1>Taskspace</h1></section>
-      <section class="panel"><p class="empty-state">No taskspace UI is registered for this space.</p></section>
-    `;
-  }
-  const space = taskspaceSpace();
-  return `<${tag} data-taskspace-workspace data-taskspace-space="${escapeHtml(space)}"></${tag}>`;
-}
-
-function activeTaskStatuses() {
-  return new Set(taskStatuses.filter((status) => state.taskStatusFilter[status] !== false));
-}
-
-function taskStatus(task: any) {
-  return String(task?.props?.status ?? "open");
-}
-
-function taskMatchesStatus(task: any, active: Set<string>) {
-  return active.has(taskStatus(task));
-}
-
-function firstMatchingTask(ids: string[], tasks: any, active: Set<string>): string | undefined {
-  for (const id of ids) {
-    const task = tasks[id];
-    if (!task) continue;
-    if (taskMatchesStatus(task, active)) return id;
-    const subtasks = Array.isArray(task.props?.subtasks) ? task.props.subtasks : [];
-    const child = firstMatchingTask(subtasks, tasks, active);
-    if (child) return child;
-  }
-  return undefined;
-}
-
-function enterTaskspace() {
-  const space = taskspaceSpace();
-  if (!space || !canSendDirect() || actorPresentInSpace(space)) return;
-  direct(space, "enter", [], () => {
-    void ensureScopedOverlayForTab("taskspace").then(() => {
-      if (state.tab === "taskspace") render();
-    });
-    requestSpaceChatFocus(space);
-  }, receiveChatError);
-}
-
-function taskspaceCall(target: string, verb: string, args: unknown[] = [], onCall?: (id: string) => void) {
-  const space = taskspaceSpace();
-  if (!space || !target) return;
-  ensureSpacePresence(space, () => {
-    const id = call(space, target, verb, args);
-    onCall?.(id);
-  }, receiveChatError);
-}
-
-function mountTaskspaceComponent() {
-  const element = document.querySelector<WooElement & { data?: TaskspaceData }>("[data-taskspace-workspace]");
-  if (!element) return;
-  const taskspace = taskspaceModel();
-  const space = taskspaceSpace();
-  const tasks = taskspace?.tasks ?? {};
-  const refs = new Set<string>([space]);
-  for (const task of Object.values(tasks) as any[]) {
-    const assignee = task?.props?.assignee;
-    if (typeof assignee === "string") refs.add(assignee);
-    for (const message of Array.isArray(task?.props?.messages) ? task.props.messages : []) {
-      if (typeof message?.actor === "string") refs.add(message.actor);
-    }
-  }
-  element.subject = space;
-  element.woo = createChatWooContext(space, [...refs]);
-  setCustomElementData(element, {
-    space,
-    tasks,
-    rootTasks: Array.isArray(taskspace?.root_tasks) ? taskspace.root_tasks : [],
-    selectedTask: state.selectedTask,
-    expanded: state.taskExpanded,
-    statusFilter: state.taskStatusFilter
-  }, () => {
-    if (space) mountToolSpaceChat(element, space);
-  });
-  bindTaskspaceComponentEvents(element);
-}
-
-function bindTaskspaceComponentEvents(element: WooElement) {
-  if (element.dataset.taskspaceEventsBound === "true") return;
-  element.dataset.taskspaceEventsBound = "true";
-  element.addEventListener("woo-taskspace-status-filter", (event) => {
-    const status = String((event as CustomEvent<{ status?: unknown }>).detail?.status ?? "");
-    if (!status) return;
-    state.taskStatusFilter[status] = state.taskStatusFilter[status] === false;
-    syncTaskSelection();
-    render();
-  });
-  element.addEventListener("woo-taskspace-create", (event) => {
-    const detail = (event as CustomEvent<{ name?: unknown; text?: unknown }>).detail ?? {};
-    const name = String(detail.name ?? "").trim() || "Untitled";
-    const text = String(detail.text ?? "").trim();
-    const space = taskspaceSpace();
-    if (space) taskspaceCall(space, "create_task", [name, text], (id) => pendingTaskSelections.add(id));
-  });
-  element.addEventListener("woo-taskspace-toggle", (event) => {
-    const id = String((event as CustomEvent<{ id?: unknown }>).detail?.id ?? "");
-    if (!id) return;
-    state.taskExpanded[id] = state.taskExpanded[id] === false;
-    render();
-  });
-  element.addEventListener("woo-taskspace-select", (event) => {
-    const id = String((event as CustomEvent<{ id?: unknown }>).detail?.id ?? "");
-    if (!id) return;
-    setSelectedTask(id, { apply: false });
-    state.taskExpanded[id] = state.taskExpanded[id] ?? true;
-    setTab("taskspace", { mode: "push", leaveCurrent: false });
-  });
-  element.addEventListener("woo-taskspace-task-action", (event) => {
-    const id = state.selectedTask;
-    const action = String((event as CustomEvent<{ action?: unknown }>).detail?.action ?? "");
-    if (!id) return;
-    if (action === "claim" || action === "release") taskspaceCall(id, action, []);
-    if (action.startsWith("status:")) taskspaceCall(id, "set_status", [action.slice("status:".length)]);
-  });
-  element.addEventListener("woo-taskspace-add-subtask", (event) => {
-    const id = state.selectedTask;
-    if (!id) return;
-    const detail = (event as CustomEvent<{ name?: unknown; text?: unknown }>).detail ?? {};
-    const name = String(detail.name ?? "").trim() || "Subtask";
-    const text = String(detail.text ?? "").trim();
-    state.taskExpanded[id] = true;
-    taskspaceCall(id, "add_subtask", [name, text], (callId) => pendingTaskSelections.add(callId));
-  });
-  element.addEventListener("woo-taskspace-add-requirement", (event) => {
-    const id = state.selectedTask;
-    if (!id) return;
-    const text = String((event as CustomEvent<{ text?: unknown }>).detail?.text ?? "").trim() || "Requirement";
-    taskspaceCall(id, "add_requirement", [text]);
-  });
-  element.addEventListener("woo-taskspace-check-requirement", (event) => {
-    const id = state.selectedTask;
-    if (!id) return;
-    const detail = (event as CustomEvent<{ index?: unknown; checked?: unknown }>).detail ?? {};
-    taskspaceCall(id, "check_requirement", [Number(detail.index), detail.checked === true]);
-  });
-  element.addEventListener("woo-taskspace-add-message", (event) => {
-    const id = state.selectedTask;
-    if (!id) return;
-    const body = String((event as CustomEvent<{ body?: unknown }>).detail?.body ?? "").trim() || "Update";
-    taskspaceCall(id, "add_message", [body]);
-  });
-  element.addEventListener("woo-taskspace-add-artifact", (event) => {
-    const id = state.selectedTask;
-    if (!id) return;
-    const ref = String((event as CustomEvent<{ ref?: unknown }>).detail?.ref ?? "").trim() || "https://example.com";
-    taskspaceCall(id, "add_artifact", [{ kind: ref.startsWith("http") ? "url" : "external", ref }]);
-  });
-}
-
-function bindTaskspace() {
-  mountTaskspaceComponent();
-  bindSpaceChatPanels();
 }
 
 function renderIde() {

@@ -24,11 +24,11 @@ Install order for the full demo world:
 5. `@local:demoworld`
 6. `@local:dubspace`
 7. `@local:pinboard`
-8. `@local:taskspace`
+8. `@local:tasks`
 
 Class libraries (`chat`, `note`, `prog`) install foundational primitives without
 seeding instances; `demoworld` seeds the bundled Living Room set; the demo apps
-(`dubspace`, `pinboard`, `taskspace`) bring their own seeds. A world that wants
+(`dubspace`, `pinboard`, `tasks`) bring their own seeds. A world that wants
 foundational classes without any demo content installs steps 1-4 only.
 
 ## Class diagram
@@ -75,8 +75,8 @@ classDiagram
         class `$scene`
         class `$dubspace`
     }
-    namespace taskspace {
-        class `$taskspace`
+    namespace tasks {
+        class `$task_registry`
         class `$task`
     }
     namespace pinboard {
@@ -106,7 +106,7 @@ classDiagram
     `$control` <|-- `$drum_loop`
     `$root` <|-- `$scene`
     `$space` <|-- `$dubspace`
-    `$space` <|-- `$taskspace`
+    `$space` <|-- `$task_registry`
     `$note` <|-- `$task`
     `$note` <|-- `$pin`
     `$space` <|-- `$pinboard`

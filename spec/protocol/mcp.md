@@ -85,7 +85,7 @@ The tool's shape:
 - If `verb.direct_callable === true`: the gateway invokes the verb as a **direct call** under the actor's authority. Live observations (per [events.md §12.6](../semantics/events.md#126-observation-durability-follows-invocation-route)) are returned in the result; no log row is written. Dubspace `set_control`, chat `say`/`look`, room `take`/`drop` are direct.
 - If `verb.direct_callable !== true` (the verb is `tool_exposed` but mutating-through-a-log): the gateway invokes the verb as a **sequenced call** through the verb's enclosing space. The log entry's `applied` frame becomes the tool result. Taskspace `create_task`, `claim`, `set_status` are sequenced.
 
-The "enclosing space" is resolved by the runtime at dispatch time: the nearest ancestor of the verb's target that is `$space`-descended. For target `the_taskspace`, that's `the_taskspace` itself; for a task `t-7` whose anchor resolves to `the_taskspace`, that's `the_taskspace`. If no enclosing space is found, the tool errors with `E_INVARG` rather than silently routing direct.
+The "enclosing space" is resolved by the runtime at dispatch time: the nearest ancestor of the verb's target that is `$space`-descended. For target `the_bug_board`, that's `the_bug_board` itself; for a task `t-7` whose anchor resolves to `the_bug_board`, that's `the_bug_board`. If no enclosing space is found, the tool errors with `E_INVARG` rather than silently routing direct.
 
 **Common verbs by class hierarchy.** The "always-there" feeling of certain tools comes entirely from inheritance:
 
@@ -97,7 +97,7 @@ The "enclosing space" is resolved by the runtime at dispatch time: the nearest a
 | `wait(timeout_ms?, limit?)` | `$actor` (§M4) | direct |
 | `enter(target)`, `go(exit)`, `take(item)`, `drop(item)` | `$chatroom` *(demo)* | direct |
 | `set_control`, `save_scene`, `recall_scene` | `$dubspace` *(demo)* | direct |
-| `create_task`, `claim`, `set_status`, `add_subtask` | `$taskspace` / `$task` *(demo)* | **sequenced** |
+| `create_task`, `claim`, `set_status`, `add_subtask` | `$task_registry` / `$task` *(demo)* | **sequenced** |
 
 The first four rows are foundational classes; the remaining rows illustrate verbs from the bundled **demo applications** ([catalogs.md §CT15](../discovery/catalogs.md#ct15-bundled-catalogs-in-this-repo)) — installed catalogs contribute their own verbs in the same shape. The gateway does not construct any of these; it reads the verb tables.
 
@@ -158,7 +158,7 @@ The dynamic tool set at any moment is computed against the actor's **reachable s
 3. **Location contents.** Visible objects in the session current location's contents for which the actor has read access. This category is not filtered by actor-ness. Other actors and `$block` descendants can appear here, but they are projected through obvious command verbs only: readable verbs with command metadata, using the same rule as `$player:examine_detailed`. In `the_chatroom` this surfaces affordances such as `the_cockatoo:squawk`, `the_lamp:give`, or `the_weather:look` when those verbs are command-shaped. Inherited `$actor` controls (`wait`, `focus`, `unfocus`, `focus_list`) remain self tools, not tools on another actor or appliance.
 4. **Inventory.** Non-actor objects in `actor.contents`. After `take lamp`, the lamp's verbs follow the actor between rooms.
 5. **Other live locations.** Spaces returned by `all_locations(actor)`, excluding this session's current location. This lets an agent discover that the same actor has another live tab/tool session in `the_dubspace` without reading any actor-side presence mirror.
-6. **Working set.** Objects the actor has explicitly added to its scope via `$actor:focus(target)` (§M3.1). This is how task refs returned from `the_taskspace:list_tasks()` become callable: the agent calls `focus(t-7)` and `t-7`'s verbs (`claim`, `set_status`, `add_subtask`) join the tool list. Bounded; capped per implementation policy (default 32 entries).
+6. **Working set.** Objects the actor has explicitly added to its scope via `$actor:focus(target)` (§M3.1). This is how task refs returned from `the_bug_board:list_tasks()` become callable: the agent calls `focus(t-7)` and `t-7`'s verbs (`claim`, `set_status`, `add_subtask`) join the tool list. Bounded; capped per implementation policy (default 32 entries).
 7. **Catalog-visible singletons.** Objects the catalog registry advertises as visible to this actor's class/role (per [discovery/catalogs.md](../discovery/catalogs.md)). Ordinary actors usually see nothing here; wizard actors get whatever wizard-discoverable singletons the catalog declares. There is no hardcoded list of "universal corenames" in the protocol — visibility is data-driven from the catalog registry, not from the MCP spec.
 
 Full tool enumeration is **lazy** and **not the default**. Standard MCP `tools/list` returns stable control tools plus a bounded `active` dynamic projection. `woo_list_reachable_tools` uses the same bounded default unless the agent explicitly asks for `here`, `focus`, `object`, `space`, or `all`. A canonical `woo_call(object, verb, args?)` resolves only the requested reachable object/verb. Ordinary tool calls do not force a full cross-host enumeration after they run.
@@ -167,7 +167,7 @@ After a tool call, the gateway may compute a cheap local reachability signal (cu
 
 Containment cycles and re-entrant rooms (a room as the contents of another room — see the chat catalog's hot tub) are walked once; the algorithm is a BFS bounded by the reachability set's natural boundary (objects not in any of the seven categories above).
 
-Reachability spans hosts. When a selected scope entry resolves to a remote $space (per [hosts.md §3](hosts.md#3-hosts-and-execution-model)) the gateway asks that host for tool descriptors and merges the result with locally-known entries. Scopes that expand space contents (`here`, `space`, `all`) include per-instance verbs on dynamically-created objects (a `$task` minted at runtime on the taskspace's host, a `$cockatoo` cloned into a chat room). The bounded `active` scope asks the same host but filters the response back to the selected objects, so a taskspace containing hundreds of tasks does not become hundreds of MCP tools by default. The same rule applies to `woo_call(object, verb, args?)`: targeted resolution must search the remote contribution for the actor's reachable spaces/focus set, not only the gateway's local object ids. The remote host is responsible for applying the actor's read-permission filter before returning its contribution; the gateway trusts that filter (same-deployment trust, [hosts.md §3.3](hosts.md#33-trust-model-across-hosts)). Cross-host reachability lookups are best-effort cached for the duration of one tool-list computation; subsequent `tools/list` requests re-fetch.
+Reachability spans hosts. When a selected scope entry resolves to a remote $space (per [hosts.md §3](hosts.md#3-hosts-and-execution-model)) the gateway asks that host for tool descriptors and merges the result with locally-known entries. Scopes that expand space contents (`here`, `space`, `all`) include per-instance verbs on dynamically-created objects (a `$task` minted at runtime on the tasks's host, a `$cockatoo` cloned into a chat room). The bounded `active` scope asks the same host but filters the response back to the selected objects, so a tasks containing hundreds of tasks does not become hundreds of MCP tools by default. The same rule applies to `woo_call(object, verb, args?)`: targeted resolution must search the remote contribution for the actor's reachable spaces/focus set, not only the gateway's local object ids. The remote host is responsible for applying the actor's read-permission filter before returning its contribution; the gateway trusts that filter (same-deployment trust, [hosts.md §3.3](hosts.md#33-trust-model-across-hosts)). Cross-host reachability lookups are best-effort cached for the duration of one tool-list computation; subsequent `tools/list` requests re-fetch.
 
 ### M3.1 Working set: `$actor:focus`
 
@@ -183,7 +183,7 @@ $actor:focus_list() -> [obj, ...]
 
 The list persists with the actor across connections (it's a property on the actor object). Reconnect retains scope. `focus_list` is also visible via `actor:describe()` for agents that want to introspect their own context.
 
-This is the explicit primitive the spec promises in §M2.2 — when an agent calls `the_taskspace:list_tasks()` and gets back ten task refs, it focuses the ones it cares about and their per-task verbs join the tool list. Tools alone do not implicitly grow the scope.
+This is the explicit primitive the spec promises in §M2.2 — when an agent calls `the_bug_board:list_tasks()` and gets back ten task refs, it focuses the ones it cares about and their per-task verbs join the tool list. Tools alone do not implicitly grow the scope.
 
 ---
 

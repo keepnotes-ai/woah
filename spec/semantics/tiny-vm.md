@@ -371,7 +371,7 @@ Bytecode:
 
 ### Fixture 5: `$task:set_status(status)` with soft-DoD check
 
-Sets the status. If transitioning to `"done"` while requirements are unchecked, also emits `done_premature` with the unchecked items. The status change itself always applies (soft enforcement, per the taskspace catalog design).
+Sets the status. If transitioning to `"done"` while requirements are unchecked, also emits `done_premature` with the unchecked items. The status change itself always applies (soft enforcement, per the tasks catalog design).
 
 This fixture is the most involved because it has a conditional. Pseudocode:
 

@@ -53,7 +53,7 @@ emitted during the gap.
 
 That's the right default for casual spaces: direct `:say` is fast
 (~50 ms) and avoids the per-utterance cost of sequencing. The same
-affordances are useful in spaces that are not chatrooms: a taskspace,
+affordances are useful in spaces that are not chatrooms: a task board,
 a pinboard, a dubspace, or another application surface can attach
 `$conversational` and gain a current-space chat UI without becoming
 a room subclass.
@@ -64,7 +64,7 @@ Several real cases need the opposite durability trade-off:
 - A support channel where transcripts are part of the audit trail.
 - A long-running async discussion (chat-as-forum) where activity is
   the space's primary state.
-- A code-review, taskspace, or pinboard where messages should be
+- A code-review, task board, or pinboard where messages should be
   co-ordered with mutations to the work.
 
 For these, the space itself should hold the record, not the
@@ -435,7 +435,7 @@ inline and sequenced plans return the applied/error frame from the resolved
 command space. Browser clients still use wire `op:"command"` to avoid an extra
 catalog call.
 
-The SPA already implements this pattern for taskspace; persistent
+The SPA already implements this pattern for task board; persistent
 conversation relies on the same route-aware client behavior.
 
 ---

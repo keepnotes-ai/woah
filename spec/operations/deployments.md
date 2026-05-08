@@ -36,7 +36,7 @@ This section does **not** apply to in-memory or local SQLite modes. Those runtim
 
 ## DP2. Seed distribution
 
-A deployment boots from a seed graph plus configured local catalogs. The universal seed is identical across environments (`$root`, `$space`, `$thing`, etc.); demo surfaces such as `$dubspace` and `$taskspace` come from bundled local catalogs, so a worktree's patch series, an export, and a migration catalog all behave the same way regardless of which environment they target.
+A deployment boots from a seed graph plus configured local catalogs. The universal seed is identical across environments (`$root`, `$space`, `$thing`, etc.); demo surfaces such as `$dubspace` and `$task_registry` come from bundled local catalogs, so a worktree's patch series, an export, and a migration catalog all behave the same way regardless of which environment they target.
 
 Seed graph is delivered with the runtime code; bumping the spec version updates the seed.
 

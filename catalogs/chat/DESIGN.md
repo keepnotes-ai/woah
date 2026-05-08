@@ -1,6 +1,6 @@
 # Chat Demo
 
-A canonical MOO surface — rooms, presence, talk, emote, tell — built as a feature-object composition rather than a `$space` subclass. Sits alongside dubspace/taskspace/IDE; can also embed inside them.
+A canonical MOO surface — rooms, presence, talk, emote, tell — built as a feature-object composition rather than a `$space` subclass. Sits alongside dubspace/tasks/IDE; can also embed inside them.
 
 ## Classes
 
@@ -28,7 +28,7 @@ This is the demo that retires the question "do feature objects pull their weight
 - Presence list visible.
 - MOO-like text input parsed by the room: explicit speech forms (`say hi`, `"hi`, `:waves`, `/tell`, backtick directed speech), room commands (`look`, `who`), direction verbs (`se`, `east`, `out`), and object commands (`look cockatoo`, `enter tub`, `teach bird "hello"`).
 - Enter/exit notifications when actors join or leave.
-- A "join taskspace as room" mode where the same chat client renders against `the_taskspace` instead of a standalone `$chatroom`. Same verbs, same observations.
+- A "join tasks as room" mode where the same chat client renders against `the_bug_board` instead of a standalone `$chatroom`. Same verbs, same observations.
 
 ## Call discipline
 
@@ -48,7 +48,7 @@ The chat verbs use the **direct live interaction** pattern from [core.md §C13](
 
 Because the chat verbs route directly, every observation they emit is live-only by [events.md §12.6](../../spec/semantics/events.md#126-observation-durability-follows-invocation-route): pushed to the room's session audience, never stored. A late-joining client sees no scrollback. This matches MOO's `notify()` semantics. Object commands that mutate state can still route through the room's sequenced log; for example `teach bird "hello"` plans as a `$space:call` against the cockatoo, so the mutation and observation are replay-visible.
 
-**Why direct, not sequenced.** Real-time chat is fire-and-forget; replaying the log to reconstruct utterances would impose a coordinated-write cost on every message. The space's sequenced log remains for state mutations that *do* need replay (a taskspace's `:claim`, `:transition`); chat traffic flows past it.
+**Why direct, not sequenced.** Real-time chat is fire-and-forget; replaying the log to reconstruct utterances would impose a coordinated-write cost on every message. The space's sequenced log remains for state mutations that *do* need replay (a tasks's `:claim`, `:transition`); chat traffic flows past it.
 
 > Being a `$space` does not mean every verb on the object is sequenced ([core.md §C12](../../spec/semantics/core.md#c12-direct-messages-vs-space-mediated-messages)). A `$chatroom` is a `$space` and a feature consumer; chat verbs run as direct calls and never enter the room's sequence log. Saying something does not advance `next_seq`.
 
@@ -221,13 +221,13 @@ that room.
 
 The room's chat behavior still comes from `$conversational`; exits and carrying are room mechanics, not feature mechanics.
 
-For embedded mode, `the_taskspace` (a `$taskspace`) gets the transparent chat feature attached at boot:
+For embedded mode, `the_bug_board` (a `$task_registry`) gets the transparent chat feature attached at boot:
 
 ```
-the_taskspace.features = [$transparent]
+the_bug_board.features = [$transparent]
 ```
 
-Now `the_taskspace:say("starting standup")` works. The utterance is a direct call, so the `said` observation is live-only — pushed to taskspace's session audience, separate from the taskspace's own sequenced log of task mutations.
+Now `the_bug_board:say("starting standup")` works. The utterance is a direct call, so the `said` observation is live-only — pushed to tasks's session audience, separate from the tasks's own sequenced log of task mutations.
 
 ## Seeded Rooms And Things
 
@@ -274,7 +274,7 @@ A transient browser host that:
    - `huh {text}` → `I don't understand that.`
 5. Sends free-text input as wire `op:"command"` with the active command space and raw text. The server plans and dispatches the command; direct plans return `op:"result"` and sequenced plans return `op:"applied"`. The catalog-level `:command_plan` / `:command` verbs remain for direct callers and compatibility.
 
-Same client speaks against `$chatroom` and against `$taskspace` — the verb set is identical, the renderer doesn't care.
+Same client speaks against `$chatroom` and against `$task_registry` — the verb set is identical, the renderer doesn't care.
 
 ## $match interaction
 
@@ -314,9 +314,9 @@ This is what stress-tests `$match`: a real chat surface using the parser end-to-
 
 ## Embedded mode
 
-The same chat client connecting to `the_taskspace` shows:
-- The taskspace's chat (`said`, `emoted`, `entered`, `left` live observations).
-- The taskspace's task-state changes (`task_created`, `status_changed`, etc.) as applied frames in the *same* feed.
+The same chat client connecting to `the_bug_board` shows:
+- The tasks's chat (`said`, `emoted`, `entered`, `left` live observations).
+- The tasks's task-state changes (`task_created`, `status_changed`, etc.) as applied frames in the *same* feed.
 
 Two streams, one timeline. The renderer distinguishes by observation type but renders both as text lines. This is what makes "chat embedded inside a workspace" not a separate UI mode — it's the same UI, with one extra feature attached.
 
@@ -342,11 +342,11 @@ Reserved as natural follow-ons:
 
 Three reasons:
 
-1. **Stress-test composition.** Feature objects are a load-bearing piece of MOO that woo just inherited. The chat demo proves they work, with concrete consumer classes (`$chatroom`, `$taskspace`) sharing one feature implementation.
+1. **Stress-test composition.** Feature objects are a load-bearing piece of MOO that woo just inherited. The chat demo proves they work, with concrete consumer classes (`$chatroom`, `$task_registry`) sharing one feature implementation.
 2. **Brings `$match` into use.** The text-to-action pipeline scaffolded in [match.md](../../spec/semantics/match.md) gets exercised end-to-end. Bugs surface as misparsed commands.
-3. **Agents talk to each other.** The motivation: agents coordinating via verbal exchanges in a room, possibly attached to their workflow's taskspace. Chat is the protocol; presence is the rendezvous.
+3. **Agents talk to each other.** The motivation: agents coordinating via verbal exchanges in a room, possibly attached to their workflow's tasks. Chat is the protocol; presence is the rendezvous.
 
-Together with dubspace and taskspace, chat completes a triangle:
+Together with dubspace and tasks, chat completes a triangle:
 - Dubspace: low-latency, sensory, shared UI state.
 - Taskspace: long-lived, inspectable, agent-friendly coordination state.
 - Chat: live, social, presence-anchored conversation — the canonical MOO surface, working the same primitives.

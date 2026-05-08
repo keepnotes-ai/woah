@@ -4,7 +4,6 @@ import { describe, expect, it } from "vitest";
 import chatManifest from "../catalogs/chat/manifest.json";
 import dubspaceManifest from "../catalogs/dubspace/manifest.json";
 import pinboardManifest from "../catalogs/pinboard/manifest.json";
-import taskspaceManifest from "../catalogs/taskspace/manifest.json";
 import weatherManifest from "../catalogs/weather/manifest.json";
 import { CatalogUiRegistry, type WooContext } from "../src/client/framework";
 
@@ -31,12 +30,10 @@ describe("bundled catalog UI components", () => {
     expect(registry.installCatalogUi({ alias: "chat", catalog: "chat", objects: { "$space": "$space", "$chatroom": "$chatroom" }, ui: (chatManifest as any).ui })).toEqual([]);
     expect(registry.installCatalogUi({ alias: "dubspace", catalog: "dubspace", objects: { "$dubspace": "$dubspace" }, ui: (dubspaceManifest as any).ui })).toEqual([]);
     expect(registry.installCatalogUi({ alias: "pinboard", catalog: "pinboard", objects: { "$pinboard": "$pinboard" }, ui: (pinboardManifest as any).ui })).toEqual([]);
-    expect(registry.installCatalogUi({ alias: "taskspace", catalog: "taskspace", objects: { "$taskspace": "$taskspace" }, ui: (taskspaceManifest as any).ui })).toEqual([]);
     expect(registry.installCatalogUi({ alias: "weather", catalog: "weather", objects: { "$weather_block": "$weather_block" }, ui: (weatherManifest as any).ui })).toEqual([]);
 
     expect(registry.resolveFrame("the_dubspace", undefined, (_subject, classRef) => classRef === "$dubspace" ? 1 : false)?.frame.id).toBe("dubspace.workspace");
     expect(registry.resolveFrame("the_pinboard", undefined, (_subject, classRef) => classRef === "$pinboard" ? 1 : false)?.frame.id).toBe("pinboard.board");
-    expect(registry.resolveFrame("the_taskspace", undefined, (_subject, classRef) => classRef === "$taskspace" ? 1 : false)?.frame.id).toBe("taskspace.workspace");
     expect(registry.componentsForSurface("title-badge").map((component) => component.declaration.tag)).toContain("woo-weather-badge");
 
     const weatherBadge = registry.componentsForSurface("title-badge").find((component) => component.declaration.tag === "woo-weather-badge");
@@ -131,29 +128,4 @@ describe("bundled catalog UI components", () => {
     expect(detail).toMatchObject({ target: "filter_1", name: "cutoff", value: 750 });
   });
 
-  it("renders taskspace tasks and emits create events", async () => {
-    const { WooTaskspaceWorkspaceElement } = await import("../catalogs/taskspace/ui/taskspace-workspace");
-    defineOnce("woo-taskspace-workspace", WooTaskspaceWorkspaceElement);
-    const element = document.createElement("woo-taskspace-workspace") as HTMLElement & { woo?: WooContext; data?: any };
-    element.woo = testWooContext({ guest_1: "Guest 1" });
-    document.body.appendChild(element);
-
-    element.data = {
-      space: "the_taskspace",
-      tasks: {
-        task_1: { id: "task_1", name: "Plan", props: { status: "open", assignee: "guest_1", requirements: [] } }
-      },
-      rootTasks: ["task_1"],
-      selectedTask: "task_1",
-      expanded: {},
-      statusFilter: { open: true, claimed: true, in_progress: true, blocked: true, done: false }
-    };
-
-    expect(element.textContent).toContain("Plan");
-    let detail: any;
-    element.addEventListener("woo-taskspace-create", (event: Event) => { detail = (event as CustomEvent).detail; });
-    element.querySelector<HTMLInputElement>("[data-new-title]")!.value = "New root";
-    element.querySelector<HTMLButtonElement>("[data-create-task]")!.click();
-    expect(detail).toMatchObject({ name: "New root" });
-  });
 });

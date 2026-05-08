@@ -26,7 +26,7 @@ implementation slice exists in `src/client/framework.ts`: catalog UI
 registration, frame resolution, frame-local state/actions, observation
 normalization, scoped snapshot ingestion, projection subscriptions, consistent
 projection layers, and call-bound optimistic reconciliation. The bundled chat,
-dubspace, pinboard, and taskspace surfaces now mount catalog-shipped custom
+dubspace, pinboard, and tasks surfaces now mount catalog-shipped custom
 elements; the host client still supplies transport, audio, routing, and gesture
 service adapters while the frame-action layer matures.
 
@@ -584,7 +584,7 @@ This means "render this same `$pinboard` object using the pinboard catalog's
 presence surface," not "render a separate presence object."
 
 Chat is similarly a surface over a conversation-bearing space. A room, a
-pinboard's below-board chat panel, and a taskspace discussion panel may all
+pinboard's below-board chat panel, and a tasks discussion panel may all
 mount the same `chat.space` component with different subject objects.
 
 ---
@@ -594,7 +594,7 @@ mount the same `chat.space` component with different subject objects.
 Multi-surface rendering is not composition. A frame that mounts
 `pinboard.board`, `pinboard.presence`, and `chat.space` over the same
 `$pinboard` subject is rendering one subject through several independent
-surfaces. Reusing `chat.space` in chat, pinboard, and taskspace frames is also
+surfaces. Reusing `chat.space` in chat, pinboard, and tasks frames is also
 not composition; it is component dependency reuse.
 
 Real composition exists where one mounted UI relationship coordinates multiple
@@ -776,7 +776,7 @@ type UiItemRenderer = {
 ```
 
 Example: a `$note` may render as a sticky card inside a pinboard, a compact
-row inside taskspace, and a plain object chip inside inventory. The note class
+row inside tasks, and a plain object chip inside inventory. The note class
 may provide a generic detail frame, but the container decides item-level
 presentation.
 
@@ -1646,7 +1646,7 @@ normally a client/catalog packaging change, not a world-state migration:
 - Existing worlds whose client bundle still contains legacy tab renderers can
   run during the transition. The host may prefer catalog frames when available
   and fall back to legacy adapters only for bundled demos not yet migrated.
-- The bundled chat, dubspace, pinboard, and taskspace catalogs ship
+- The bundled chat, dubspace, pinboard, and tasks catalogs ship
   catalog-local custom element modules and frame declarations in v1. The first
   client mounts those surfaces through catalog UI declarations; the host still
   supplies service adapters for WebSocket calls, audio, route state, and

@@ -887,7 +887,6 @@ export function registerCoreObservationHandlers(registry: ObservationRegistry) {
       // to note text. Surfaces that don't carry the note key ignore the
       // patch (catalogState is per-subject scoped).
       draft.patchCatalogState(note, "pinboard_note", { text });
-      draft.patchCatalogState(note, "taskspace_task", { text });
       draft.patchObjectProps(note, { text });
     }
   });
@@ -1059,109 +1058,6 @@ export function registerCoreObservationHandlers(registry: ObservationRegistry) {
       for (const [target, props] of Object.entries(controls)) {
         if (!props || typeof props !== "object" || Array.isArray(props)) continue;
         draft.patchObjectProps(target, props as Record<string, unknown>);
-      }
-    }
-  });
-  registry.observation({
-    types: ["task_created"],
-    route: "sequenced",
-    reduce: (draft, envelope) => {
-      const obs = envelope.observation;
-      const task = String(obs.task ?? "");
-      if (!task) return;
-      const parent = typeof obs.parent === "string" ? obs.parent : null;
-      const space = String(obs.space ?? envelope.delivered.space ?? "");
-      // The taskspace verb emits `name` (the v0.2 $note identity slot).
-      // Tolerate the legacy `title` shape from older world frames during
-      // gap recovery so a mid-upgrade replay still projects cleanly.
-      const name = typeof obs.name === "string" ? obs.name : typeof obs.title === "string" ? obs.title : undefined;
-      draft.patchObject(task, { name });
-      draft.patchObjectProps(task, {
-        name,
-        parent_task: parent,
-        status: "open",
-        space: space || undefined
-      });
-      draft.patchCatalogState(task, "taskspace_task", {
-        name,
-        parent_task: parent,
-        status: "open",
-        space: space || undefined
-      });
-      if (space) draft.patchCatalogState(space, "taskspace_tree", { [task]: parent });
-    }
-  });
-  registry.observation({
-    types: ["subtask_added", "task_moved"],
-    route: "sequenced",
-    reduce: (draft, envelope) => {
-      const obs = envelope.observation;
-      const task = String(obs.child ?? obs.task ?? "");
-      if (!task) return;
-      const parent = typeof obs.parent === "string"
-        ? obs.parent
-        : typeof obs.to_parent === "string"
-          ? obs.to_parent
-          : null;
-      const index = Number(obs.index);
-      const space = String(obs.space ?? envelope.delivered.space ?? "");
-      draft.patchObjectProps(task, { parent_task: parent });
-      draft.patchCatalogState(task, "taskspace_task", { parent_task: parent });
-      if (space) {
-        draft.patchCatalogState(space, "taskspace_tree", {
-          [task]: parent,
-          [`index:${task}`]: Number.isFinite(index) ? index : undefined
-        });
-      }
-    }
-  });
-  registry.observation({
-    types: ["task_claimed", "task_released", "status_changed"],
-    route: "sequenced",
-    reduce: (draft, envelope) => {
-      const obs = envelope.observation;
-      const task = String(obs.task ?? "");
-      if (!task) return;
-      const props: Record<string, unknown> = {};
-      if (obs.type === "task_claimed") {
-        props.assignee = obs.actor;
-        props.status = "claimed";
-      } else if (obs.type === "task_released") {
-        props.assignee = null;
-        props.status = "open";
-      } else {
-        props.status = obs.to;
-      }
-      draft.patchObjectProps(task, props);
-      draft.patchCatalogState(task, "taskspace_task", props);
-    }
-  });
-  registry.observation({
-    types: ["requirement_added", "requirement_checked", "message_added", "artifact_attached"],
-    route: "sequenced",
-    reduce: (draft, envelope) => {
-      const obs = envelope.observation;
-      const task = String(obs.task ?? "");
-      if (!task) return;
-      if (obs.type === "requirement_added") {
-        const index = Number(obs.index);
-        if (Number.isFinite(index)) {
-          draft.patchCatalogState(task, "taskspace_task", { [`requirement:${index}`]: { text: obs.text, checked: false } });
-        }
-      } else if (obs.type === "requirement_checked") {
-        const index = Number(obs.index);
-        if (Number.isFinite(index)) {
-          draft.patchCatalogState(task, "taskspace_task", { [`requirement_checked:${index}`]: obs.checked === true });
-        }
-      } else if (obs.type === "message_added") {
-        const ts = Number(obs.ts);
-        const key = Number.isFinite(ts) ? `message:${ts}` : `message:${envelope.delivered.seq ?? envelope.delivered.receivedAt}`;
-        draft.patchCatalogState(task, "taskspace_task", { [key]: { actor: obs.actor, body: obs.body, ts: Number.isFinite(ts) ? ts : undefined } });
-      } else {
-        const ref = obs.ref;
-        const addedAt = ref && typeof ref === "object" && !Array.isArray(ref) ? Number((ref as any).added_at) : NaN;
-        const key = Number.isFinite(addedAt) ? `artifact:${addedAt}` : `artifact:${envelope.delivered.seq ?? envelope.delivered.receivedAt}`;
-        draft.patchCatalogState(task, "taskspace_task", { [key]: ref });
       }
     }
   });

@@ -96,32 +96,6 @@ async function callInDubspace(
   return world.call(requestId, sessionId, "the_dubspace", request);
 }
 
-async function callInTaskspace(
-  world: ReturnType<typeof createWorld>,
-  sessionId: string,
-  requestId: string,
-  request: Message
-): Promise<AppliedFrame | DirectResultFrame | ErrorFrame> {
-  const sessionActor = world.sessions.get(sessionId)?.actor;
-  if (sessionActor !== request.actor) {
-    return world.call(requestId, sessionId, "the_taskspace", request);
-  }
-  if (!world.hasPresence(sessionActor, "the_taskspace")) {
-    const entered = await world.directCall(`enter-${requestId}`, sessionActor, "the_taskspace", "enter", []);
-    if (entered.op === "error") return entered;
-  }
-
-  let verb;
-  try {
-    ({ verb } = world.resolveVerb(request.target, request.verb));
-  } catch {
-    return world.call(requestId, sessionId, "the_taskspace", request);
-  }
-  if (verb.direct_callable === true && typeof verb.perms === "string" && verb.perms.includes("x")) {
-    return world.directCall(requestId, request.actor, request.target, request.verb, request.args);
-  }
-  return world.call(requestId, sessionId, "the_taskspace", request);
-}
 
 function bytecodeVerb(name: string, bytecode: TinyBytecode): VerbDef {
   return {
@@ -1081,7 +1055,7 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
       expect(world.reapExpiredSessions(detachedAt + 60_001)).toEqual([session.id]);
       expect(world.sessions.has(session.id)).toBe(false);
       expect(world.hasPresence(actor, "the_dubspace")).toBe(false);
-      expect(world.hasPresence(actor, "the_taskspace")).toBe(false);
+      expect(world.hasPresence(actor, "the_dubspace")).toBe(false);
       expect(world.hasPresence(actor, "the_chatroom")).toBe(false);
       expect(world.getProp(actor, "description")).toBe("");
       expect(world.getProp(actor, "aliases")).toEqual([]);
@@ -1142,29 +1116,6 @@ describe.each(backends)("world conformance: $name", ({ make }) => {
       expect(world.getProp("delay_1", "conf_read_value")).toBe("typed text");
       expect(world.replay("the_dubspace", 1, 10).map((entry) => entry.message.verb)).toEqual(["conf_read_then_mark", "$resume"]);
       expect(world.parkedTasks.size).toBe(0);
-    } finally {
-      harness.cleanup();
-    }
-  });
-
-  it("runs taskspace hierarchy and relaxed done transition", async () => {
-    const harness = make();
-    try {
-      const world = harness.world;
-      const owner = world.auth("guest:conf-task-owner");
-      const other = world.auth("guest:conf-task-other");
-    const created = await callInTaskspace(world, owner.id, "create", message(owner.actor, "the_taskspace", "create_task", ["Conform", "Test the world"]));
-      expect(created.op).toBe("applied");
-      const task = created.op === "applied" ? (created.observations[0].task as string) : "";
-    const sub = await callInTaskspace(world, owner.id, "subtask", message(owner.actor, task, "add_subtask", ["Sub", "Child"]));
-      expect(sub.op).toBe("applied");
-      expect(world.getProp(task, "subtasks")).toHaveLength(1);
-    await callInTaskspace(world, owner.id, "claim", message(owner.actor, task, "claim", []));
-    const blocked = await callInTaskspace(world, other.id, "blocked-by-other", message(other.actor, task, "set_status", ["blocked"]));
-    if (blocked.op === "applied") expect(blocked.observations[0].code).toBe("E_PERM");
-    const done = await callInTaskspace(world, other.id, "done-by-other", message(other.actor, task, "set_status", ["done"]));
-      expect(done.op).toBe("applied");
-      expect(world.getProp(task, "status")).toBe("done");
     } finally {
       harness.cleanup();
     }

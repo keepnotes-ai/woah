@@ -40,35 +40,6 @@ export async function callInDubspace(
   return world.call(requestId, sessionId, "the_dubspace", request);
 }
 
-export async function callInTaskspace(
-  world: ReturnType<typeof createWorld>,
-  sessionId: string,
-  requestId: string,
-  request: Message
-): Promise<AppliedFrame | DirectResultFrame | ErrorFrame> {
-  const sessionActor = world.sessions.get(sessionId)?.actor;
-  if (sessionActor !== request.actor) {
-    return world.call(requestId, sessionId, "the_taskspace", request);
-  }
-  if (!world.hasPresence(sessionActor, "the_taskspace")) {
-    const entered = await world.directCall(`enter-${requestId}`, sessionActor, "the_taskspace", "enter", []);
-    if (entered.op === "error") return entered;
-  }
-
-  let verb;
-  try {
-    ({ verb } = world.resolveVerb(request.target, request.verb));
-  } catch {
-    return world.call(requestId, sessionId, "the_taskspace", request);
-  }
-  if (verb.direct_callable === true && typeof verb.perms === "string" && verb.perms.includes("x")) {
-    const direct = await world.directCall(requestId, request.actor, request.target, request.verb, request.args);
-    return direct;
-  }
-
-  return world.call(requestId, sessionId, "the_taskspace", request);
-}
-
 export function nativeVerb(name: string, native = "describe", owner = "$wiz"): VerbDef {
   return {
     kind: "native",

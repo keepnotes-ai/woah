@@ -7,7 +7,7 @@ status: partial
 
 > Part of the [woo specification](../../SPEC.md). Layer: **operations**.
 
-The pattern for state-machine-shaped coordination on a `$space`. Tasks (or any work-bearing object) progress through named states; the space gates transitions on roles and entrance conditions. Generalizes beyond taskspace: review pipelines, approval chains, deployment gates, content moderation.
+The pattern for state-machine-shaped coordination on a `$space`. Tasks (or any work-bearing object) progress through named states; the space gates transitions on roles and entrance conditions. Generalizes beyond a task registry: review pipelines, approval chains, deployment gates, content moderation.
 
 Workflows are *not* a runtime primitive. They are a pattern built on existing `$space`, properties, verbs, and the per-claimer / per-role discipline from [identity.md §I7.1](../semantics/identity.md#i71-the-per-claimer-update-pattern).
 
@@ -40,7 +40,7 @@ Workflows are values, not objects. They serialize and deserialize cleanly, can b
 
 A `$space`-descended class declares a `workflow` property whose default is a workflow value. Items in spaces of that class consult the workflow when transitioning.
 
-Example: a `$design_review_taskspace` class has `workflow` defaulting to:
+Example: a `$design_review_registry` class has `workflow` defaulting to:
 
 ```js
 {
@@ -94,7 +94,7 @@ If the role property is null (e.g., reviewer not set), transition rejects with `
 
 ## WF5. The gated `:set_status`
 
-The taskspace's `:set_status` integrates the workflow check:
+The task registry's `:set_status` integrates the workflow check:
 
 ```woo
 verb $task:set_status(status) {
@@ -124,7 +124,7 @@ verb $task:set_status(status) {
 }
 ```
 
-For workflow-bearing taskspaces, this replaces the unguarded `set_status` from the open-policy demo. The unguarded form survives on `$task` for the workflow-free demo; the workflow-aware form is on a `$workflow_task` subclass.
+For workflow-bearing task registries, this replaces the unguarded `set_status` from the open-policy demo. The unguarded form survives on `$task` for the workflow-free demo; the workflow-aware form is on a `$workflow_task` subclass.
 
 `:transition(to)` is offered as ergonomic sugar — equivalent to `:set_status(to)` but reads better in agent code.
 
@@ -169,7 +169,7 @@ Reviewer agents do the symmetric flow against `items_in_state("design-review")` 
 
 ---
 
-## WF8. Beyond taskspace
+## WF8. Beyond task registries
 
 Same pattern, different domains:
 
@@ -272,7 +272,7 @@ $workflow_space:items_in_state(state, max_capability?) -> list<obj>
 When `max_capability` is set, only items with `capability ≤ max_capability` (or null) are returned. The conventional agent loop:
 
 ```
-items = $taskspace:items_unfilled("performer", $me.capability)
+items = $task_registry:items_unfilled("performer", $me.capability)
 ```
 
 — and the agent only sees what it is allowed to claim.

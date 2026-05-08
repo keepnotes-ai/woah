@@ -98,7 +98,7 @@ The classes that declare `instances_self_host = true` in the baseline object gra
 
 - `$room` (and subclasses) — every room has its own log, subscribers, and fixtures, scaling independently of other rooms.
 - `$player` (and subclasses including `$wiz`, `$guest`) — every player owns a host for sessions, attached connections, and inventory.
-- Anchor spaces declared by catalogs that own coordination clusters — for example `$dubspace` and `$taskspace` from the bundled demo catalogs ([catalogs.md §CT15](../discovery/catalogs.md#ct15-bundled-catalogs-in-this-repo)). Any catalog whose top-level space owns its anchored objects sets `instances_self_host = true` on the class.
+- Anchor spaces declared by catalogs that own coordination clusters — for example `$dubspace` and `$task_registry` from the bundled demo catalogs ([catalogs.md §CT15](../discovery/catalogs.md#ct15-bundled-catalogs-in-this-repo)). Any catalog whose top-level space owns its anchored objects sets `instances_self_host = true` on the class.
 - The `$catalog_registry` and similar operational singletons.
 
 Authority to instantiate self-hosting classes is narrower than ordinary `create()`. Because each instance reserves a real host resource, the `assertCanCreateObject` check requires wizard authority (or an explicit programmer capability grant); ordinary programmer-creates-own-fertile-parent authority is not sufficient. See [permissions.md §11.4](permissions.md#114-progr-and-actor) and [reference/cloudflare.md §R1.1](../reference/cloudflare.md#r11-routing).

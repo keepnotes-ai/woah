@@ -8,7 +8,6 @@ import {
   authedWorld,
   bytecodeVerb,
   callInDubspace,
-  callInTaskspace,
   LocalHostBridge,
   message,
   nativeVerb
@@ -19,7 +18,7 @@ describe("woo core", () => {
     const world = createWorld();
     expect(world.object("$root").id).toBe("$root");
     expect(world.object("the_dubspace").parent).toBe("$dubspace");
-    expect(world.object("the_taskspace").parent).toBe("$taskspace");
+    expect(world.object("the_pinboard").parent).toBe("$pinboard");
     const description = world.describe("the_dubspace");
     expect(description.id).toBe("the_dubspace");
     expect(description.description).toContain("sound-space");
@@ -31,7 +30,7 @@ describe("woo core", () => {
   it("enforces property read permissions for actor-facing introspection", async () => {
     const { world, session, actor } = authedWorld();
     const name = "private_rest_probe";
-    world.defineProperty("the_taskspace", {
+    world.defineProperty("the_dubspace", {
       name,
       defaultValue: "secret",
       owner: "$wiz",
@@ -39,23 +38,23 @@ describe("woo core", () => {
       typeHint: "str"
     });
 
-    expect(world.describeForActor("the_taskspace", actor).properties).toContain(name);
-    expect(() => world.getPropForActor(actor, "the_taskspace", name)).toThrow(/cannot read/);
-    expect(world.getPropForActor("$wiz", "the_taskspace", name)).toBe("secret");
+    expect(world.describeForActor("the_dubspace", actor).properties).toContain(name);
+    expect(() => world.getPropForActor(actor, "the_dubspace", name)).toThrow(/cannot read/);
+    expect(world.getPropForActor("$wiz", "the_dubspace", name)).toBe("secret");
 
-    world.defineProperty("the_taskspace", {
+    world.defineProperty("the_dubspace", {
       name: "description",
       defaultValue: "private taskspace",
       owner: "$wiz",
       perms: "w",
       typeHint: "str"
     });
-    world.setProp("the_taskspace", "description", "private taskspace");
-    expect((world.state(actor).objects.the_taskspace as Record<string, unknown>).description).toBeNull();
-    expect((world.state("$wiz").objects.the_taskspace as Record<string, unknown>).description).toBe("private taskspace");
+    world.setProp("the_dubspace", "description", "private taskspace");
+    expect((world.state(actor).objects.the_dubspace as Record<string, unknown>).description).toBeNull();
+    expect((world.state("$wiz").objects.the_dubspace as Record<string, unknown>).description).toBe("private taskspace");
 
-    await callInTaskspace(world, session.id, "enter-describe", message(actor, "the_taskspace", "enter", []));
-    const described = await callInTaskspace(world, session.id, "describe-private", message(actor, "the_taskspace", "describe", []));
+    await callInDubspace(world, session.id, "enter-describe", message(actor, "the_dubspace", "enter", []));
+    const described = await callInDubspace(world, session.id, "describe-private", message(actor, "the_dubspace", "describe", []));
     expect(described.op).toBe("result");
     if (described.op === "result") expect((described.result as Record<string, unknown>).description).toBeNull();
   });
@@ -716,7 +715,7 @@ describe("woo core", () => {
     expect(world.object("catalog_dubspace").parent).toBe("$catalog");
     expect(world.object("$space").parent).toBe("$sequenced_log");
     expect(world.object("$dubspace").parent).toBe("$space");
-    expect(world.object("$taskspace").parent).toBe("$space");
+    expect(world.object("$pinboard").parent).toBe("$space");
     expect(world.object("$conversational").parent).toBe("$thing");
     expect(world.object("$dubspace").eventSchemas.has("control_changed")).toBe(true);
     expect(world.verbInfo("the_dubspace", "set_control").source).toContain("target.(name)");
@@ -731,39 +730,39 @@ describe("woo core", () => {
     const session = world.auth("guest:clean");
     expect(world.allLocationsForActor(session.actor)).toEqual(["$nowhere"]);
 
-    installLocalCatalogs(world, ["chat", "demoworld", "taskspace", "dubspace"]);
+    installLocalCatalogs(world, ["chat", "demoworld", "pinboard", "dubspace"]);
     expect(world.object("the_chatroom").parent).toBe("$chatroom");
-    expect(world.object("the_taskspace").parent).toBe("$taskspace");
+    expect(world.object("the_pinboard").parent).toBe("$pinboard");
     expect(world.object("the_dubspace").parent).toBe("$dubspace");
-    expect(world.verbInfo("the_taskspace", "say").definer).toBe("$transparent");
+    expect(world.verbInfo("the_dubspace", "say").definer).toBe("$transparent");
   });
 
   it("exports host-scoped worlds for routed cluster hosts", async () => {
     const world = createWorld();
-    const session = world.auth("guest:host-scope");
-    const scoped = world.exportHostScopedWorld("the_taskspace");
+    world.auth("guest:host-scope");
+    const scoped = world.exportHostScopedWorld("the_pinboard");
     const ids = scoped.objects.map((obj) => obj.id);
 
-    expect(ids).toContain("the_taskspace");
-    expect(ids).toContain("$taskspace");
-    expect(ids).toContain("$task");
+    expect(ids).toContain("the_pinboard");
+    expect(ids).toContain("$pinboard");
+    expect(ids).toContain("$pin");
     expect(ids).toContain("$conversational");
     expect(ids).not.toContain("the_dubspace");
-    expect(ids).not.toContain("the_chatroom");
     expect(scoped.sessions).toEqual([]);
-    expect(scoped.logs.every(([space]) => space === "the_taskspace")).toBe(true);
+    expect(scoped.logs.every(([space]) => space === "the_pinboard")).toBe(true);
 
     const cluster = createWorldFromSerialized(scoped, { persist: false });
     const clusterSession = cluster.auth("guest:host-scope");
-    const entered = await cluster.directCall("host-scope-enter", clusterSession.actor, "the_taskspace", "enter", []);
+    const entered = await cluster.directCall("host-scope-enter", clusterSession.actor, "the_pinboard", "enter", []);
     expect(entered.op).toBe("result");
-    const created = await cluster.call("host-scope-create", clusterSession.id, "the_taskspace", message(clusterSession.actor, "the_taskspace", "create_task", ["Scoped", ""]));
+    const created = await cluster.call("host-scope-create", clusterSession.id, "the_pinboard", message(clusterSession.actor, "the_pinboard", "add_note", ["Scoped"]));
     expect(created.op).toBe("applied");
     if (created.op !== "applied") return;
-    const task = String(created.observations.find((obs) => obs.type === "task_created")?.task ?? "");
-    expect(task).toMatch(/^obj_the_taskspace_/);
-    expect(cluster.object(task).parent).toBe("$task");
-    expect(cluster.objectRoutes()).toContainEqual({ id: task, host: "the_taskspace", anchor: "the_taskspace" });
+    const noteAdded = created.observations.find((obs) => obs.type === "note_added");
+    const pin = String((noteAdded?.note as Record<string, unknown> | undefined)?.id ?? noteAdded?.pin ?? "");
+    expect(pin).toMatch(/^obj_the_pinboard_/);
+    expect(cluster.object(pin).parent).toBe("$pin");
+    expect(cluster.objectRoutes()).toContainEqual({ id: pin, host: "the_pinboard", anchor: "the_pinboard" });
   });
 
   it("treats stored worlds without a host slice as unusable for cluster boot", async () => {
@@ -788,7 +787,7 @@ describe("woo core", () => {
     expect(ids).toContain("$dubspace");
     expect(ids).toContain("$loop_slot");
     expect(ids).toContain("slot_1");
-    expect(ids).not.toContain("the_taskspace");
+    expect(ids).not.toContain("the_pinboard");
     expect(ids).toContain("the_chatroom");
 
     const chatScoped = scopeSerializedWorldToHost(full, "the_chatroom");
@@ -858,27 +857,27 @@ describe("woo core", () => {
 
   it("merges fresh host seed without overwriting authored host-state properties", () => {
     const storedWorld = createWorld();
-    storedWorld.setProp("the_pinboard", "notes", [
+    storedWorld.setProp("the_dubspace", "notes", [
       { id: "n1", text: "keep me", color: "yellow", x: 48, y: 48, w: 180, h: 110, z: 1 }
     ]);
-    storedWorld.setProp("the_pinboard", "next_note_id", 2);
-    storedWorld.setProp("the_pinboard", "next_z", 2);
+    storedWorld.setProp("the_dubspace", "next_note_id", 2);
+    storedWorld.setProp("the_dubspace", "next_z", 2);
 
     const freshWorld = createWorld();
-    const storedScoped = nonEmptyHostScopedWorld(storedWorld.exportWorld(), "the_pinboard");
-    const freshScoped = nonEmptyHostScopedWorld(freshWorld.exportWorld(), "the_pinboard");
+    const storedScoped = nonEmptyHostScopedWorld(storedWorld.exportWorld(), "the_dubspace");
+    const freshScoped = nonEmptyHostScopedWorld(freshWorld.exportWorld(), "the_dubspace");
     expect(storedScoped).not.toBeNull();
     expect(freshScoped).not.toBeNull();
 
     const merged = mergeHostScopedSeed(storedScoped!, freshScoped!);
     const reloaded = createWorldFromSerialized(merged, { persist: false });
 
-    expect(reloaded.getProp("the_pinboard", "notes")).toEqual([
+    expect(reloaded.getProp("the_dubspace", "notes")).toEqual([
       { id: "n1", text: "keep me", color: "yellow", x: 48, y: 48, w: 180, h: 110, z: 1 }
     ]);
-    expect(reloaded.getProp("the_pinboard", "next_note_id")).toBe(2);
-    expect(reloaded.getProp("the_pinboard", "next_z")).toBe(2);
-    expect(reloaded.ownVerb("$pinboard", "add_note")).toBeDefined();
+    expect(reloaded.getProp("the_dubspace", "next_note_id")).toBe(2);
+    expect(reloaded.getProp("the_dubspace", "next_z")).toBe(2);
+    expect(reloaded.ownVerb("$dubspace", "add_note")).toBeDefined();
   });
 
   it("normalizes legacy d permission shorthand while importing worlds", async () => {
@@ -1003,7 +1002,7 @@ describe("woo core", () => {
     const world = createWorld();
     const session = world.auth("guest:no-chat-autojoin");
     expect(world.hasPresence(session.actor, "the_dubspace")).toBe(false);
-    expect(world.hasPresence(session.actor, "the_taskspace")).toBe(false);
+    expect(world.hasPresence(session.actor, "the_dubspace")).toBe(false);
     expect(world.hasPresence(session.actor, "the_chatroom")).toBe(false);
 
     const enter = await world.directCall("enter-chat", session.actor, "the_chatroom", "enter", []);
@@ -1214,7 +1213,7 @@ describe("woo core", () => {
 
     expect((await world.directCall("primary-promotion-oldest-enter", actor, "the_chatroom", "enter", [], { sessionId: oldest.id })).op).toBe("result");
     expect((await world.directCall("primary-promotion-middle-enter", actor, "the_dubspace", "enter", [], { sessionId: middle.id })).op).toBe("result");
-    expect((await world.directCall("primary-promotion-newest-enter", actor, "the_taskspace", "enter", [], { sessionId: newest.id })).op).toBe("result");
+    expect((await world.directCall("primary-promotion-newest-enter", actor, "the_dubspace", "enter", [], { sessionId: newest.id })).op).toBe("result");
     expect(world.primarySessionForActor(actor)?.id).toBe(oldest.id);
     expect(world.object(actor).location).toBe("the_chatroom");
 
@@ -1223,7 +1222,7 @@ describe("woo core", () => {
     expect(world.primarySessionForActor(actor)?.id).toBe(middle.id);
     expect(world.object(actor).location).toBe("the_dubspace");
     expect(world.currentLocationForSession(middle.id)).toBe("the_dubspace");
-    expect(world.currentLocationForSession(newest.id)).toBe("the_taskspace");
+    expect(world.currentLocationForSession(newest.id)).toBe("the_dubspace");
   });
 
   it("does not expire a session while a socket is attached", async () => {
@@ -1274,7 +1273,7 @@ describe("woo core", () => {
     expect(world.reapExpiredSessions(detachedAt + 60_001)).toEqual([session.id]);
     expect(world.sessions.has(session.id)).toBe(false);
     expect(world.hasPresence(actor, "the_dubspace")).toBe(false);
-    expect(world.hasPresence(actor, "the_taskspace")).toBe(false);
+    expect(world.hasPresence(actor, "the_dubspace")).toBe(false);
     expect(world.hasPresence(actor, "the_chatroom")).toBe(false);
     expect(world.getProp("the_dubspace", "operators")).toEqual([]);
     expect(world.getProp(actor, "description")).toBe("");
@@ -1374,7 +1373,7 @@ describe("woo core", () => {
     const first = world.auth("guest:first");
     const second = world.auth("guest:second");
     expect(world.verbInfo("the_chatroom", "say").definer).toBe("$conversational");
-    expect(world.verbInfo("the_taskspace", "say").definer).toBe("$transparent");
+    expect(world.verbInfo("the_dubspace", "say").definer).toBe("$transparent");
 
     const enterFirst = await world.directCall("enter-first", first.actor, "the_chatroom", "enter", []);
     const enterSecond = await world.directCall("enter-second", second.actor, "the_chatroom", "enter", []);
@@ -1406,18 +1405,23 @@ describe("woo core", () => {
     expect(world.getProp("the_chatroom", "next_seq")).toBe(1);
     expect(world.replay("the_chatroom", 1, 10)).toEqual([]);
 
-    const taskspaceEnter = await world.directCall("taskspace-enter", first.actor, "the_taskspace", "enter", []);
-    expect(taskspaceEnter.op).toBe("result");
-    const taskspaceSay = taskspaceEnter.op === "result"
-      ? await world.directCall("taskspace-say", first.actor, "the_taskspace", "say", ["same feature"])
-      : taskspaceEnter;
-    expect(taskspaceSay.op).toBe("result");
-    if (taskspaceSay.op === "result") {
-      expect(taskspaceSay.audience).toBe("the_taskspace");
-      expect(taskspaceSay.observations).toMatchObject([{ type: "said", source: "the_taskspace", actor: first.actor, text: "same feature" }]);
+    // the_dubspace mounts in the_chatroom with the chat:$transparent feature,
+    // so a `say` here also propagates to the parent chatroom — say emits two
+    // `said` observations, one per audience.
+    const dubspaceEnter = await world.directCall("dubspace-enter", first.actor, "the_dubspace", "enter", []);
+    expect(dubspaceEnter.op).toBe("result");
+    const dubspaceSay = dubspaceEnter.op === "result"
+      ? await world.directCall("dubspace-say", first.actor, "the_dubspace", "say", ["same feature"])
+      : dubspaceEnter;
+    expect(dubspaceSay.op).toBe("result");
+    if (dubspaceSay.op === "result") {
+      expect(dubspaceSay.audience).toBe("the_dubspace");
+      expect(dubspaceSay.observations).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: "said", source: "the_dubspace", actor: first.actor, text: "same feature" })
+      ]));
     }
-    expect(world.getProp("the_taskspace", "next_seq")).toBe(1);
-    expect(world.replay("the_taskspace", 1, 10)).toEqual([]);
+    expect(world.getProp("the_dubspace", "next_seq")).toBe(1);
+    expect(world.replay("the_dubspace", 1, 10)).toEqual([]);
   });
 
   it("resolves feature verbs after the parent chain in feature-list order", async () => {
@@ -1428,18 +1432,18 @@ describe("woo core", () => {
     world.addVerb("feature_a", nativeVerb("ping"));
     world.addVerb("feature_b", nativeVerb("ping"));
     world.addVerb("feature_nested", nativeVerb("nested_only"));
-    world.setProp("the_taskspace", "features", ["feature_a", "feature_b"]);
-    world.setProp("the_taskspace", "features_version", 99);
+    world.setProp("the_dubspace", "features", ["feature_a", "feature_b"]);
+    world.setProp("the_dubspace", "features_version", 99);
     world.setProp("feature_a", "features", ["feature_nested"]);
 
-    expect(world.verbInfo("the_taskspace", "ping").definer).toBe("feature_a");
-    world.setProp("the_taskspace", "features", ["feature_b", "feature_a"]);
-    world.setProp("the_taskspace", "features_version", 100);
-    expect(world.verbInfo("the_taskspace", "ping").definer).toBe("feature_b");
-    expect(() => world.verbInfo("the_taskspace", "nested_only")).toThrow(/E_VERBNF|verb not found/);
+    expect(world.verbInfo("the_dubspace", "ping").definer).toBe("feature_a");
+    world.setProp("the_dubspace", "features", ["feature_b", "feature_a"]);
+    world.setProp("the_dubspace", "features_version", 100);
+    expect(world.verbInfo("the_dubspace", "ping").definer).toBe("feature_b");
+    expect(() => world.verbInfo("the_dubspace", "nested_only")).toThrow(/E_VERBNF|verb not found/);
 
-    world.addVerb("$taskspace", nativeVerb("ping"));
-    expect(world.verbInfo("the_taskspace", "ping").definer).toBe("$taskspace");
+    world.addVerb("$dubspace", nativeVerb("ping"));
+    expect(world.verbInfo("the_dubspace", "ping").definer).toBe("$dubspace");
   });
 
   it("manages feature lists through space feature verbs", async () => {

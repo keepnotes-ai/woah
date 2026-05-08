@@ -4,7 +4,7 @@ import { join, relative } from "node:path";
 const root = process.cwd();
 const checkedRoots = ["src"];
 const skippedDirs = new Set(["node_modules", "dist", ".git", "src/generated"]);
-const pattern = /\b(?:the_dubspace|the_taskspace|the_chatroom|slot_[1-4]|channel_1|filter_1|delay_1|drum_1|default_scene)\b/g;
+const pattern = /\b(?:the_dubspace|the_chatroom|slot_[1-4]|channel_1|filter_1|delay_1|drum_1|default_scene)\b/g;
 const hits = [];
 
 function walk(path) {

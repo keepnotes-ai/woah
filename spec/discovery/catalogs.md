@@ -40,7 +40,7 @@ Spec ships **source**, not bytecode. The manifest carries DSL source for every v
 **Local implementation hints.** The manifest format still permits a
 non-portable `implementation` field on a verb (`native` handler or named
 bytecode fixture) for trusted `@local` bootstrap experiments. First-party demo
-catalogs should not rely on it; chat, taskspace, and dubspace install from
+catalogs should not rely on it; chat, tasks, and dubspace install from
 source alone. Public v1 catalogs must treat source as normative; implementation
 hints are ignored outside trusted local catalogs.
 
@@ -96,7 +96,7 @@ github.com/hughpyle/woo-libs/
     │   ├── README.md            (catalog-level, frontmatter-headed)
     │   ├── manifest.json
     │   └── agent_manifest.json  (optional)
-    ├── taskspace/
+    ├── tasks/
     │   ├── README.md
     │   └── manifest.json
     └── chat/
@@ -233,7 +233,7 @@ A deployment's bundled `catalogs/` directory ships with the world's source. The 
 Boot-time auto-install is controlled by `WOO_AUTO_INSTALL_CATALOGS` (a comma-separated list, see [reference/cloudflare.md §R14](../reference/cloudflare.md#r14-deploying-your-own-world)):
 
 - unset — install every bundled catalog discovered at `<deployment>/catalogs/*/manifest.json`, dependency-sorted using `depends`. A catalog is bundled because it lives in the bundled catalog tap location, not because the runtime recognizes its name, classes, seed objects, UI, or app role.
-- `WOO_AUTO_INSTALL_CATALOGS=chat,taskspace,dubspace` — install only the named local catalogs from the same bundled tap location. This is an operator filter over discovered local catalogs, not a hardcoded application list.
+- `WOO_AUTO_INSTALL_CATALOGS=chat,tasks,dubspace` — install only the named local catalogs from the same bundled tap location. This is an operator filter over discovered local catalogs, not a hardcoded application list.
 - `WOO_AUTO_INSTALL_CATALOGS=` (empty) — clean world; operators install what they want.
 - Each entry is a catalog name resolved against `@local:<name>`.
 
@@ -415,7 +415,7 @@ discipline. Trusted local experiments may additionally include:
 
 Those implementation hints are trusted-local only. They are not part of the
 portable public catalog contract. They exist for temporary bootstrap experiments,
-not as the normal demo-app path; first-party chat, taskspace, and dubspace verbs
+not as the normal demo-app path; first-party chat, tasks, and dubspace verbs
 install from source alone.
 
 ---
@@ -539,7 +539,7 @@ Strongly typed verb signatures (return types, raised errors, named-arg shapes) w
 A catalog may ship **UI components alongside its code** — control surfaces for
 its classes, dashboards, frame declarations, custom renderers, and observation
 handlers for the observations it emits. The dubspace catalog's mixer panel,
-the taskspace catalog's Kanban view, a pinboard catalog's spatial board, and a
+the tasks catalog's Kanban view, a pinboard catalog's spatial board, and a
 chat catalog's transcript renderer are natural extensions of "the things this
 catalog provides."
 
@@ -560,7 +560,7 @@ Catalog UI follows the same catalog lifecycle as code:
 - **Versioning + trust**: UI changes ride along with catalog versions and are
   wizard-installed trusted client code.
 
-Authors picking up the repo should expect their first-party UI work (the dubspace mixer, the taskspace board, the chat transcript) to migrate from `src/client/` into their respective catalogs once the framework exists. The current bundled client is a v1 expedient, not an architectural choice.
+Authors picking up the repo should expect their first-party UI work (the dubspace mixer, the tasks board, the chat transcript) to migrate from `src/client/` into their respective catalogs once the framework exists. The current bundled client is a v1 expedient, not an architectural choice.
 
 ---
 
@@ -716,11 +716,11 @@ The catalogs under `catalogs/` ship with this repository for two distinct purpos
 | `prog` | **Foundational utility** | Optional | Builder/programmer authority tooling for in-world authoring. Required only for worlds that allow runtime programming. |
 | `demoworld` | **Demo seed** | No | The first-light demo's seed catalog: `$cockatoo` class plus the populated Living Room / Deck / Hot Tub set with exits, props, and the cockatoo. Owns the mount-point rooms that `dubspace` and `pinboard` reference. |
 | `dubspace` | **Demo application** | No | Shared dub-mix sound space. Seeds `the_dubspace` mounted in `demoworld:the_chatroom` with `chat:$transparent` attached; depends on `chat` + `demoworld`. |
-| `taskspace` | **Demo application** | No | Hierarchical task coordination. Seeds `the_taskspace` with `chat:$transparent` attached; depends on `chat` only (does not mount in any demoworld room). |
+| `tasks` | **Demo application** | No | Task-as-obligation-list coordination (see [notes/2026-05-06-task-obligation-model.md](../../notes/2026-05-06-task-obligation-model.md)). Seeds `the_bug_board` as a `$task_registry`; depends on `note`. |
 | `pinboard` | **Demo application** | No | Spatial bulletin board. Seeds `the_pinboard` mounted in `demoworld:the_deck` with `chat:$transparent` attached; depends on `chat` + `note` + `demoworld`. |
 
 **Foundational utilities** are reusable building blocks: a typical operator-deployed world will install some or all four. **Demo applications** are illustrative and runnable but are not part of the core feature set. The **demo seed** catalog (`demoworld`) is a thin wiring layer: it picks the names, locations, exits, and props that make the bundled demo a coherent place. An operator who wants the foundational classes without the bundled demo installs the four foundational catalogs and stops.
 
-The list above is **not exhaustive** of catalogs woo can run. Any GitHub-tap catalog can be installed alongside or instead of the bundled set; the runtime treats them identically. Specs that mention `$dubspace`, `$taskspace`, `$chatroom`, or other bundled-catalog classes by name use them as concrete examples — the contracts they illustrate apply to any catalog of the same shape.
+The list above is **not exhaustive** of catalogs woo can run. Any GitHub-tap catalog can be installed alongside or instead of the bundled set; the runtime treats them identically. Specs that mention `$dubspace`, `$task_registry`, `$chatroom`, or other bundled-catalog classes by name use them as concrete examples — the contracts they illustrate apply to any catalog of the same shape.
 
-**Class library vs seed catalog distinction.** The split exists for dependency management. A catalog that defines classes (a "class library") should not seed instances unless those instances are tied to the class's identity. A catalog that opinionates a populated world (a "seed catalog") should seed but not define new classes beyond what its seeds need. `chat` is a class library after this refactor; `demoworld` is a seed catalog. `dubspace`, `taskspace`, `pinboard` mix both today because they're small enough that the split would be more friction than value — but the same separation is available to publishers who want it.
+**Class library vs seed catalog distinction.** The split exists for dependency management. A catalog that defines classes (a "class library") should not seed instances unless those instances are tied to the class's identity. A catalog that opinionates a populated world (a "seed catalog") should seed but not define new classes beyond what its seeds need. `chat` is a class library after this refactor; `demoworld` is a seed catalog. `dubspace`, `tasks`, `pinboard` mix both today because they're small enough that the split would be more friction than value — but the same separation is available to publishers who want it.

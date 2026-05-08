@@ -27,7 +27,7 @@ conventions on top of those substrates.
 Today's bundled SPA holds per-tab state in memory: the selected task,
 focused pin, current dubspace scene. None of it survives a refresh,
 none of it is shareable as a link, and none of it is addressable from
-MCP. Cross-tab navigation (kanban card → task in taskspace) is
+MCP. Cross-tab navigation (kanban card → task in tasks) is
 hardcoded in the SPA — there's no mechanism for a third-party catalog
 or an external agent to express the same jump.
 
@@ -115,7 +115,7 @@ approximately:
 | `$chatroom`, `$persistent_chatroom` | chat |
 | `$pinboard` | pinboard (spatial) |
 | `$kanban_board` | kanban |
-| `$taskspace`, `$task` | taskspace |
+| `$task_registry`, `$task` | tasks |
 | `$dubspace` | dubspace |
 | `$generic_editor`, `$verb_editor` | editor |
 | `$builder`, `$programmer` | IDE / authoring |
@@ -164,8 +164,8 @@ verb that returns a navigation hint:
 verb $task:locate() rxd {
   return {
     object: this,
-    view: "taskspace",
-    parent: this.taskspace,
+    view: "tasks",
+    parent: this.tasks,
     title: this.title
   };
 }
@@ -211,12 +211,12 @@ Convention: `:open_in_<view>()` returns the related object's id (or
 its `:locate()` hint).
 
 ```woo
-verb $kanban_card:open_in_taskspace() rxd {
+verb $kanban_card:open_in_tasks() rxd {
   return this.task_id;
 }
 
-verb $pin:open_in_taskspace() rxd {
-  // Pins do not bridge to taskspace.
+verb $pin:open_in_tasks() rxd {
+  // Pins do not bridge to tasks.
   return null;
 }
 ```
@@ -234,7 +234,7 @@ The client's "open in X" affordance is dispatched by checking which
 `:describe()` or `match_verb`). Class authors advertise their bridges
 without the client needing per-class wiring.
 
-The view name in the verb name (`taskspace`, `kanban`, etc.) matches
+The view name in the verb name (`tasks`, `kanban`, etc.) matches
 the renderer registry's view ids (AR4). New views land by adding to
 the registry and (optionally) implementing bridges from related
 classes.

@@ -390,6 +390,50 @@ export class PersistentObjectDO {
     }, hostKey);
   }
 
+  /** Cold-load guard per spec/semantics/recycle.md §RC11.6. Called on a DO
+   * with empty storage before any cold-load seed runs. RPCs Directory's
+   * `lookup-inherited-tombstone` for our own id; if hit, throws
+   * E_HOST_RECYCLED and the caller refuses to bootstrap. The Directory
+   * RPC is the same one used to answer `is_recycled()` queries, so this
+   * adds at most one Directory round-trip to a cold start that already
+   * RPCs the gateway for a host seed. */
+  private async guardColdLoadAgainstInheritedTombstone(hostKey: string): Promise<void> {
+    if (hostKey === WORLD_HOST) return;
+    let body: Record<string, unknown> | null = null;
+    try {
+      const directoryId = this.env.DIRECTORY.idFromName(DIRECTORY_HOST);
+      const request = await signInternalRequest(this.env, new Request(
+        `${INTERNAL_ORIGIN}/__internal/lookup-inherited-tombstone`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "x-woo-host-key": hostKey
+          },
+          body: JSON.stringify({ id: hostKey })
+        }
+      ));
+      const response = await this.env.DIRECTORY.get(directoryId).fetch(request);
+      if (!response.ok) return; // lenient: Directory unreachable → proceed
+      body = await response.json() as Record<string, unknown>;
+    } catch (err) {
+      // Lenient on transport failure; logged for observability. The cost
+      // of a false-negative cold-load (re-creating a DO under a torn-down
+      // id) is bounded — the next request that reaches Directory will
+      // trip the gate, the DO writes host_state=tearing_down, and reruns
+      // §RC11.3 (idempotent on the empty roster).
+      console.warn("woo.host_teardown.cold_load_guard_failed", { host: hostKey, error: normalizeError(err) });
+      return;
+    }
+    if (body && body.tombstoned === true) {
+      throw wooError(
+        "E_HOST_RECYCLED",
+        `host ${hostKey} was recycled; refusing cold-load`,
+        hostKey
+      );
+    }
+  }
+
   private async postInheritTombstones(
     hostKey: string,
     batchSeq: number,
@@ -502,6 +546,13 @@ export class PersistentObjectDO {
 
   private async createHostScopedWorld(hostKey: ObjRef, metricsHook: (event: MetricEvent) => void): Promise<WooWorld> {
     const stored = this.repo.load();
+    // §RC11.6 cold-load guard. If storage is empty (a fresh DO or a stale
+    // stub reactivating an empty post-deleteAll instance), check Directory
+    // before running any cold-load seed: if our id is recorded as a
+    // former_host in inherited_tombstone, refuse and write nothing.
+    if (!stored) {
+      await this.guardColdLoadAgainstInheritedTombstone(hostKey);
+    }
     let scoped = stored ? nonEmptyHostScopedWorld(stored, hostKey) : null;
     if (stored && !scoped) {
       console.warn("woo.cluster_seed_fallback", {

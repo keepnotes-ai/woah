@@ -261,6 +261,96 @@ describe("host teardown sequence", () => {
     hostState.close();
   });
 
+  it("cold-load guard refuses bootstrap when our id is in inherited_tombstone", async () => {
+    const directoryState = new FakeDurableObjectState("directory");
+    const directory = new DirectoryDO(directoryState as unknown as DurableObjectState, authEnv());
+
+    const hostKey = "torn_down_host";
+
+    // Pre-seed Directory: inherit a tombstone for hostKey, simulating a
+    // prior teardown.
+    async function registerRoute(id: string): Promise<void> {
+      const req = await signInternalRequest(authEnv(), new Request("https://woo.test/register-objects", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-woo-host-key": hostKey },
+        body: JSON.stringify({ routes: [{ id, host: hostKey, anchor: null }] })
+      }));
+      const r = await directory.fetch(req);
+      expect(r.ok).toBe(true);
+    }
+    await registerRoute(hostKey);
+    const req = await signInternalRequest(authEnv(), new Request("https://woo.test/__internal/inherit-tombstones", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-woo-host-key": hostKey },
+      body: JSON.stringify({
+        host: hostKey,
+        batch_seq: 0,
+        final: true,
+        tombstones: [{ id: hostKey, recycled_at: 999, reason: "recycle" }]
+      })
+    }));
+    const inheritResp = await directory.fetch(req);
+    expect(inheritResp.ok).toBe(true);
+
+    // Now reactivate a fresh DO under the torn-down id. It has empty
+    // storage; the cold-load guard must consult Directory and refuse.
+    const hostState = new FakeDurableObjectState(hostKey);
+    const env = makeEnv(directory, (_n) => {
+      // Fake gateway: any host-seed RPC returns 503 to make sure the
+      // cold-load guard runs *before* any seed fetch.
+      return { fetch: async () => new Response(null, { status: 503 }) };
+    });
+    const hostDO = new PersistentObjectDO(hostState as unknown as DurableObjectState, env);
+
+    const resp = await hostDO.fetch(new Request("https://woo.test/healthz"));
+    expect(resp.status).toBe(410);
+    const body = await resp.json() as any;
+    expect(body.error.code).toBe("E_HOST_RECYCLED");
+    expect(hostState.deleteAll).not.toHaveBeenCalled();
+
+    directoryState.close();
+    hostState.close();
+  });
+
+  it("cold-load proceeds normally when Directory has no inherited tombstone for our id", async () => {
+    const directoryState = new FakeDurableObjectState("directory");
+    const directory = new DirectoryDO(directoryState as unknown as DurableObjectState, authEnv());
+
+    const hostKey = "fresh_host";
+
+    // Spy whether the cold-load guard's Directory RPC was issued.
+    const original = directory.fetch.bind(directory);
+    let guardChecked = false;
+    (directory as unknown as { fetch: (r: Request) => Promise<Response> }).fetch = async (req: Request) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/__internal/lookup-inherited-tombstone") {
+        const cloned = req.clone();
+        const body = JSON.parse(await cloned.text());
+        if (body.id === hostKey) guardChecked = true;
+      }
+      return await original(req);
+    };
+
+    // Fake gateway: respond to host-seed fetch with a 503; the cold-load
+    // path will fall through with an error from fetchHostSeed, but only
+    // after the guard has run successfully (no tombstone for this id).
+    const hostState = new FakeDurableObjectState(hostKey);
+    const env = makeEnv(directory, (_n) => {
+      return { fetch: async () => new Response(null, { status: 503 }) };
+    });
+    const hostDO = new PersistentObjectDO(hostState as unknown as DurableObjectState, env);
+
+    const resp = await hostDO.fetch(new Request("https://woo.test/healthz"));
+    // Either a 5xx from the host-seed failure (legitimate cold-load
+    // failure) or a 200 if the seed was synthesized. Crucially, NOT a
+    // 410 with E_HOST_RECYCLED — the guard didn't trip.
+    expect(resp.status).not.toBe(410);
+    expect(guardChecked).toBe(true);
+
+    directoryState.close();
+    hostState.close();
+  });
+
   it("sends a single empty batch with final=true when there are no tombstones", async () => {
     const directoryState = new FakeDurableObjectState("directory");
     const directory = new DirectoryDO(directoryState as unknown as DurableObjectState, authEnv());

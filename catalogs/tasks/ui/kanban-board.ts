@@ -40,6 +40,11 @@ export type KanbanData = {
 
 type ColumnId = "ready" | "waiting" | "in_flight" | "done" | "dropped";
 
+const DRAG_VERB_BY_TRANSITION: Partial<Record<`${ColumnId}->${ColumnId}`, string>> = {
+  "ready->in_flight": "claim",
+  "in_flight->ready": "release"
+};
+
 const COLUMN_LABELS: Record<ColumnId, string> = {
   ready: "Ready",
   waiting: "Waiting",
@@ -143,6 +148,7 @@ export class WooTasksKanbanElement extends HTMLElement {
     tasks: []
   };
   private boundClick = false;
+  private boundDrag = false;
   private pollHandle: ReturnType<typeof setInterval> | null = null;
 
   set data(value: KanbanData) {
@@ -156,6 +162,13 @@ export class WooTasksKanbanElement extends HTMLElement {
       this.addEventListener("click", this.handleClick);
       this.boundClick = true;
     }
+    if (!this.boundDrag) {
+      this.addEventListener("dragstart", this.handleDragStart);
+      this.addEventListener("dragover", this.handleDragOver);
+      this.addEventListener("drop", this.handleDrop);
+      this.addEventListener("dragend", this.handleDragEnd);
+      this.boundDrag = true;
+    }
     if (this.woo) void this.refresh();
     this.startPolling();
   }
@@ -164,6 +177,13 @@ export class WooTasksKanbanElement extends HTMLElement {
     if (this.boundClick) {
       this.removeEventListener("click", this.handleClick);
       this.boundClick = false;
+    }
+    if (this.boundDrag) {
+      this.removeEventListener("dragstart", this.handleDragStart);
+      this.removeEventListener("dragover", this.handleDragOver);
+      this.removeEventListener("drop", this.handleDrop);
+      this.removeEventListener("dragend", this.handleDragEnd);
+      this.boundDrag = false;
     }
     this.stopPolling();
   }
@@ -276,6 +296,61 @@ export class WooTasksKanbanElement extends HTMLElement {
     void this.invokeAction(taskId, action);
   };
 
+  private handleDragStart = (event: DragEvent): void => {
+    const target = event.target as HTMLElement | null;
+    const card = target?.closest<HTMLElement>("[data-tasks-card]");
+    if (!card || !event.dataTransfer) return;
+    const taskId = card.dataset.tasksCard ?? "";
+    const sourceCol = card.closest<HTMLElement>("[data-tasks-col]")?.dataset.tasksCol ?? "";
+    if (!taskId || !sourceCol) return;
+    event.dataTransfer.setData("application/x-woo-task", taskId);
+    event.dataTransfer.setData("application/x-woo-task-source-col", sourceCol);
+    event.dataTransfer.effectAllowed = "move";
+    card.dataset.tasksDragging = "true";
+  };
+
+  private handleDragEnd = (event: DragEvent): void => {
+    const card = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-tasks-card]");
+    if (card) delete card.dataset.tasksDragging;
+    for (const col of Array.from(this.querySelectorAll<HTMLElement>("[data-tasks-col]"))) {
+      delete col.dataset.tasksDropTarget;
+    }
+  };
+
+  private handleDragOver = (event: DragEvent): void => {
+    const col = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-tasks-col]");
+    if (!col || !event.dataTransfer) return;
+    const sourceCol = event.dataTransfer.getData("application/x-woo-task-source-col") as ColumnId | "";
+    const targetCol = (col.dataset.tasksCol ?? "") as ColumnId | "";
+    if (!sourceCol || !targetCol || sourceCol === targetCol) return;
+    if (!DRAG_VERB_BY_TRANSITION[`${sourceCol}->${targetCol}`]) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    col.dataset.tasksDropTarget = "true";
+  };
+
+  private handleDrop = (event: DragEvent): void => {
+    const col = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-tasks-col]");
+    if (!col || !event.dataTransfer) return;
+    const taskId = event.dataTransfer.getData("application/x-woo-task");
+    const sourceCol = event.dataTransfer.getData("application/x-woo-task-source-col") as ColumnId | "";
+    const targetCol = (col.dataset.tasksCol ?? "") as ColumnId | "";
+    if (!taskId || !sourceCol || !targetCol) return;
+    const verb = DRAG_VERB_BY_TRANSITION[`${sourceCol}->${targetCol}`];
+    if (!verb) return;
+    event.preventDefault();
+    delete col.dataset.tasksDropTarget;
+    const action = this.model.tasks
+      .find((task) => task.id === taskId)?.actions
+      .find((entry) => entry.verb === verb);
+    if (!action) return;
+    this.dispatchEvent(new CustomEvent("woo-tasks-action", {
+      bubbles: true,
+      detail: { taskId, verb: action.verb, label: action.label, args: action.args, source: "drag" }
+    }));
+    void this.invokeAction(taskId, action);
+  };
+
   private async invokeAction(taskId: string, action: KanbanAction): Promise<void> {
     const woo = this.woo;
     if (!woo) return;
@@ -353,8 +428,10 @@ export class WooTasksKanbanElement extends HTMLElement {
             <button type="button" data-tasks-action="${escapeHtml(action.verb)}" data-task-id="${escapeHtml(task.id)}">${escapeHtml(action.label)}</button>
           `).join("")
         }</div>`;
+    const dragVerbs = task.actions.map((action) => action.verb);
+    const draggable = dragVerbs.includes("claim") || dragVerbs.includes("release");
     return `
-      <article class="woo-tasks-card" data-tasks-card="${escapeHtml(task.id)}">
+      <article class="woo-tasks-card" data-tasks-card="${escapeHtml(task.id)}"${draggable ? ' draggable="true"' : ""}>
         <header class="woo-tasks-card-header">
           <h3 class="woo-tasks-card-name">${escapeHtml(task.name || task.id)}</h3>
         </header>

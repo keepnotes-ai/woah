@@ -813,6 +813,28 @@ export class WooWorld {
     return obj.verbs[writtenIndex];
   }
 
+  removeVerb(objRef: ObjRef, name: string): boolean {
+    const obj = this.object(objRef);
+    const before = obj.verbs.length;
+    obj.verbs = obj.verbs.filter((verb) => verb.name !== name);
+    if (obj.verbs.length === before) return false;
+    this.reindexVerbs(obj);
+    this.persistObject(objRef);
+    this.persist();
+    return true;
+  }
+
+  setObjectName(objRef: ObjRef, name: string): void {
+    // Keep both name surfaces in sync: WooObject.name (SerializedObject /
+    // ScopedObjectSummary) and the inherited "name" property (woocode
+    // `this.name`). Different consumers read different surfaces.
+    const obj = this.object(objRef);
+    obj.name = name;
+    obj.modified = Date.now();
+    this.persistObject(objRef);
+    this.setProp(objRef, "name", name);
+  }
+
   ownVerb(objRef: ObjRef, name: string): VerbDef | null {
     return this.ownVerbNamed(objRef, name);
   }
@@ -1607,6 +1629,23 @@ export class WooWorld {
     if (out.length === 0) {
       const loc = this.objects.get(actor)?.location ?? null;
       if (loc) out.push(loc);
+    }
+    return out;
+  }
+
+  // Strict counterpart of `allLocationsForActor`: only returns locations
+  // backed by a live session, with no `.location`-property fallback. Used
+  // by the subscriber scrubber so a guest whose session vanished without
+  // a clean reap (DO hibernation, MCP gateway in-memory loss) is correctly
+  // marked stale — the persistent `.location` lingers on the deck and
+  // would otherwise mask the dead session.
+  liveSessionLocationsForActor(actor: ObjRef): ObjRef[] {
+    const now = Date.now();
+    const out: ObjRef[] = [];
+    for (const session of this.sessions.values()) {
+      if (session.actor !== actor) continue;
+      if (this.sessionExpired(session, now)) continue;
+      if (!out.includes(session.currentLocation)) out.push(session.currentLocation);
     }
     return out;
   }
@@ -4541,7 +4580,19 @@ export class WooWorld {
   }
 
   async runDueTasks(now = Date.now()): Promise<ParkedTaskRun[]> {
+    // Pre-check before enqueueing so an idle dev poll (every 250ms) doesn't
+    // flood structured-log tails with no-op host_task_* metrics. A concurrent
+    // task insert between this check and the next tick is fine: the next
+    // poll re-checks.
+    if (!this.hasDueParkedTask(now)) return [];
     return await this.enqueueHostTask(() => this.runDueTasksNow(now), "runDueTasks");
+  }
+
+  private hasDueParkedTask(now: number): boolean {
+    for (const task of this.parkedTasks.values()) {
+      if (task.state === "suspended" && task.resume_at !== null && task.resume_at <= now) return true;
+    }
+    return false;
   }
 
   private async runDueTasksNow(now = Date.now()): Promise<ParkedTaskRun[]> {
@@ -5991,6 +6042,39 @@ export class WooWorld {
     return ctx?.session ?? this.primarySessionForActor(actor)?.id ?? `legacy:${actor}`;
   }
 
+  // Used by the actor-level subscriber scrub to evict an actor whose
+  // session-attribution may not be reachable from this DO any more (for
+  // example a session row pointing at an MCP gateway session lost to
+  // hibernation). Drops every row whose actor matches and rebuilds
+  // `subscribers` from the survivors so the two views stay coherent.
+  private dropAllSubscriberRowsForActor(space: ObjRef, actor: ObjRef): boolean {
+    if (!this.objects.has(space)) return false;
+    const rawSubscribers = this.getProp(space, "subscribers");
+    if (!Array.isArray(rawSubscribers)) throw wooError("E_TYPE", `${space}.subscribers must be a list`, rawSubscribers);
+    const subscribers = rawSubscribers.filter((item): item is ObjRef => typeof item === "string");
+    const rawSessionSubscribers = this.propOrNull(space, "session_subscribers");
+    const parsedRows = Array.isArray(rawSessionSubscribers)
+      ? rawSessionSubscribers
+        .filter((item): item is Record<string, WooValue> => !!item && typeof item === "object" && !Array.isArray(item))
+        .map((item) => ({ session: String(item.session ?? ""), actor: String(item.actor ?? "") as ObjRef }))
+        .filter((item) => item.session && item.actor)
+      : [];
+    // Legacy worlds with no session_subscribers still need cleanup; the
+    // existing `updateSpaceSubscriberLocal` path synthesizes `legacy:<actor>`
+    // rows and can drop the matching one by sessionId, so defer to it there.
+    if (parsedRows.length === 0) return this.updateSpaceSubscriberLocal(space, actor, false);
+    const survivingRows = parsedRows.filter((row) => row.actor !== actor);
+    const subscribersChanged = subscribers.includes(actor);
+    if (survivingRows.length === parsedRows.length && !subscribersChanged) return false;
+    const survivingActors = Array.from(new Set(survivingRows.map((row) => row.actor))).sort();
+    this.withPersistenceDeferred(() => {
+      this.setProp(space, "session_subscribers", survivingRows as unknown as WooValue);
+      this.setProp(space, "subscribers", survivingActors as unknown as WooValue);
+    });
+    if (subscribersChanged) this.recordMetric({ kind: "subscribers_write", space, size: survivingActors.length, delta: -1 });
+    return true;
+  }
+
   private async runParkedTask(task: ParkedTaskRecord, input?: WooValue): Promise<ParkedTaskRun> {
     try {
       const serialized = assertMap(task.serialized);
@@ -6761,7 +6845,11 @@ export class WooWorld {
         // under the same error class. Without this guard a transient remote
         // blip would mark the actor stale and persist a subscriber-row drop.
         if (remoteActorsSet.has(actor) && !remoteLocationsByActor.has(actor)) continue;
-        const localLocations = this.allLocationsForActor(actor);
+        // `liveSessionLocationsForActor`, not `allLocationsForActor`: the
+        // latter falls back to the actor's persistent `.location` when no
+        // session is live, which would mask sessions lost to hibernation /
+        // gateway reset and keep the dead guest pinned to this space forever.
+        const localLocations = this.liveSessionLocationsForActor(actor);
         const remoteLocations = remoteLocationsByActor.get(actor) ?? [];
         const locations = remoteActorsSet.has(actor)
           ? Array.from(new Set([...localLocations, ...remoteLocations]))
@@ -6769,7 +6857,13 @@ export class WooWorld {
         if (locations.includes(space)) kept.push(actor);
         else stale.push(actor);
       }
-      for (const actor of stale) this.updateSpaceSubscriberLocal(space, actor, false);
+      // Drop *all* session_subscribers rows for each stale actor, not just
+      // the one matching the actor's current `presenceSessionId`. The orphan
+      // case we want to clean up is precisely a row pointing at a session
+      // that's gone from this DO's table — `presenceSessionId` then resolves
+      // to `legacy:<actor>` and never matches the orphan row, leaving it
+      // pinned. Iterate the actor's rows directly so every orphan goes.
+      for (const actor of stale) this.dropAllSubscriberRowsForActor(space, actor);
       const keptSet = new Set(kept);
       survivingActors = subscribers.filter((actor) => keptSet.has(actor));
     }

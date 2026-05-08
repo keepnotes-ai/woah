@@ -891,6 +891,19 @@ export function registerCoreObservationHandlers(registry: ObservationRegistry) {
     }
   });
   registry.observation({
+    types: ["note_writers_changed"],
+    route: "sequenced",
+    reduce: (draft, envelope) => {
+      const obs = envelope.observation;
+      const note = String(obs.note ?? obs.pin ?? obs.id ?? "");
+      if (!note) return;
+      const writers = Array.isArray(obs.writers) ? obs.writers.filter((item) => typeof item === "string") : [];
+      draft.patchCatalogState(note, "pinboard_note", { writers });
+      draft.patchCatalogState(note, "taskspace_task", { writers });
+      draft.patchObjectProps(note, { writers });
+    }
+  });
+  registry.observation({
     types: ["note_added"],
     route: "sequenced",
     reduce: (draft, envelope) => {

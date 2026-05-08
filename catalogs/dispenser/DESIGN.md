@@ -18,7 +18,7 @@ A `$dispenser_block` decouples the request from the work:
    `"Horoscope: Capricorn"`) and the `text` (markdown content). The
    verb removes the entry, creates a `$dispensed_note` owned by the
    block with that name, calls `:set_text(text)` to write the markdown
-   payload (subject to the 65536-char cap on `$note.text`), and moves the
+   payload (subject to the 262144-char cap on `$note.text`), and moves the
    note to the requester's inventory.
 4. The requester sees the note arrive — that's the visible delivery.
    The requester also receives a direct text observation; the room sees a

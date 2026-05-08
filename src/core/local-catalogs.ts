@@ -1,5 +1,4 @@
 import { BUNDLED_CATALOGS } from "../generated/bundled-catalogs";
-import { propagateVerbPurity } from "./authoring";
 import {
   applyCatalogSchemaPlan,
   catalogManifestStatus,
@@ -65,7 +64,10 @@ const LOCAL_CATALOG_CHAT_TRANSPARENT_FEATURE_MIGRATION = "2026-05-04-chat-transp
 const LOCAL_CATALOG_DROP_PRESENCE_IN_PROPERTY_MIGRATION = "2026-05-04-drop-presence-in-property";
 const LOCAL_CATALOG_CHAT_ROOM_EXITS_RESTORE_MIGRATION = "2026-05-04-chat-room-exits-restore";
 const LOCAL_CATALOG_CHAT_ROOM_LEAVE_FILTER_MIGRATION = "2026-05-04-chat-room-leave-filter";
-const LOCAL_CATALOG_NOTE_TEXT_LIST_TO_STR_MIGRATION = "2026-05-07-note-text-list-to-str";
+const LOCAL_CATALOG_NOTE_TEXT_STRING_SHAPE_MIGRATION = "2026-05-06-note-text-string-shape";
+const LOCAL_CATALOG_NOTE_STALE_CLASS_VERBS_MIGRATION = "2026-05-06-note-stale-class-verbs";
+const LOCAL_CATALOG_PINBOARD_STALE_CLASS_VERBS_MIGRATION = "2026-05-06-pinboard-stale-class-verbs";
+const LOCAL_CATALOG_DISPENSER_STALE_CLASS_VERBS_MIGRATION = "2026-05-06-dispenser-stale-class-verbs";
 const CATALOG_MIGRATION_RECORD_LIMIT = 200;
 
 export const DEFAULT_LOCAL_CATALOGS = bundledCatalogAliases();
@@ -143,11 +145,6 @@ export function installLocalCatalogs(world: WooWorld, names: readonly string[] =
   installMissingLocalCatalogDependencies(world, repairNames);
   const covered = runLocalCatalogMigrations(world, repairNames, cleanInstalled);
   runAutoDetectedLocalCatalogSchemaSync(world, repairNames, covered);
-  // Final pass: any prior step that touched verbs (fresh install, migration,
-  // schema sync, ad-hoc repair) may have left transitively-pure verbs without
-  // the propagated flag. Idempotent — only reaches a fixed point that the
-  // call graph already implies.
-  propagateVerbPurity(world);
 }
 
 export function installLocalCatalog(world: WooWorld, name: string, options: { adoptExisting?: boolean } = {}): boolean {
@@ -338,7 +335,10 @@ function runLocalCatalogMigrations(world: WooWorld, names: readonly string[], cl
   runDropPresenceInPropertyMigration(world);
   runChatRoomExitsRestoreMigration(world);
   runChatRoomLeaveFilterMigration(world, names);
-  runNoteTextListToStrMigration(world, names);
+  runNoteTextStringShapeMigration(world, names);
+  run(LOCAL_CATALOG_NOTE_STALE_CLASS_VERBS_MIGRATION, { allowImplementationHints: true, reconcileClassVerbs: true, only: "note" });
+  run(LOCAL_CATALOG_PINBOARD_STALE_CLASS_VERBS_MIGRATION, { allowImplementationHints: true, reconcileClassVerbs: true, only: "pinboard" });
+  run(LOCAL_CATALOG_DISPENSER_STALE_CLASS_VERBS_MIGRATION, { allowImplementationHints: true, reconcileClassVerbs: true, only: "dispenser" });
   return covered;
 }
 
@@ -597,92 +597,6 @@ function runChatRoomLeaveFilterMigration(world: WooWorld, names: readonly string
   markMigrationApplied(world, LOCAL_CATALOG_CHAT_ROOM_LEAVE_FILTER_MIGRATION);
 }
 
-function runNoteTextListToStrMigration(world: WooWorld, _names: readonly string[], scope: CatalogSchemaPlanScope = "gateway", host = "world"): void {
-  if (!world.objects.has("$note")) return;
-  // The note v0→v1 catalog migration retypes $note.text from list<str> to str
-  // (see catalogs/note/migration-v0-to-v1.json). The bundled-catalog schema
-  // sync only reconciles class shape, so worlds whose live $note descendants
-  // hold legacy list values need this transform applied at boot — both on the
-  // gateway and on every host that owns $note descendants.
-  //
-  // The gate uses (plan_id, scope, host) records from $system.catalog_migration_records,
-  // not the $system.applied_migrations ledger. applied_migrations is preserved on
-  // hosts during seed merge (see DYNAMIC_HOST_SEED_PROPERTIES in bootstrap.ts), so
-  // a gateway-marked id can ride into a host slice and falsely short-circuit a
-  // host that still owns legacy list values. The per-(scope, host) record keys
-  // each scope independently, and we still verify zero remaining legacy values
-  // before treating a previously-recorded run as conclusive.
-  const planId = `local-catalog-data:note:${LOCAL_CATALOG_NOTE_TEXT_LIST_TO_STR_MIGRATION}`;
-  const manifestHash = localCatalogManifestHashForRecord(world, "note", scope, host);
-  const preLegacy = countLegacyNoteTextValues(world);
-  if (catalogMigrationRecordCompleted(world, planId, scope, host) && preLegacy === 0) return;
-  const startedAt = Date.now();
-  let migrated = 0;
-  try {
-    world.withMutationSavepoint(() => {
-      for (const id of Array.from(world.objects.keys())) {
-        if (id.startsWith("$")) continue;
-        if (!world.isDescendantOf(id, "$note")) continue;
-        const obj = world.object(id);
-        if (!obj.properties.has("text")) continue;
-        const value = obj.properties.get("text") as WooValue;
-        if (typeof value === "string") continue;
-        if (!Array.isArray(value)) continue;
-        const lines = value.filter((item): item is string => typeof item === "string");
-        world.setProp(id, "text", lines.join("\n"));
-        migrated += 1;
-      }
-    });
-  } catch (err) {
-    recordCatalogDataMigrationResult(world, {
-      plan_id: planId,
-      catalog: "note",
-      version: String(LOCAL_CATALOGS.get("note")?.version ?? ""),
-      manifest_hash: manifestHash,
-      scope,
-      host,
-      status: "failed",
-      started_at: startedAt,
-      completed_at: Date.now(),
-      pre_legacy_records: preLegacy,
-      post_legacy_records: countLegacyNoteTextValues(world),
-      steps: [{ id: "1:transform_note_text_list_to_str", kind: "data_migration", target: "$note.text", status: "failed", error: repairErrorSummary(err) }],
-      error: repairErrorSummary(err)
-    });
-    return;
-  }
-  const postLegacy = countLegacyNoteTextValues(world);
-  recordCatalogDataMigrationResult(world, {
-    plan_id: planId,
-    catalog: "note",
-    version: String(LOCAL_CATALOGS.get("note")?.version ?? ""),
-    manifest_hash: manifestHash,
-    scope,
-    host,
-    status: postLegacy === 0 ? "completed" : "failed",
-    started_at: startedAt,
-    completed_at: Date.now(),
-    pre_legacy_records: preLegacy,
-    post_legacy_records: postLegacy,
-    migrated,
-    steps: [{ id: "1:transform_note_text_list_to_str", kind: "data_migration", target: "$note.text", status: postLegacy === 0 ? "applied" : "failed" }]
-  });
-}
-
-function countLegacyNoteTextValues(world: WooWorld): number {
-  if (!world.objects.has("$note")) return 0;
-  let count = 0;
-  for (const id of world.objects.keys()) {
-    if (id.startsWith("$")) continue;
-    if (!world.isDescendantOf(id, "$note")) continue;
-    const obj = world.object(id);
-    if (!obj.properties.has("text")) continue;
-    const value = obj.properties.get("text");
-    if (Array.isArray(value)) count += 1;
-  }
-  return count;
-}
-
 function runChatTransparentFeatureMigration(world: WooWorld, names: readonly string[]): void {
   if (migrationApplied(world, LOCAL_CATALOG_CHAT_TRANSPARENT_FEATURE_MIGRATION)) return;
   const transparentConsumers = transparentFeatureConsumers();
@@ -775,6 +689,45 @@ function runChatLookSkipPresenceMigration(world: WooWorld, names: readonly strin
   }
   markMigrationApplied(world, LOCAL_CATALOG_CHAT_LOOK_SKIP_PRESENCE_MIGRATION);
 }
+
+// v0.1 of $note declared `text: list<str>`. v0.2 retypes the same property
+// to `text: str` (markdown). Walk every $note descendant on whichever host
+// holds it and join any list value with \n. Idempotent: skip when the value
+// is already a string. Safe to call from both gateway and host slices —
+// each only sees the objects it owns.
+function migrateNoteTextStringShapeData(world: WooWorld): void {
+  if (!world.objects.has("$note")) return;
+  for (const id of world.objects.keys()) {
+    if (!world.isDescendantOf(id, "$note")) continue;
+    const own = world.object(id).properties;
+    if (!own.has("text")) continue;
+    const value = own.get("text");
+    if (typeof value === "string") continue;
+    if (Array.isArray(value)) {
+      const joined = value
+        .map((line) => (typeof line === "string" ? line : String(line ?? "")))
+        .join("\n");
+      world.setProp(id, "text", joined);
+      continue;
+    }
+    if (value === null || value === undefined) {
+      world.setProp(id, "text", "");
+    }
+  }
+}
+
+function runNoteTextStringShapeMigration(world: WooWorld, names: readonly string[]): void {
+  // Gateway path. Runs the data walk so any $note descendants the gateway
+  // owns get converted, then marks the gateway-scope ledger entry. Host
+  // slices run their own walk via runHostScopedDataMigrations.
+  if (!names.includes("note")) return;
+  if (!localCatalogInstalled(world, "note")) return;
+  if (migrationApplied(world, LOCAL_CATALOG_NOTE_TEXT_STRING_SHAPE_MIGRATION)) return;
+  if (!world.objects.has("$note")) return;
+  migrateNoteTextStringShapeData(world);
+  markMigrationApplied(world, LOCAL_CATALOG_NOTE_TEXT_STRING_SHAPE_MIGRATION);
+}
+
 
 function runAutoDetectedLocalCatalogSchemaSync(world: WooWorld, names: readonly string[], covered: ReadonlySet<string>): void {
   for (const name of names) {
@@ -1103,9 +1056,12 @@ export function runHostScopedDataMigrations(world: WooWorld, host = "host"): voi
   if (world.objects.has("$pin") && world.objects.has("$pinboard")) {
     runPinboardNotesToPinsDataPlan(world, LOCAL_CATALOG_PINBOARD_NOTES_TO_PINS_MIGRATION, "host", host);
   }
-  if (world.objects.has("$note")) {
-    runNoteTextListToStrMigration(world, ["note"], "host", host);
-  }
+  // $note descendants (dispensed notes, pins, tasks) often live on
+  // self-hosted slices. Walk text: list<str> → str here so the host's
+  // own copies get converted; gateway runs the same walk for objects it
+  // owns. Both paths gate on value shape and skip when there's nothing
+  // to do.
+  migrateNoteTextStringShapeData(world);
 }
 
 function runPinboardNotesToPinsMigration(world: WooWorld, names: readonly string[], id: string): void {
@@ -1180,7 +1136,8 @@ function migratePinboardNoteRecords(world: WooWorld): void {
       const record = raw as Record<string, WooValue>;
       if (hasEquivalentMigratedPin(world, board, record)) continue;
       const owner = pinOwner(world, board, record.author);
-      const text = noteTextString(record.text);
+      const lines = noteTextLines(record.text);
+      const text = lines.length > 0 ? lines.join("\n") : "";
       const pin = world.createRuntimeObject("$pin", owner, board, {
         progr: "$wiz",
         location: board,
@@ -1225,7 +1182,8 @@ function countPinboardLegacyNoteRecords(world: WooWorld): number {
 
 function hasEquivalentMigratedPin(world: WooWorld, board: ObjRef, record: Record<string, WooValue>): boolean {
   const layout = mapValue(world.propOrNull(board, "layout"));
-  const expectedText = noteTextString(record.text);
+  const expectedLines = noteTextLines(record.text);
+  const expectedText = expectedLines.length > 0 ? expectedLines.join("\n") : "";
   const expectedColor = typeof record.color === "string" ? record.color : null;
   for (const id of world.object(board).contents) {
     if (!world.objects.has(id) || !world.isDescendantOf(id, "$pin")) continue;
@@ -1262,10 +1220,10 @@ function pinOwner(world: WooWorld, board: ObjRef, value: WooValue | undefined): 
   return world.objects.has(owner) ? owner : "$wiz";
 }
 
-function noteTextString(value: WooValue | undefined): string {
-  if (typeof value === "string") return value;
-  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string").join("\n");
-  return "";
+function noteTextLines(value: WooValue | undefined): string[] {
+  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string");
+  if (typeof value === "string") return value.split(/\r?\n/);
+  return [];
 }
 
 function mapValue(value: WooValue): Record<string, WooValue> {

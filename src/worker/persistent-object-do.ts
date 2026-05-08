@@ -62,6 +62,7 @@ export interface Env {
   WOO_INTERNAL_SECRET?: string;
   WOO_AUTO_INSTALL_CATALOGS?: string;
   WOO_HOST_READ_TIMEOUT_MS?: string;
+  WOO_HOST_OUT_FETCH_CONCURRENCY?: string;
 }
 
 const WORLD_HOST = "world";
@@ -73,6 +74,52 @@ const METRIC_SAMPLE_WINDOW_MS = 1000;
 const HOST_STATE_CACHE_LIMIT = 32;
 const HOST_STATE_FETCH_TIMEOUT_MS = 2500;
 const HOST_READ_RPC_TIMEOUT_MS = 2500;
+// Cap on concurrent DO->DO fetch() subrequests issued by this isolate. The
+// Workers runtime enforces its own ~6-slot limit; we self-limit slightly under
+// that and queue the overflow so cold-start fan-outs (compose_look hitting 4
+// remote hosts × N concurrent looks) don't all pile against the runtime queue
+// at once. Saturation is visible in the cross_host_rpc metric's queue_ms field.
+const HOST_OUT_FETCH_CONCURRENCY = 5;
+// Race a Promise against an AbortSignal. If the signal aborts first, reject
+// with the signal's reason; the underlying Promise is orphaned (real fetch
+// implementations cancel via the Request signal as well, so this is just a
+// belt-and-suspenders early-out for environments — like test fakes — that
+// don't honor the signal on the Request).
+function raceAgainstAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason ?? wooError("E_ABORTED", "aborted"));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      reject(signal.reason ?? wooError("E_ABORTED", "aborted"));
+    };
+    signal.addEventListener("abort", onAbort);
+    promise.then(
+      (value) => { signal.removeEventListener("abort", onAbort); resolve(value); },
+      (err) => { signal.removeEventListener("abort", onAbort); reject(err); }
+    );
+  });
+}
+
+// Internal RPC routes that are pure reads of world state and therefore safe
+// to coalesce: while one fetch is in flight, identical concurrent requests
+// (same host + path + body) attach to the same Promise rather than each
+// firing a fresh subrequest. Single-flight only — once the Promise settles,
+// the next call computes anew, so freshness is automatic without a TTL.
+// Mutating routes (remote-dispatch, ws-call, ws-direct, mirror-contents,
+// space-subscriber, register-objects, register-session, host-seed, etc.)
+// MUST NOT be added: coalescing them would deduplicate intentional repeated
+// writes.
+const COALESCEABLE_INTERNAL_PATHS: ReadonlySet<string> = new Set([
+  "/__internal/object-summaries",
+  "/__internal/object-summary",
+  "/__internal/remote-describe-many",
+  "/__internal/remote-get-prop",
+  "/__internal/replay",
+  "/__internal/state",
+  "/__internal/actor-session-locations-batch",
+  "/__internal/space-audience-sessions",
+  "/__internal/room-snapshot",
+]);
 
 export class PersistentObjectDO {
   private state: DurableObjectState;
@@ -103,6 +150,16 @@ export class PersistentObjectDO {
   // on rehydrate and maintained on attach/detach.
   private socketsByActor = new Map<ObjRef, Set<WebSocket>>();
   private socketsBySession = new Map<string, Set<WebSocket>>();
+  // FIFO semaphore for outbound DO->DO fetch() concurrency. See
+  // HOST_OUT_FETCH_CONCURRENCY. The releaser hands the slot directly to the
+  // next waiter (no decrement-then-increment) to avoid an over-cap race when a
+  // releaser and a fresh acquire run concurrently.
+  private outFetchInFlight = 0;
+  private outFetchQueue: Array<() => void> = [];
+  // Single-flight coalesce table for COALESCEABLE_INTERNAL_PATHS. Key is
+  // `${host}\n${path}\n${bodyStr}`; value is the in-flight Promise. Cleared on
+  // settle (resolve or reject) so the next call recomputes against fresh state.
+  private outFetchInflight = new Map<string, Promise<unknown>>();
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -410,7 +467,7 @@ export class PersistentObjectDO {
         },
         body: JSON.stringify({ host: hostKey })
       }));
-      const response = await this.env.WOO.get(id).fetch(request);
+      const { response } = await this.outboundFetch(id, request);
       const body = await response.json();
       if (!response.ok) {
         throw wooError("E_STORAGE", `failed to load host seed for ${hostKey}`, body as WooValue);
@@ -1198,56 +1255,51 @@ export class PersistentObjectDO {
   }
 
   private async fetchHostState(world: WooWorld, host: string, actor: ObjRef): Promise<Record<string, unknown> | null> {
-    let timeout: ReturnType<typeof setTimeout> | undefined;
     let settled = false;
     const startedAt = Date.now();
+    // The deadline now drives an AbortController, so on timeout the inner
+    // fetch — and the queue waiter behind it — both wind down rather than
+    // running on in the background after the outer race rejects.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        world.recordMetric({ kind: "cross_host_rpc", route: "/__internal/state", host, ms: Date.now() - startedAt, status: "timeout" });
+      }
+      controller.abort(wooError("E_TIMEOUT", `host state fetch timed out: ${host}`, { host, timeout_ms: HOST_STATE_FETCH_TIMEOUT_MS }));
+    }, HOST_STATE_FETCH_TIMEOUT_MS);
     try {
-      const fetchState = this.fetchHostStateInner(host, actor)
-        .then((remote) => {
-          if (!settled) {
-            settled = true;
-            world.recordMetric({
-              kind: "cross_host_rpc",
-              route: "/__internal/state",
-              host,
-              ms: Date.now() - startedAt,
-              status: remote ? "ok" : "error",
-              ...(remote ? {} : { error: "E_BAD_RESPONSE" })
-            });
-          }
-          return remote;
-        })
-        .catch((err) => {
-          if (!settled) {
-            settled = true;
-            const error = normalizeError(err);
-            world.recordMetric({ kind: "cross_host_rpc", route: "/__internal/state", host, ms: Date.now() - startedAt, status: "error", error: error.code });
-          }
-          return null;
+      const remote = await this.fetchHostStateInner(host, actor, controller.signal);
+      if (!settled) {
+        settled = true;
+        world.recordMetric({
+          kind: "cross_host_rpc",
+          route: "/__internal/state",
+          host,
+          ms: Date.now() - startedAt,
+          status: remote ? "ok" : "error",
+          ...(remote ? {} : { error: "E_BAD_RESPONSE" })
         });
-      const timedOut = new Promise<null>((resolve) => {
-        timeout = setTimeout(() => {
-          if (!settled) {
-            settled = true;
-            world.recordMetric({ kind: "cross_host_rpc", route: "/__internal/state", host, ms: Date.now() - startedAt, status: "timeout" });
-          }
-          resolve(null);
-        }, HOST_STATE_FETCH_TIMEOUT_MS);
-      });
-      return await Promise.race([fetchState, timedOut]);
-    } catch {
+      }
+      return remote;
+    } catch (err) {
+      if (!settled) {
+        settled = true;
+        const error = normalizeError(err);
+        world.recordMetric({ kind: "cross_host_rpc", route: "/__internal/state", host, ms: Date.now() - startedAt, status: "error", error: error.code });
+      }
       return null;
     } finally {
-      if (timeout !== undefined) clearTimeout(timeout);
+      clearTimeout(timeout);
     }
   }
 
-  private async fetchHostStateInner(host: string, actor: ObjRef): Promise<Record<string, unknown> | null> {
+  private async fetchHostStateInner(host: string, actor: ObjRef, signal?: AbortSignal): Promise<Record<string, unknown> | null> {
     const id = this.env.WOO.idFromName(host);
     const request = await signInternalRequest(this.env, new Request(`${INTERNAL_ORIGIN}/__internal/state`, {
       headers: { "x-woo-host-key": host, "x-woo-internal-actor": actor }
     }));
-    const response = await this.env.WOO.get(id).fetch(request);
+    const { response } = await this.outboundFetch(id, request, signal);
     if (!response.ok) return null;
     const body = await response.json();
     return body && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : null;
@@ -1981,7 +2033,100 @@ export class PersistentObjectDO {
     return Number.isFinite(configured) && configured > 0 ? configured : HOST_READ_RPC_TIMEOUT_MS;
   }
 
+  private hostOutFetchConcurrency(): number {
+    const configured = Number(this.env.WOO_HOST_OUT_FETCH_CONCURRENCY);
+    if (!Number.isFinite(configured) || configured <= 0) return HOST_OUT_FETCH_CONCURRENCY;
+    return Math.max(1, Math.floor(configured));
+  }
+
+  // Acquire one outbound subrequest slot. If the cap is reached, the caller is
+  // queued FIFO and the slot is handed off directly by releaseOutFetchSlot
+  // (no decrement-then-increment, so concurrent acquire+release can't go
+  // over cap). If `signal` aborts before the slot is granted, the waiter is
+  // spliced from the queue and the acquire rejects — no fetch is performed,
+  // no slot is consumed.
+  private async acquireOutFetchSlot(signal?: AbortSignal): Promise<void> {
+    if (this.outFetchInFlight < this.hostOutFetchConcurrency()) {
+      this.outFetchInFlight += 1;
+      return;
+    }
+    if (signal?.aborted) throw signal.reason ?? wooError("E_ABORTED", "outbound fetch aborted before queue");
+    await new Promise<void>((resolve, reject) => {
+      let aborted = false;
+      // A handoff after we've already aborted: take the slot and immediately
+      // release it so the next non-aborted waiter (or a fresh acquire) can use
+      // it. Without this, releaseOutFetchSlot would have leaked a slot.
+      const waiter: () => void = () => {
+        if (signal) signal.removeEventListener("abort", onAbort);
+        if (aborted) { this.releaseOutFetchSlot(); return; }
+        resolve();
+      };
+      const onAbort = () => {
+        aborted = true;
+        const idx = this.outFetchQueue.indexOf(waiter);
+        if (idx >= 0) this.outFetchQueue.splice(idx, 1);
+        if (signal) signal.removeEventListener("abort", onAbort);
+        reject(signal!.reason ?? wooError("E_ABORTED", "outbound fetch aborted while queued"));
+      };
+      this.outFetchQueue.push(waiter);
+      signal?.addEventListener("abort", onAbort);
+    });
+  }
+
+  private releaseOutFetchSlot(): void {
+    const next = this.outFetchQueue.shift();
+    if (next) { next(); return; }
+    this.outFetchInFlight -= 1;
+  }
+
+  // Wraps the actual DO->DO fetch with the queue. `signal` is honored for
+  // (a) the queue wait — aborting before a slot is granted splices the waiter
+  // out of the queue without performing the fetch — and (b) the fetch itself,
+  // both via the Request's signal (so the production runtime cancels the
+  // subrequest) and via a manual race (so even if the underlying fetch ignores
+  // the signal — e.g. in tests — the caller's await still rejects promptly
+  // and our slot is released).
+  private async outboundFetch(id: DurableObjectId, request: Request, signal?: AbortSignal): Promise<{ response: Response; queueMs: number }> {
+    const queueStart = Date.now();
+    await this.acquireOutFetchSlot(signal);
+    const queueMs = Date.now() - queueStart;
+    try {
+      const signedRequest = signal ? new Request(request, { signal }) : request;
+      const fetchPromise = this.env.WOO.get(id).fetch(signedRequest);
+      if (!signal) {
+        const response = await fetchPromise;
+        return { response, queueMs };
+      }
+      const response = await raceAgainstAbort(fetchPromise, signal);
+      return { response, queueMs };
+    } finally {
+      this.releaseOutFetchSlot();
+    }
+  }
+
   private async forwardInternal<T>(host: string, path: string, body: Record<string, unknown>, options: { timeoutMs?: number } = {}): Promise<T> {
+    const bodyStr = JSON.stringify(body);
+    // Single-flight: only enabled for explicitly read-only paths. Joiners get
+    // the same Promise as the in-flight leader; they don't pay queue, fetch,
+    // or parse cost, and they share the leader's success/error outcome.
+    const coalesceKey = COALESCEABLE_INTERNAL_PATHS.has(path) ? `${host}\n${path}\n${bodyStr}` : null;
+    if (coalesceKey) {
+      const existing = this.outFetchInflight.get(coalesceKey) as Promise<T> | undefined;
+      if (existing) return existing;
+    }
+    const promise = this.forwardInternalRaw<T>(host, path, bodyStr, options);
+    if (coalesceKey) {
+      this.outFetchInflight.set(coalesceKey, promise as Promise<unknown>);
+      // Clear on settle (resolve or reject) so the next call recomputes.
+      promise.then(
+        () => { if (this.outFetchInflight.get(coalesceKey) === promise) this.outFetchInflight.delete(coalesceKey); },
+        () => { if (this.outFetchInflight.get(coalesceKey) === promise) this.outFetchInflight.delete(coalesceKey); }
+      );
+    }
+    return promise;
+  }
+
+  private async forwardInternalRaw<T>(host: string, path: string, bodyStr: string, options: { timeoutMs?: number }): Promise<T> {
     const id = this.env.WOO.idFromName(host);
     const request = await signInternalRequest(this.env, new Request(`${INTERNAL_ORIGIN}${path}`, {
       method: "POST",
@@ -1989,44 +2134,42 @@ export class PersistentObjectDO {
         "content-type": "application/json; charset=utf-8",
         "x-woo-host-key": host
       },
-      body: JSON.stringify(body)
+      body: bodyStr
     }));
     const startedAt = Date.now();
-    let settled = false;
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    const fetchResult = (async () => {
-      const response = await this.env.WOO.get(id).fetch(request);
-      return await response.json() as T;
-    })();
     const timeoutMs = options.timeoutMs;
+    // For paths with an explicit deadline, the AbortController cancels both
+    // the queue wait and the underlying fetch on timeout; without this, a
+    // timed-out caller would still leave a Promise + a slot parked behind a
+    // wedged downstream. Mutating callers do NOT pass timeoutMs and so do
+    // not get cancellation — abort-mid-write would leave ambiguous remote
+    // state, and we have no idempotency layer to fix that yet.
+    const useTimeout = !!(timeoutMs && timeoutMs > 0);
+    const controller = useTimeout ? new AbortController() : undefined;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    if (controller && timeoutMs) {
+      timeout = setTimeout(() => controller.abort(wooError("E_TIMEOUT", `cross-host RPC timed out: ${host}${path}`, { host, path, timeout_ms: timeoutMs })), timeoutMs);
+    }
+    let observedQueueMs = 0;
     try {
-      if (!timeoutMs || timeoutMs <= 0) {
-        const parsed = await fetchResult;
-        this.world?.recordMetric({ kind: "cross_host_rpc", route: path, host, ms: Date.now() - startedAt, status: "ok" });
-        return parsed;
+      const { response, queueMs } = await this.outboundFetch(id, request, controller?.signal);
+      observedQueueMs = queueMs;
+      const parsed = await response.json() as T;
+      const queueField = observedQueueMs > 0 ? { queue_ms: observedQueueMs } : {};
+      this.world?.recordMetric({ kind: "cross_host_rpc", route: path, host, ms: Date.now() - startedAt, status: "ok", ...queueField });
+      return parsed;
+    } catch (err) {
+      const queueField = observedQueueMs > 0 ? { queue_ms: observedQueueMs } : {};
+      // E_TIMEOUT lifted out of the abort reason so callers see the same shape
+      // as before this refactor.
+      const isAbortTimeout = controller?.signal.aborted && (controller.signal.reason as { code?: string } | undefined)?.code === "E_TIMEOUT";
+      if (isAbortTimeout) {
+        this.world?.recordMetric({ kind: "cross_host_rpc", route: path, host, ms: Date.now() - startedAt, status: "timeout", ...queueField });
+        throw controller!.signal.reason;
       }
-      return await new Promise<T>((resolve, reject) => {
-        timeout = setTimeout(() => {
-          if (settled) return;
-          settled = true;
-          this.world?.recordMetric({ kind: "cross_host_rpc", route: path, host, ms: Date.now() - startedAt, status: "timeout" });
-          reject(wooError("E_TIMEOUT", `cross-host RPC timed out: ${host}${path}`, { host, path, timeout_ms: timeoutMs }));
-        }, timeoutMs);
-        fetchResult.then((parsed) => {
-          if (settled) return;
-          settled = true;
-          if (timeout !== undefined) clearTimeout(timeout);
-          this.world?.recordMetric({ kind: "cross_host_rpc", route: path, host, ms: Date.now() - startedAt, status: "ok" });
-          resolve(parsed);
-        }, (err) => {
-          if (settled) return;
-          settled = true;
-          if (timeout !== undefined) clearTimeout(timeout);
-          const error = normalizeError(err);
-          this.world?.recordMetric({ kind: "cross_host_rpc", route: path, host, ms: Date.now() - startedAt, status: "error", error: error.code });
-          reject(err);
-        });
-      });
+      const error = normalizeError(err);
+      this.world?.recordMetric({ kind: "cross_host_rpc", route: path, host, ms: Date.now() - startedAt, status: "error", error: error.code, ...queueField });
+      throw err;
     } finally {
       if (timeout !== undefined) clearTimeout(timeout);
     }

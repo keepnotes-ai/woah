@@ -30,6 +30,44 @@ export type KanbanTask = {
   actions: KanbanAction[];
 };
 
+export type TaskDetailObligation = {
+  key: string;
+  met: boolean;
+  role: string | null;
+  criterion: string | null;
+  evidence?: unknown;
+};
+
+export type TaskDetailLogEntry = {
+  ts: number | null;
+  actor: string | null;
+  outcome: string;
+  obligationKey?: string | null;
+  evidence?: unknown;
+  why?: string | null;
+};
+
+export type TaskDetailLink = {
+  to: string | null;
+  role: string | null;
+};
+
+export type TaskDetail = {
+  id: string;
+  name: string;
+  text: string;
+  kind: string;
+  labels: string[];
+  obligations: TaskDetailObligation[];
+  log: TaskDetailLogEntry[];
+  waitFor: Array<Record<string, unknown>>;
+  links: TaskDetailLink[];
+  terminal: boolean;
+  complete: boolean;
+  cursorKey: string | null;
+  location: string | null;
+};
+
 export type KanbanData = {
   registryId: string;
   registryName: string;
@@ -147,6 +185,74 @@ function readListingRow(row: unknown): KanbanTask | null {
   };
 }
 
+function readDetail(row: unknown): TaskDetail | null {
+  if (!row || typeof row !== "object") return null;
+  const r = row as Record<string, unknown>;
+  const id = typeof r.id === "string" ? r.id : "";
+  if (!id) return null;
+  const obs = Array.isArray(r.obligations)
+    ? r.obligations.flatMap((entry): TaskDetailObligation[] => {
+        if (!entry || typeof entry !== "object") return [];
+        const e = entry as Record<string, unknown>;
+        const key = typeof e.key === "string" ? e.key : "";
+        if (!key) return [];
+        return [{
+          key,
+          met: e.met === true,
+          role: typeof e.role === "string" ? e.role : null,
+          criterion: typeof e.criterion === "string" ? e.criterion : null,
+          evidence: "evidence" in e ? e.evidence : undefined
+        }];
+      })
+    : [];
+  const log = Array.isArray(r.log)
+    ? r.log.flatMap((entry): TaskDetailLogEntry[] => {
+        if (!entry || typeof entry !== "object") return [];
+        const e = entry as Record<string, unknown>;
+        const outcome = typeof e.outcome === "string" ? e.outcome : "";
+        if (!outcome) return [];
+        return [{
+          ts: typeof e.ts === "number" ? e.ts : null,
+          actor: typeof e.actor === "string" ? e.actor : null,
+          outcome,
+          obligationKey: typeof e.obligation_key === "string" ? e.obligation_key : null,
+          evidence: "evidence" in e ? e.evidence : undefined,
+          why: typeof e.why === "string" ? e.why : null
+        }];
+      })
+    : [];
+  const waitFor = Array.isArray(r.wait_for)
+    ? r.wait_for.flatMap((entry) => entry && typeof entry === "object" && !Array.isArray(entry) ? [entry as Record<string, unknown>] : [])
+    : [];
+  const links = Array.isArray(r.links)
+    ? r.links.flatMap((entry): TaskDetailLink[] => {
+        if (!entry || typeof entry !== "object") return [];
+        const e = entry as Record<string, unknown>;
+        return [{
+          to: typeof e.to === "string" ? e.to : null,
+          role: typeof e.role === "string" ? e.role : null
+        }];
+      })
+    : [];
+  const cursor = r.cursor && typeof r.cursor === "object" ? r.cursor as Record<string, unknown> : null;
+  const cursorKey = cursor && typeof cursor.key === "string" ? cursor.key : null;
+  return {
+    id,
+    name: typeof r.name === "string" ? r.name : id,
+    text: typeof r.text === "string" ? r.text : "",
+    kind: typeof r.kind === "string" ? r.kind : "",
+    labels: Array.isArray(r.labels) ? r.labels.filter((l): l is string => typeof l === "string") : [],
+    obligations: obs,
+    log,
+    waitFor,
+    links,
+    terminal: r.terminal === true,
+    complete: r.complete === true,
+    cursorKey,
+    location: typeof r.location === "string" ? r.location : null
+  };
+}
+
 function readActionRow(row: unknown): KanbanAction | null {
   if (!row || typeof row !== "object") return null;
   const r = row as Record<string, unknown>;
@@ -192,8 +298,9 @@ export class WooTasksKanbanElement extends HTMLElement {
   private pollHandle: ReturnType<typeof setInterval> | null = null;
   private openPrompt: { taskId: string; verb: string } | null = null;
   private createOpen = false;
+  private openDetail: { taskId: string; detail: TaskDetail | null; loading: boolean; error?: string } | null = null;
 
-  set data(value: KanbanData) {
+  set data(value: Partial<KanbanData> & Pick<KanbanData, "registryId" | "registryName" | "actor" | "actorNames" | "tasks">) {
     this.model = {
       policies: [],
       isOwner: false,
@@ -363,6 +470,12 @@ export class WooTasksKanbanElement extends HTMLElement {
       void this.seedMinimalPolicy();
       return;
     }
+    if (target.closest<HTMLButtonElement>("[data-tasks-detail-close]")) {
+      event.preventDefault();
+      this.openDetail = null;
+      this.render();
+      return;
+    }
     const cancel = target.closest<HTMLButtonElement>("[data-tasks-prompt-cancel]");
     if (cancel) {
       event.preventDefault();
@@ -370,7 +483,18 @@ export class WooTasksKanbanElement extends HTMLElement {
       return;
     }
     const button = target.closest<HTMLButtonElement>("[data-tasks-action]");
-    if (!button) return;
+    if (!button) {
+      const card = target.closest<HTMLElement>("[data-tasks-card]");
+      if (card && !target.closest("[data-tasks-card-actions]") && !target.closest("[data-tasks-prompt]")) {
+        const taskId = card.dataset.tasksCard ?? "";
+        if (taskId) {
+          event.preventDefault();
+          void this.openTaskDetail(taskId);
+          return;
+        }
+      }
+      return;
+    }
     const taskId = button.dataset.taskId ?? "";
     const verb = button.dataset.tasksAction ?? "";
     if (!taskId || !verb) return;
@@ -446,6 +570,23 @@ export class WooTasksKanbanElement extends HTMLElement {
       // Non-owner / non-wizard will see E_PERM; surface lands in the next refresh.
     }
     await this.refresh();
+  }
+
+  private async openTaskDetail(taskId: string): Promise<void> {
+    const woo = this.woo;
+    if (!woo) return;
+    this.openDetail = { taskId, detail: null, loading: true };
+    this.render();
+    try {
+      const result = await woo.directCall(taskId, "detail", []);
+      const detail = readDetail(result);
+      this.openDetail = detail
+        ? { taskId, detail, loading: false }
+        : { taskId, detail: null, loading: false, error: "no detail returned" };
+    } catch (err) {
+      this.openDetail = { taskId, detail: null, loading: false, error: err instanceof Error ? err.message : String(err) };
+    }
+    this.render();
   }
 
   private openPromptFor(taskId: string, verb: string): void {
@@ -562,7 +703,112 @@ export class WooTasksKanbanElement extends HTMLElement {
       <section class="woo-tasks-kanban">
         ${this.renderHeader(registryName || "Tasks")}
         <div class="woo-tasks-kanban-columns">${columnsHtml}</div>
+        ${this.openDetail ? this.renderDetailPanel(actorNames) : ""}
       </section>
+    `;
+  }
+
+  private renderDetailPanel(actorNames: Record<string, string>): string {
+    const open = this.openDetail;
+    if (!open) return "";
+    if (open.loading) {
+      return `
+        <aside class="woo-tasks-detail" data-tasks-detail data-task-id="${escapeHtml(open.taskId)}">
+          <header class="woo-tasks-detail-header">
+            <h3>${escapeHtml(open.taskId)}</h3>
+            <button type="button" data-tasks-detail-close aria-label="Close">×</button>
+          </header>
+          <div class="woo-tasks-detail-body"><p>Loading…</p></div>
+        </aside>
+      `;
+    }
+    if (!open.detail) {
+      const message = open.error ? `Failed to load task: ${open.error}` : "No detail returned.";
+      return `
+        <aside class="woo-tasks-detail" data-tasks-detail data-task-id="${escapeHtml(open.taskId)}">
+          <header class="woo-tasks-detail-header">
+            <h3>${escapeHtml(open.taskId)}</h3>
+            <button type="button" data-tasks-detail-close aria-label="Close">×</button>
+          </header>
+          <div class="woo-tasks-detail-body"><p>${escapeHtml(message)}</p></div>
+        </aside>
+      `;
+    }
+    const detail = open.detail;
+    const labels = detail.labels.length === 0
+      ? ""
+      : `<div class="woo-tasks-detail-labels">${detail.labels.map((l) => `<span class="woo-tasks-card-label">${escapeHtml(l)}</span>`).join("")}</div>`;
+    const text = detail.text
+      ? `<pre class="woo-tasks-detail-text">${escapeHtml(detail.text)}</pre>`
+      : `<p class="woo-tasks-detail-empty">No body.</p>`;
+    const obligationsHtml = detail.obligations.length === 0
+      ? `<p class="woo-tasks-detail-empty">No obligations.</p>`
+      : `<ol class="woo-tasks-detail-obligations">${detail.obligations.map((o) => {
+          const here = o.key === detail.cursorKey;
+          const flag = o.met ? "✓" : here ? "▶" : " ";
+          const role = o.role ? `<span class="woo-tasks-detail-obligation-role">${escapeHtml(o.role)}</span>` : "";
+          const criterion = o.criterion ? `<span class="woo-tasks-detail-obligation-criterion">${escapeHtml(o.criterion)}</span>` : "";
+          return `<li class="woo-tasks-detail-obligation${o.met ? " met" : ""}${here ? " current" : ""}">
+            <span class="woo-tasks-detail-obligation-flag">${escapeHtml(flag)}</span>
+            <span class="woo-tasks-detail-obligation-key">${escapeHtml(o.key)}</span>
+            ${role}${criterion}
+          </li>`;
+        }).join("")}</ol>`;
+    const logHtml = detail.log.length === 0
+      ? `<p class="woo-tasks-detail-empty">No log entries.</p>`
+      : `<ul class="woo-tasks-detail-log">${[...detail.log].reverse().map((entry) => {
+          const ts = entry.ts ? new Date(entry.ts).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
+          const actorLabel = entry.actor ? actorDisplay(entry.actor, actorNames) : "—";
+          const detailParts = [
+            entry.obligationKey ? `<span class="woo-tasks-detail-log-key">${escapeHtml(entry.obligationKey)}</span>` : "",
+            entry.why ? `<span class="woo-tasks-detail-log-why">${escapeHtml(entry.why)}</span>` : ""
+          ].filter(Boolean).join(" ");
+          return `<li class="woo-tasks-detail-log-entry">
+            <span class="woo-tasks-detail-log-ts">${escapeHtml(ts)}</span>
+            <span class="woo-tasks-detail-log-actor">${escapeHtml(actorLabel)}</span>
+            <span class="woo-tasks-detail-log-outcome">${escapeHtml(entry.outcome)}</span>
+            ${detailParts}
+          </li>`;
+        }).join("")}</ul>`;
+    const waitHtml = detail.waitFor.length === 0
+      ? ""
+      : `<section class="woo-tasks-detail-waitfor">
+          <h4>Waiting on</h4>
+          <ul>${detail.waitFor.map((w) => `<li>${escapeHtml(JSON.stringify(w))}</li>`).join("")}</ul>
+        </section>`;
+    const linksHtml = detail.links.length === 0
+      ? ""
+      : `<section class="woo-tasks-detail-links">
+          <h4>Links</h4>
+          <ul>${detail.links.map((l) => `<li>${escapeHtml(l.role ?? "link")} → ${escapeHtml(l.to ?? "—")}</li>`).join("")}</ul>
+        </section>`;
+    const status = detail.complete ? "complete" : detail.terminal ? "dropped" : detail.location && detail.location !== this.model.registryId ? `held by ${actorDisplay(detail.location, actorNames)}` : "ready";
+    return `
+      <aside class="woo-tasks-detail" data-tasks-detail data-task-id="${escapeHtml(detail.id)}">
+        <header class="woo-tasks-detail-header">
+          <h3>${escapeHtml(detail.name || detail.id)}</h3>
+          <button type="button" data-tasks-detail-close aria-label="Close">×</button>
+        </header>
+        <div class="woo-tasks-detail-meta">
+          <span class="woo-tasks-detail-kind">${escapeHtml(detail.kind || "task")}</span>
+          <span class="woo-tasks-detail-status">${escapeHtml(status)}</span>
+        </div>
+        ${labels}
+        <section class="woo-tasks-detail-section">
+          <h4>Body</h4>
+          ${text}
+        </section>
+        <section class="woo-tasks-detail-section">
+          <h4>Obligations</h4>
+          ${obligationsHtml}
+        </section>
+        ${waitHtml}
+        ${linksHtml}
+        <section class="woo-tasks-detail-section">
+          <h4>Log</h4>
+          ${logHtml}
+        </section>
+      </aside>
     `;
   }
 

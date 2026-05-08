@@ -374,6 +374,16 @@
           "source": "verb :cursor() rxd { let reg_obs = this.registry.obligations; for o in this.obligations { if (o[\"met\"]) { continue; } let key = o[\"key\"]; if (!(key in reg_obs)) { continue; } let info = reg_obs[key]; return { \"key\": key, \"role\": info[\"role\"], \"criterion\": info[\"criterion\"] }; } return null; }"
         },
         {
+          "name": "detail",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "arg_spec": {
+            "args": []
+          },
+          "source": "verb :detail() rxd { let reg_obs = this.registry.obligations; let obs = []; for o in this.obligations { let key = o[\"key\"]; let role = null; let criterion = null; if (key in reg_obs) { let info = reg_obs[key]; role = info[\"role\"]; criterion = info[\"criterion\"]; } let entry = { \"key\": key, \"met\": o[\"met\"] == true, \"role\": role, \"criterion\": criterion }; if (\"evidence\" in o) { entry[\"evidence\"] = o[\"evidence\"]; } obs = obs + [entry]; } let complete = true; for o in this.obligations { if (!o[\"met\"]) { complete = false; } } return { \"id\": this, \"name\": this.name, \"text\": this.text, \"kind\": this.kind, \"labels\": this.labels, \"obligations\": obs, \"log\": this.log, \"wait_for\": this.wait_for, \"links\": this.links, \"terminal\": this.terminal, \"complete\": complete, \"cursor\": this:cursor(), \"location\": location(this), \"registry\": this.registry, \"created_at\": this.created_at, \"last_change\": this.last_change }; }"
+        },
+        {
           "name": "moveto",
           "perms": "rx",
           "direct_callable": false,

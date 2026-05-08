@@ -194,6 +194,94 @@ describe("bundled catalog UI components", () => {
     expect(element.querySelector("form[data-tasks-prompt]")).toBeNull();
   });
 
+  it("opens a detail panel on card click, fetching :detail and rendering obligations + log", async () => {
+    const { WooTasksKanbanElement } = await import("../catalogs/tasks/ui/kanban-board");
+    defineOnce("woo-tasks-kanban", WooTasksKanbanElement);
+    const calls: { target: string; verb: string; args: unknown[] }[] = [];
+    const detail = {
+      id: "obj_t_view",
+      name: "Refactor verb dispatch",
+      text: "details about it\nmulti-line",
+      kind: "task",
+      labels: ["frontend"],
+      obligations: [
+        { key: "design", met: true, role: "designer", criterion: "Sketch.", evidence: { commit: "abc" } },
+        { key: "do:it", met: false, role: "doer", criterion: "Done." }
+      ],
+      log: [
+        { ts: 1_700_000_000_000, actor: "guest_1", outcome: "created" },
+        { ts: 1_700_000_300_000, actor: "guest_1", outcome: "passed", obligation_key: "design", evidence: { commit: "abc" } }
+      ],
+      wait_for: [],
+      links: [{ to: "obj_t_other", role: "parent" }],
+      terminal: false,
+      complete: false,
+      cursor: { key: "do:it", role: "doer", criterion: "Done." },
+      location: "the_taskboard"
+    };
+    const woo: WooContext = {
+      actor: "guest_1",
+      frame: { id: "test", subject: "the_taskboard", get: () => undefined, set: () => true },
+      neighborhood: { subject: "the_taskboard", refs: [], related: {}, has: () => true },
+      observe: (ref) => ({ id: ref, name: ref === "the_taskboard" ? "Taskboard" : ref === "guest_1" ? "Guest 1" : ref, props: {}, catalogState: {} }),
+      directCall: async (target, verb, args = []) => {
+        calls.push({ target, verb, args });
+        if (verb === "listing") return [];
+        if (verb === "detail") return detail;
+        return undefined;
+      },
+      send: async () => undefined,
+      call: async () => undefined,
+      emit: () => true
+    };
+    const element = document.createElement("woo-tasks-kanban") as HTMLElement & { woo?: WooContext; subject?: string; data?: any };
+    element.woo = woo;
+    element.subject = "the_taskboard";
+    element.setAttribute("refresh-interval-ms", "0");
+    document.body.appendChild(element);
+    element.data = {
+      registryId: "the_taskboard",
+      registryName: "Taskboard",
+      actor: "guest_1",
+      actorNames: { guest_1: "Guest 1" },
+      tasks: [{
+        id: "obj_t_view",
+        name: "Refactor verb dispatch",
+        kind: "task",
+        labels: ["frontend"],
+        location: "the_taskboard",
+        cursorRole: "doer",
+        cursorKey: "do:it",
+        cursorCriterion: "Done.",
+        waitForCount: 0,
+        terminal: false,
+        complete: false,
+        linkCount: 1,
+        ageMs: 1000,
+        lastChange: 0,
+        actions: []
+      }],
+      policies: ["task"],
+      isOwner: false
+    };
+    const card = element.querySelector<HTMLElement>('[data-tasks-card="obj_t_view"]')!;
+    card.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    const panel = element.querySelector<HTMLElement>('[data-tasks-detail]');
+    expect(panel).not.toBeNull();
+    expect(panel!.querySelector("h3")?.textContent).toBe("Refactor verb dispatch");
+    expect(panel!.querySelector(".woo-tasks-detail-text")?.textContent).toContain("multi-line");
+    const obligations = Array.from(panel!.querySelectorAll(".woo-tasks-detail-obligation"));
+    expect(obligations).toHaveLength(2);
+    expect(obligations[0].classList.contains("met")).toBe(true);
+    expect(obligations[1].classList.contains("current")).toBe(true);
+    expect(panel!.querySelectorAll(".woo-tasks-detail-log-entry")).toHaveLength(2);
+    expect(calls.find((c) => c.target === "obj_t_view" && c.verb === "detail")).toBeDefined();
+    panel!.querySelector<HTMLButtonElement>("[data-tasks-detail-close]")!.click();
+    expect(element.querySelector('[data-tasks-detail]')).toBeNull();
+  });
+
   it("opens the create-task form, submits with collected fields, and refreshes", async () => {
     const { WooTasksKanbanElement } = await import("../catalogs/tasks/ui/kanban-board");
     defineOnce("woo-tasks-kanban", WooTasksKanbanElement);

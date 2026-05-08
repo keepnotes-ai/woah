@@ -2137,6 +2137,9 @@ export class PersistentObjectDO {
       body: bodyStr
     }));
     const startedAt = Date.now();
+    // Logged here so a wedged fetch leaves a trace; the existing
+    // `cross_host_rpc` end event only fires on settle.
+    this.world?.recordMetric({ kind: "cross_host_rpc_start", route: path, host });
     const timeoutMs = options.timeoutMs;
     // For paths with an explicit deadline, the AbortController cancels both
     // the queue wait and the underlying fetch on timeout; without this, a

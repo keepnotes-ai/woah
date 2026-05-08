@@ -380,6 +380,13 @@ export class WooWorld {
   // One host runs one behavior at a time. Awaited cross-host RPC must not let a
   // second local behavior mutate the same in-memory state mid-savepoint.
   private hostQueue: Promise<unknown> = Promise.resolve();
+  // Diagnostic instrumentation for the host-task queue. `currentHostTask`
+  // tracks the task that's actively executing (between start and done) so a
+  // newly-enqueued task can log who it's blocked behind. `hostTaskQueueDepth`
+  // is the count of tasks waiting for the current to settle.
+  private hostTaskCounter = 0;
+  private currentHostTask: { id: number; label: string; startedAt: number } | null = null;
+  private hostTaskQueueDepth = 0;
   private metricsHook: ((event: MetricEvent) => void) | null = null;
   // O(1) presence lookup. `session_subscribers` is authoritative for live
   // sessions; `subscribers` remains a compatibility actor projection for
@@ -1643,7 +1650,7 @@ export class WooWorld {
   }
 
   async call(frameId: string | undefined, sessionId: string, space: ObjRef, message: Message): Promise<AppliedFrame | ErrorFrame> {
-    return await this.enqueueHostTask(() => this.callNow(frameId, sessionId, space, message));
+    return await this.enqueueHostTask(() => this.callNow(frameId, sessionId, space, message), `call:${message.target}:${message.verb}`);
   }
 
   private async callNow(frameId: string | undefined, sessionId: string, space: ObjRef, message: Message): Promise<AppliedFrame | ErrorFrame> {
@@ -1670,8 +1677,81 @@ export class WooWorld {
     return frame;
   }
 
-  private async enqueueHostTask<T>(fn: () => Promise<T>): Promise<T> {
-    const run = this.hostQueue.then(fn, fn);
+  private async enqueueHostTask<T>(fn: () => Promise<T>, label: string = "task"): Promise<T> {
+    const id = ++this.hostTaskCounter;
+    this.hostTaskQueueDepth += 1;
+    const queueDepth = this.hostTaskQueueDepth;
+    this.recordMetric({ kind: "host_task_enqueue", id, label, queue_depth: queueDepth });
+    // If a task is currently in flight when we enqueue, surface who we're
+    // queued behind and how long they've already been running. This is the
+    // primary fingerprint of a wedge: when an MCP call hangs forever, the
+    // tail will show its host_task_blocked event pointing at the in-flight
+    // task that never settles.
+    if (this.currentHostTask) {
+      this.recordMetric({
+        kind: "host_task_blocked",
+        new_id: id,
+        new_label: label,
+        current_id: this.currentHostTask.id,
+        current_label: this.currentHostTask.label,
+        current_elapsed_ms: Date.now() - this.currentHostTask.startedAt,
+        queue_depth: queueDepth
+      });
+    }
+    const enqueuedAt = Date.now();
+    const run = this.hostQueue.then(async () => {
+      const startedAt = Date.now();
+      this.currentHostTask = { id, label, startedAt };
+      this.hostTaskQueueDepth -= 1;
+      this.recordMetric({ kind: "host_task_start", id, label, queued_ms: startedAt - enqueuedAt });
+      // 3-second watchdog. Wedged tasks stay in this loop indefinitely until
+      // the task settles, surfacing a steady drumbeat in the tail. Cleared
+      // in the finally below so a settled task emits no further long-running
+      // events.
+      const watchdogTimers: ReturnType<typeof setTimeout>[] = [];
+      const armWatchdog = (afterMs: number): void => {
+        const timer = setTimeout(() => {
+          if (this.currentHostTask?.id === id) {
+            this.recordMetric({ kind: "host_task_long_running", id, label, elapsed_ms: Date.now() - startedAt });
+            armWatchdog(3000);
+          }
+        }, afterMs);
+        watchdogTimers.push(timer);
+      };
+      armWatchdog(3000);
+      try {
+        const result = await fn();
+        this.recordMetric({ kind: "host_task_done", id, label, ms: Date.now() - startedAt, status: "ok" });
+        return result;
+      } catch (err) {
+        const error = normalizeError(err);
+        this.recordMetric({ kind: "host_task_done", id, label, ms: Date.now() - startedAt, status: "error", error: error.code });
+        throw err;
+      } finally {
+        for (const timer of watchdogTimers) clearTimeout(timer);
+        if (this.currentHostTask?.id === id) this.currentHostTask = null;
+      }
+    }, async () => {
+      // Previous link rejected. We don't propagate that rejection to this
+      // task — preserve the original semantics where errors from one task
+      // don't poison subsequent tasks. The old code had the same shape via
+      // `then(fn, fn)`; this just keeps the diagnostic wrapping consistent.
+      const startedAt = Date.now();
+      this.currentHostTask = { id, label, startedAt };
+      this.hostTaskQueueDepth -= 1;
+      this.recordMetric({ kind: "host_task_start", id, label, queued_ms: startedAt - enqueuedAt });
+      try {
+        const result = await fn();
+        this.recordMetric({ kind: "host_task_done", id, label, ms: Date.now() - startedAt, status: "ok" });
+        return result;
+      } catch (err) {
+        const error = normalizeError(err);
+        this.recordMetric({ kind: "host_task_done", id, label, ms: Date.now() - startedAt, status: "error", error: error.code });
+        throw err;
+      } finally {
+        if (this.currentHostTask?.id === id) this.currentHostTask = null;
+      }
+    });
     this.hostQueue = run.then(
       () => undefined,
       () => undefined
@@ -1680,15 +1760,15 @@ export class WooWorld {
   }
 
   async directCall(frameId: string | undefined, actor: ObjRef, target: ObjRef, verbName: string, args: WooValue[], options: DirectCallOptions = {}): Promise<DirectResultFrame | ErrorFrame> {
-    return await this.enqueueHostTask(() => this.directCallNow(frameId, actor, target, verbName, args, options));
+    return await this.enqueueHostTask(() => this.directCallNow(frameId, actor, target, verbName, args, options), `directCall:${target}:${verbName}`);
   }
 
   async planCommand(frameId: string | undefined, sessionId: string, space: ObjRef, text: string): Promise<DirectResultFrame | ErrorFrame> {
-    return await this.enqueueHostTask(() => this.planCommandNow(frameId, sessionId, space, text));
+    return await this.enqueueHostTask(() => this.planCommandNow(frameId, sessionId, space, text), `planCommand:${space}`);
   }
 
   async command(frameId: string | undefined, sessionId: string, space: ObjRef, text: string, options: CommandOptions = {}): Promise<AppliedFrame | DirectResultFrame | ErrorFrame> {
-    return await this.enqueueHostTask(() => this.commandNow(frameId, sessionId, space, text, options));
+    return await this.enqueueHostTask(() => this.commandNow(frameId, sessionId, space, text, options), `command:${space}`);
   }
 
   private async commandNow(frameId: string | undefined, sessionId: string, space: ObjRef, text: string, options: CommandOptions = {}): Promise<AppliedFrame | DirectResultFrame | ErrorFrame> {
@@ -2082,7 +2162,7 @@ export class WooWorld {
   }
 
   async hostDispatch(ctx: CallContext, target: ObjRef, verbName: string, args: WooValue[], startAt?: ObjRef | null): Promise<WooValue> {
-    return await this.enqueueHostTask(() => this.dispatch(ctx, target, verbName, args, startAt));
+    return await this.enqueueHostTask(() => this.dispatch(ctx, target, verbName, args, startAt), `dispatch:${target}:${verbName}`);
   }
 
   async dispatch(ctx: CallContext, target: ObjRef, verbName: string, args: WooValue[], startAt?: ObjRef | null, maxChars?: number | null): Promise<WooValue> {
@@ -4435,7 +4515,7 @@ export class WooWorld {
   }
 
   async deliverInput(player: ObjRef, input: WooValue): Promise<ParkedTaskRun | null> {
-    return await this.enqueueHostTask(() => this.deliverInputNow(player, input));
+    return await this.enqueueHostTask(() => this.deliverInputNow(player, input), `deliverInput:${player}`);
   }
 
   private async deliverInputNow(player: ObjRef, input: WooValue): Promise<ParkedTaskRun | null> {
@@ -4451,7 +4531,7 @@ export class WooWorld {
   }
 
   async runDueTasks(now = Date.now()): Promise<ParkedTaskRun[]> {
-    return await this.enqueueHostTask(() => this.runDueTasksNow(now));
+    return await this.enqueueHostTask(() => this.runDueTasksNow(now), "runDueTasks");
   }
 
   private async runDueTasksNow(now = Date.now()): Promise<ParkedTaskRun[]> {

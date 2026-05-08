@@ -218,7 +218,22 @@ export type MetricEvent =
   | { kind: "init"; phase: "world" | "mcp_gateway"; ms: number }
   | { kind: "startup_storage"; phase: "cf_repository_migrate" | "cf_repository_load" | "cf_repository_save" | "host_seed_fetch" | "directory_schema" | "directory_register_objects"; ms: number; status: "ok" | "error"; objects?: number; properties?: number; sessions?: number; logs?: number; snapshots?: number; tasks?: number; routes?: number; writes?: number; statements?: number; stored?: boolean; error?: string }
   | { kind: "state_projection"; ms: number; objects: number; remote_hosts: number }
-  | { kind: "host_schema_sync"; host: string; planned: number; skipped: number; ms: number };
+  | { kind: "host_schema_sync"; host: string; planned: number; skipped: number; ms: number }
+  // Diagnostic events for the host-task serialization queue (world.ts
+  // enqueueHostTask). Used to fingerprint wedges where one task never settles
+  // and blocks every subsequent verb call. `host_task_blocked` fires when a
+  // new task enqueues while another is already running (so the wedge target
+  // is identified). `host_task_long_running` is a 3-second watchdog that
+  // fires repeatedly for tasks that haven't settled — without this, a wedge
+  // produces no log at all.
+  | { kind: "host_task_enqueue"; id: number; label: string; queue_depth: number }
+  | { kind: "host_task_start"; id: number; label: string; queued_ms: number }
+  | { kind: "host_task_done"; id: number; label: string; ms: number; status: "ok" | "error"; error?: string }
+  | { kind: "host_task_blocked"; new_id: number; new_label: string; current_id: number; current_label: string; current_elapsed_ms: number; queue_depth: number }
+  | { kind: "host_task_long_running"; id: number; label: string; elapsed_ms: number }
+  // Logged when a cross-host RPC fires (the `cross_host_rpc` end event only
+  // logs on settle, so a wedged fetch leaves no trace at all).
+  | { kind: "cross_host_rpc_start"; route: string; host: string };
 
 export type SequencedMessage = {
   space: ObjRef;

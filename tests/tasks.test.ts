@@ -12,7 +12,7 @@ async function seedMinimal(
   world: ReturnType<typeof createWorld>,
   ownerActor: string
 ): Promise<void> {
-  const r = await world.directCall("seed", "$wiz", "the_bug_board", "seed_minimal_policy", [ownerActor], {
+  const r = await world.directCall("seed", "$wiz", "the_taskboard", "seed_minimal_policy", [ownerActor], {
     forceDirect: true,
     forceReason: "test"
   });
@@ -33,26 +33,26 @@ async function adminCall(
 }
 
 describe("tasks catalog", () => {
-  it("seeds the_bug_board as a $task_registry instance", () => {
+  it("seeds the_taskboard as a $task_registry instance", () => {
     const world = setupWorld();
-    expect(world.objects.has("the_bug_board")).toBe(true);
-    expect(world.isDescendantOf("the_bug_board", "$task_registry")).toBe(true);
-    expect(world.propOrNull("the_bug_board", "roles")).toEqual({});
-    expect(world.propOrNull("the_bug_board", "obligations")).toEqual({});
-    expect(world.propOrNull("the_bug_board", "policies")).toEqual({});
+    expect(world.objects.has("the_taskboard")).toBe(true);
+    expect(world.isDescendantOf("the_taskboard", "$task_registry")).toBe(true);
+    expect(world.propOrNull("the_taskboard", "roles")).toEqual({});
+    expect(world.propOrNull("the_taskboard", "obligations")).toEqual({});
+    expect(world.propOrNull("the_taskboard", "policies")).toEqual({});
   });
 
-  it("attaches $transparent so the_bug_board exposes embedded chat verbs", () => {
+  it("attaches $transparent so the_taskboard exposes embedded chat verbs", () => {
     const world = setupWorld();
-    const features = world.propOrNull("the_bug_board", "features");
+    const features = world.propOrNull("the_taskboard", "features");
     expect(Array.isArray(features) && features.includes("$transparent")).toBe(true);
-    expect(world.verbInfo("the_bug_board", "say").definer).toBe("$transparent");
+    expect(world.verbInfo("the_taskboard", "say").definer).toBe("$transparent");
   });
 
   it("rejects create_task for an unknown kind", async () => {
     const world = setupWorld();
     const session = world.auth("guest:create-bug");
-    const r = await world.directCall("create-bad", session.actor, "the_bug_board", "create_task", [
+    const r = await world.directCall("create-bad", session.actor, "the_taskboard", "create_task", [
       "bug",
       "no policy yet",
       "",
@@ -68,13 +68,13 @@ describe("tasks catalog", () => {
     const session = world.auth("guest:operator");
     await seedMinimal(world, session.actor);
 
-    expect(world.propOrNull("the_bug_board", "roles")).toMatchObject({
+    expect(world.propOrNull("the_taskboard", "roles")).toMatchObject({
       doer: { description: "Does the work", owners: [session.actor] }
     });
-    expect(world.propOrNull("the_bug_board", "obligations")).toMatchObject({
+    expect(world.propOrNull("the_taskboard", "obligations")).toMatchObject({
       "do:it": { role: "doer", criterion: "Done." }
     });
-    expect(world.propOrNull("the_bug_board", "policies")).toEqual({ task: ["do:it"] });
+    expect(world.propOrNull("the_taskboard", "policies")).toEqual({ task: ["do:it"] });
   });
 
   it("runs create → claim → pass → auto-release", async () => {
@@ -82,7 +82,7 @@ describe("tasks catalog", () => {
     const session = world.auth("guest:doer");
     await seedMinimal(world, session.actor);
 
-    const created = await world.directCall("create", session.actor, "the_bug_board", "create_task", [
+    const created = await world.directCall("create", session.actor, "the_taskboard", "create_task", [
       "task",
       "fix the thing",
       "details about the thing",
@@ -93,11 +93,11 @@ describe("tasks catalog", () => {
     if (created.op !== "result") return;
     const taskRef = created.result as string;
     expect(world.isDescendantOf(taskRef, "$task")).toBe(true);
-    expect(world.propOrNull(taskRef, "registry")).toBe("the_bug_board");
+    expect(world.propOrNull(taskRef, "registry")).toBe("the_taskboard");
     expect(world.propOrNull(taskRef, "kind")).toBe("task");
     expect(world.propOrNull(taskRef, "obligations")).toEqual([{ key: "do:it", met: false }]);
     expect(world.propOrNull(taskRef, "terminal")).toBe(false);
-    expect(world.object(taskRef).location).toBe("the_bug_board");
+    expect(world.object(taskRef).location).toBe("the_taskboard");
 
     const claim = await world.directCall("claim", session.actor, taskRef, "claim", []);
     expect(claim.op).toBe("result");
@@ -108,7 +108,7 @@ describe("tasks catalog", () => {
     expect(world.propOrNull(taskRef, "obligations")).toEqual([
       { key: "do:it", met: true, evidence: { note: "done" } }
     ]);
-    expect(world.object(taskRef).location).toBe("the_bug_board");
+    expect(world.object(taskRef).location).toBe("the_taskboard");
   });
 
   it("rejects pass without lease", async () => {
@@ -116,7 +116,7 @@ describe("tasks catalog", () => {
     const session = world.auth("guest:loner");
     await seedMinimal(world, session.actor);
 
-    const created = await world.directCall("create", session.actor, "the_bug_board", "create_task", [
+    const created = await world.directCall("create", session.actor, "the_taskboard", "create_task", [
       "task",
       "untouched",
       "",
@@ -137,7 +137,7 @@ describe("tasks catalog", () => {
     await seedMinimal(world, owner.actor);
     const stranger = world.auth("guest:stranger");
 
-    const created = await world.directCall("create", owner.actor, "the_bug_board", "create_task", [
+    const created = await world.directCall("create", owner.actor, "the_taskboard", "create_task", [
       "task",
       "for doer only",
       "",
@@ -156,7 +156,7 @@ describe("tasks catalog", () => {
     const world = setupWorld();
     const session = world.auth("guest:meddler");
     await seedMinimal(world, session.actor);
-    const created = await world.directCall("create", session.actor, "the_bug_board", "create_task", [
+    const created = await world.directCall("create", session.actor, "the_taskboard", "create_task", [
       "task",
       "guarded",
       "",
@@ -172,7 +172,7 @@ describe("tasks catalog", () => {
     // task can only land at the registry until :claim/:handoff/:release is used.
     // This is a structural check: with transition_intent null, the gate raises;
     // re-asserting location confirms the gate held.
-    expect(world.object(taskRef).location).toBe("the_bug_board");
+    expect(world.object(taskRef).location).toBe("the_taskboard");
     expect(world.propOrNull(taskRef, "transition_intent")).toBeNull();
   });
 
@@ -180,10 +180,10 @@ describe("tasks catalog", () => {
     const world = setupWorld();
     const session = world.auth("guest:lister");
     await seedMinimal(world, session.actor);
-    await world.directCall("a", session.actor, "the_bug_board", "create_task", ["task", "first", "", [], null]);
-    await world.directCall("b", session.actor, "the_bug_board", "create_task", ["task", "second", "", [], null]);
+    await world.directCall("a", session.actor, "the_taskboard", "create_task", ["task", "first", "", [], null]);
+    await world.directCall("b", session.actor, "the_taskboard", "create_task", ["task", "second", "", [], null]);
 
-    const r = await world.directCall("list", session.actor, "the_bug_board", "listing", []);
+    const r = await world.directCall("list", session.actor, "the_taskboard", "listing", []);
     expect(r.op).toBe("result");
     if (r.op !== "result") return;
     const entries = r.result as Array<Record<string, unknown>>;
@@ -197,41 +197,41 @@ describe("tasks catalog", () => {
     const world = setupWorld();
     const stranger = world.auth("guest:stranger");
 
-    const denied = await world.directCall("denied", stranger.actor, "the_bug_board", "set_role", [
+    const denied = await world.directCall("denied", stranger.actor, "the_taskboard", "set_role", [
       "triager",
       { description: "x", owners: [stranger.actor] }
     ]);
     expect(denied.op).toBe("error");
     if (denied.op === "error") expect(denied.error.code).toBe("E_PERM");
 
-    const ok = await adminCall(world, "ok", "the_bug_board", "set_role", [
+    const ok = await adminCall(world, "ok", "the_taskboard", "set_role", [
       "triager",
       { description: "Triages bugs", owners: [stranger.actor] }
     ]);
     expect(ok.op).toBe("result");
-    expect(world.propOrNull("the_bug_board", "roles")).toMatchObject({
+    expect(world.propOrNull("the_taskboard", "roles")).toMatchObject({
       triager: { description: "Triages bugs", owners: [stranger.actor] }
     });
   });
 
   it("remove_role refuses while an obligation references it", async () => {
     const world = setupWorld();
-    await adminCall(world, "r1", "the_bug_board", "set_role", [
+    await adminCall(world, "r1", "the_taskboard", "set_role", [
       "triager",
       { description: "x", owners: ["$wiz"] }
     ]);
-    await adminCall(world, "o1", "the_bug_board", "set_obligation", [
+    await adminCall(world, "o1", "the_taskboard", "set_obligation", [
       "triage:confirm",
       { role: "triager", criterion: "Bug reproduces." }
     ]);
-    const r = await adminCall(world, "rm", "the_bug_board", "remove_role", ["triager"]);
+    const r = await adminCall(world, "rm", "the_taskboard", "remove_role", ["triager"]);
     expect(r.op).toBe("error");
     if (r.op === "error") expect(r.error.code).toBe("E_CONSTRAINT");
   });
 
   it("set_obligation rejects an unknown role", async () => {
     const world = setupWorld();
-    const r = await adminCall(world, "o", "the_bug_board", "set_obligation", [
+    const r = await adminCall(world, "o", "the_taskboard", "set_obligation", [
       "x",
       { role: "ghost", criterion: "..." }
     ]);
@@ -244,7 +244,7 @@ describe("tasks catalog", () => {
     const session = world.auth("guest:doer");
     await seedMinimal(world, session.actor);
 
-    const parentMint = await world.directCall("mint-parent", session.actor, "the_bug_board", "create_task", [
+    const parentMint = await world.directCall("mint-parent", session.actor, "the_taskboard", "create_task", [
       "task",
       "parent",
       "",
@@ -294,7 +294,7 @@ describe("tasks catalog", () => {
     const session = world.auth("guest:doer");
     await seedMinimal(world, session.actor);
 
-    const created = await world.directCall("c", session.actor, "the_bug_board", "create_task", [
+    const created = await world.directCall("c", session.actor, "the_taskboard", "create_task", [
       "task",
       "abandoned",
       "",
@@ -308,6 +308,6 @@ describe("tasks catalog", () => {
     const drop = await world.directCall("drop", session.actor, taskRef, "drop_terminal", ["lost interest"]);
     expect(drop.op).toBe("result");
     expect(world.propOrNull(taskRef, "terminal")).toBe(true);
-    expect(world.object(taskRef).location).toBe("the_bug_board");
+    expect(world.object(taskRef).location).toBe("the_taskboard");
   });
 });

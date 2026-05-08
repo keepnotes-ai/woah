@@ -2,6 +2,7 @@ import "./styles.css";
 import chatManifest from "../../catalogs/chat/manifest.json";
 import dubspaceManifest from "../../catalogs/dubspace/manifest.json";
 import pinboardManifest from "../../catalogs/pinboard/manifest.json";
+import tasksManifest from "../../catalogs/tasks/manifest.json";
 import weatherManifest from "../../catalogs/weather/manifest.json";
 import * as chatUiModule from "../../catalogs/chat/ui/chat-space";
 import * as dubspaceUiModule from "../../catalogs/dubspace/ui/dubspace-workspace";
@@ -18,11 +19,11 @@ type AppState = {
   socket?: WebSocket;
   actor?: string;
   session?: string;
-  tab: "chat" | "dubspace" | "pinboard" | "ide";
+  tab: "chat" | "dubspace" | "pinboard" | "tasks" | "ide";
   world?: any;
   scopedProjection?: ScopedProjectionStateModel;
   scopedObjectSummaries: Record<string, any>;
-  routedSubjects: Partial<Record<"dubspace" | "pinboard", string>>;
+  routedSubjects: Partial<Record<"dubspace" | "pinboard" | "tasks", string>>;
   audioOn: boolean;
   clockOffset: number;
   cueSlots: Record<string, boolean>;
@@ -139,11 +140,13 @@ const ui = createWooClientFramework();
 let chatRoomPin: ChatRoomPin | null = null;
 const bundledToolSeeds = {
   dubspace: bundledSeedRef(dubspaceManifest, "$dubspace"),
-  pinboard: bundledSeedRef(pinboardManifest, "$pinboard")
+  pinboard: bundledSeedRef(pinboardManifest, "$pinboard"),
+  tasks: bundledSeedRef(tasksManifest, "$task_registry")
 } as const;
 const bundledCatalogManifests: Record<string, any> = {
   dubspace: dubspaceManifest,
-  pinboard: pinboardManifest
+  pinboard: pinboardManifest,
+  tasks: tasksManifest
 };
 const sessionKey = "woo.session";
 const chatHistoryKey = "woo.chat.history";
@@ -195,6 +198,8 @@ const TAB_FROM_VIEW: Record<string, AppState["tab"]> = {
   chat: "chat",
   dubspace: "dubspace",
   pinboard: "pinboard",
+  tasks: "tasks",
+  kanban: "tasks",
   ide: "ide",
   editor: "ide"
 };
@@ -537,6 +542,7 @@ function objectIdForTab(tab: AppState["tab"]): string {
   if (tab === "chat") return activeChatRoom();
   if (tab === "dubspace") return dubspaceSpace();
   if (tab === "pinboard") return pinboardSpace();
+  if (tab === "tasks") return tasksSpace();
   if (tab === "ide") return state.selectedObject || defaultSelectedObject();
   return "";
 }
@@ -579,6 +585,7 @@ function routeForObjectId(objectId: string, summary?: any): AppState["tab"] {
     if (objectId === activeChatRoom()) return "chat";
     if (objectId === dubspaceSpace()) return "dubspace";
     if (objectId === pinboardSpace()) return "pinboard";
+    if (objectId === tasksSpace()) return "tasks";
     const summaryTab = tabForScopedSummary(objectId, summary ?? scopedObjectSummary(objectId));
     if (summaryTab) return summaryTab;
     return "ide";
@@ -586,20 +593,21 @@ function routeForObjectId(objectId: string, summary?: any): AppState["tab"] {
   if (objectId === activeChatRoom()) return "chat";
   if (objectId === dubspaceSpace()) return "dubspace";
   if (objectId === pinboardSpace()) return "pinboard";
+  if (objectId === tasksSpace()) return "tasks";
   if (state.world?.objects?.[objectId]) return "ide";
   return "chat";
 }
 
 function pinRoutedSubject(tab: AppState["tab"], subject: string) {
   if (!scopedProjectionEnabled || !subject) return;
-  if (tab === "dubspace" || tab === "pinboard") {
+  if (tab === "dubspace" || tab === "pinboard" || tab === "tasks") {
     state.routedSubjects = { ...state.routedSubjects, [tab]: subject };
   }
 }
 
 function routeSubjectForTab(tab: AppState["tab"], routedObject: string, _summary: any): string {
   if (!scopedProjectionEnabled) return "";
-  if (tab === "dubspace" || tab === "pinboard") return routedObject;
+  if (tab === "dubspace" || tab === "pinboard" || tab === "tasks") return routedObject;
   return "";
 }
 
@@ -841,9 +849,9 @@ function overlaySubjectForTab(tab: AppState["tab"]): string {
   return "";
 }
 
-function scopedToolSubject(surface: "dubspace" | "pinboard"): string {
+function scopedToolSubject(surface: "dubspace" | "pinboard" | "tasks"): string {
   if (!scopedProjectionEnabled) return "";
-  const className = surface === "dubspace" ? "$dubspace" : "$pinboard";
+  const className = surface === "dubspace" ? "$dubspace" : surface === "pinboard" ? "$pinboard" : "$task_registry";
   const overlays = state.scopedProjection?.overlays ?? {};
   for (const handle of Object.values(overlays)) {
     const subject = typeof (handle as any)?.subject === "string" ? (handle as any).subject : "";
@@ -994,6 +1002,7 @@ function tabForScopedSummary(id: string, summary: any): AppState["tab"] | undefi
   if (id === activeChatRoom() || isRoomSummary(summary)) return "chat";
   if (isCatalogObjectSummary(summary, "dubspace", "$dubspace")) return "dubspace";
   if (isCatalogObjectSummary(summary, "pinboard", "$pinboard")) return "pinboard";
+  if (isCatalogObjectSummary(summary, "tasks", "$task_registry")) return "tasks";
   return undefined;
 }
 
@@ -1625,6 +1634,17 @@ function pinboardSpace() {
   return String(state.world?.pinboardMeta?.board ?? "");
 }
 
+function tasksSpace() {
+  if (scopedProjectionEnabled) {
+    const route = startupRoute ?? parseLocationRoute(location.pathname, location.search);
+    if ((route?.view === "tasks" || route?.view === "kanban") && route.objectId) return route.objectId;
+    if (state.routedSubjects.tasks) return state.routedSubjects.tasks;
+    const scoped = scopedToolSubject("tasks");
+    return scoped || activeInstalledCatalogSeed("tasks", bundledToolSeeds.tasks);
+  }
+  return activeInstalledCatalogSeed("tasks", bundledToolSeeds.tasks);
+}
+
 function chatRoom() {
   // Migration note: new selectors should make the scoped branch primary.
   // The `state.world` branch is the temporary `/api/state` compatibility tail.
@@ -2025,6 +2045,7 @@ function render() {
         ${navButton("chat", "Chat")}
         ${navButton("dubspace", "Dubspace")}
         ${navButton("pinboard", "Pinboard")}
+        ${navButton("tasks", "Tasks")}
         ${navButton("ide", "IDE")}
         <a class="github-link" href="https://github.com/hughpyle/woo" target="_blank" rel="noopener noreferrer" aria-label="woo on GitHub" title="woo on GitHub">
           <svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
@@ -2033,6 +2054,7 @@ function render() {
       <main class="main">
         ${state.tab === "dubspace" ? renderDubspace() : ""}
         ${state.tab === "pinboard" ? renderPinboard() : ""}
+        ${state.tab === "tasks" ? renderTasks() : ""}
         ${state.tab === "chat" ? renderChat() : ""}
         ${state.tab === "ide" ? renderIde() : ""}
       </main>
@@ -2044,6 +2066,7 @@ function render() {
   if (state.tab === "chat") mountChatComponent();
   if (state.tab === "dubspace") bindDubspace();
   if (state.tab === "pinboard") bindPinboard();
+  if (state.tab === "tasks") bindTasks();
   if (state.tab === "ide") bindIde();
   if (!restoreRenderFocus(focus) && state.tab === "chat") focusChatInput();
 }
@@ -3419,6 +3442,18 @@ function renderPinboard() {
   return `<${tag} data-pinboard-board data-pinboard-space="${escapeHtml(boardId)}"></${tag}>`;
 }
 
+function renderTasks() {
+  const tag = toolFrameComponentTag(tasksSpace(), "tasks.kanban", "tasks");
+  if (!tag) {
+    return `
+      <section class="toolbar"><h1>Tasks</h1></section>
+      <section class="panel"><p class="empty-state">No tasks UI is registered for this registry.</p></section>
+    `;
+  }
+  const boardId = tasksSpace();
+  return `<${tag} data-tasks-board data-tasks-registry="${escapeHtml(boardId)}"></${tag}>`;
+}
+
 function renderSpaceChatPanel(space: string) {
   const height = Math.round(spaceChatHeight(space));
   const component = ui.catalogUi.component("chat.space-mini", "chat");
@@ -3708,6 +3743,19 @@ function bindPinboard() {
   bindPinboardMap();
   bindPinboardViewport();
   bindSpaceChatPanels();
+}
+
+function bindTasks() {
+  mountTasksKanbanComponent();
+}
+
+function mountTasksKanbanComponent() {
+  const element = document.querySelector<WooElement & { subject?: string }>("[data-tasks-board]");
+  if (!element) return;
+  const boardId = tasksSpace();
+  if (!boardId) return;
+  element.subject = boardId;
+  element.woo = createChatWooContext(boardId);
 }
 
 function bindSpaceChatPanels() {

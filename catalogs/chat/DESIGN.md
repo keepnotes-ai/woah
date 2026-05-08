@@ -28,7 +28,7 @@ This is the demo that retires the question "do feature objects pull their weight
 - Presence list visible.
 - MOO-like text input parsed by the room: explicit speech forms (`say hi`, `"hi`, `:waves`, `/tell`, backtick directed speech), room commands (`look`, `who`), direction verbs (`se`, `east`, `out`), and object commands (`look cockatoo`, `enter tub`, `teach bird "hello"`).
 - Enter/exit notifications when actors join or leave.
-- A "join tasks as room" mode where the same chat client renders against `the_bug_board` instead of a standalone `$chatroom`. Same verbs, same observations.
+- A "join tasks as room" mode where the same chat client renders against `the_taskboard` instead of a standalone `$chatroom`. Same verbs, same observations.
 
 ## Call discipline
 
@@ -221,13 +221,13 @@ that room.
 
 The room's chat behavior still comes from `$conversational`; exits and carrying are room mechanics, not feature mechanics.
 
-For embedded mode, `the_bug_board` (a `$task_registry`) gets the transparent chat feature attached at boot:
+For embedded mode, `the_taskboard` (a `$task_registry`) gets the transparent chat feature attached at boot:
 
 ```
-the_bug_board.features = [$transparent]
+the_taskboard.features = [$transparent]
 ```
 
-Now `the_bug_board:say("starting standup")` works. The utterance is a direct call, so the `said` observation is live-only — pushed to the registry's session audience, separate from the registry's own sequenced log of task mutations.
+Now `the_taskboard:say("starting standup")` works. The utterance is a direct call, so the `said` observation is live-only — pushed to the registry's session audience, separate from the registry's own sequenced log of task mutations.
 
 ## Seeded Rooms And Things
 
@@ -314,7 +314,7 @@ This is what stress-tests `$match`: a real chat surface using the parser end-to-
 
 ## Embedded mode
 
-The same chat client connecting to `the_bug_board` shows:
+The same chat client connecting to `the_taskboard` shows:
 - The registry's chat (`said`, `emoted`, `entered`, `left` live observations).
 - The registry's task-state changes (`task_created`, `task_claimed`, `task_passed`, `task_released`, etc.) as direct observations on the *same* feed.
 

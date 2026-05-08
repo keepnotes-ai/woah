@@ -23,7 +23,7 @@ DO instances fall into three classes, all of which use the same `PersistentObjec
 
 | Class | Naming | Hosts |
 |---|---|---|
-| **Self-hosted-instance DO** | `env.WOO.idFromName(<obj_id>)` | One DO per instance of a class declaring `instances_self_host` (per [semantics/objects.md §4.2](../semantics/objects.md#42-host-placement)). Rooms, players, anchor spaces (`the_dubspace`, `the_bug_board`), and operational singletons (`$catalog_registry`) each get their own DO. |
+| **Self-hosted-instance DO** | `env.WOO.idFromName(<obj_id>)` | One DO per instance of a class declaring `instances_self_host` (per [semantics/objects.md §4.2](../semantics/objects.md#42-host-placement)). Rooms, players, anchor spaces (`the_dubspace`, `the_taskboard`), and operational singletons (`$catalog_registry`) each get their own DO. |
 | **Gateway DO** | `env.WOO.idFromName("world")` | The default home for objects whose class does not self-host. Universal `$`-classes, ad-hoc objects with no anchor, and runtime-created objects whose creator is the gateway itself live here. The Worker entry uses the gateway DO for global routes (`/api/auth`, `/healthz`, `/ws` upgrade) and as the catch-all when no other host claims an id. |
 | **Service DO** | `env.DIRECTORY.idFromName("directory")` and similar | Singletons for routing and bookkeeping. See [§R2](#r2-singleton-dos). |
 

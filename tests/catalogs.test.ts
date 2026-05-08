@@ -118,7 +118,7 @@ describe("local catalogs", () => {
     expect(pinboard.depends).toEqual(["@local:chat", "@local:note", "@local:demoworld"]);
     expect(pinboard.seed_hooks).toContainEqual({ kind: "attach_feature", consumer: "the_pinboard", feature: "chat:$transparent" });
     expect(tasks.depends).toEqual(["@local:chat", "@local:note"]);
-    expect(tasks.seed_hooks).toContainEqual({ kind: "attach_feature", consumer: "the_bug_board", feature: "chat:$transparent" });
+    expect(tasks.seed_hooks).toContainEqual({ kind: "attach_feature", consumer: "the_taskboard", feature: "chat:$transparent" });
   });
 
   it("keeps mounted demo-space enter and leave verbs portable", async () => {
@@ -661,17 +661,17 @@ describe("local catalogs", () => {
     expect(world.ownVerb("$task", "claim")?.kind).toBe("bytecode");
     expect(world.ownVerb("$task", "pass")?.kind).toBe("bytecode");
     expect(world.ownVerb("$task", "release")?.kind).toBe("bytecode");
-    expect(world.isDescendantOf("the_bug_board", "$task_registry")).toBe(true);
+    expect(world.isDescendantOf("the_taskboard", "$task_registry")).toBe(true);
 
     const session = world.auth("guest:catalog-tasks");
-    const seeded = await world.directCall("seed", "$wiz", "the_bug_board", "seed_minimal_policy", [session.actor], { forceDirect: true, forceReason: "test" });
+    const seeded = await world.directCall("seed", "$wiz", "the_taskboard", "seed_minimal_policy", [session.actor], { forceDirect: true, forceReason: "test" });
     expect(seeded.op).toBe("result");
 
-    const created = await world.directCall("create", session.actor, "the_bug_board", "create_task", ["task", "Source-only smoke", "first body", [], null], { forceDirect: true, forceReason: "test" });
+    const created = await world.directCall("create", session.actor, "the_taskboard", "create_task", ["task", "Source-only smoke", "first body", [], null], { forceDirect: true, forceReason: "test" });
     expect(created.op).toBe("result");
     const taskRef = created.op === "result" ? String(created.result) : "";
     expect(world.isDescendantOf(taskRef, "$note")).toBe(true);
-    expect(world.getProp(taskRef, "registry")).toBe("the_bug_board");
+    expect(world.getProp(taskRef, "registry")).toBe("the_taskboard");
 
     const claimed = await world.directCall("claim", session.actor, taskRef, "claim", [], { forceDirect: true, forceReason: "test" });
     expect(claimed.op).toBe("result");
@@ -688,7 +688,7 @@ describe("local catalogs", () => {
       // Single-obligation policy completes on first pass; release fires automatically.
       expect(types).toContain("task_released");
     }
-    expect(world.object(taskRef).location).toBe("the_bug_board");
+    expect(world.object(taskRef).location).toBe("the_taskboard");
   });
 
   it("installs pinboard from source and keeps notes as board-contained pin objects", async () => {

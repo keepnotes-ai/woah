@@ -645,16 +645,16 @@
     {
       "kind": "create_instance",
       "class": "$task_registry",
-      "as": "the_bug_board",
-      "name": "Bug Board",
-      "description": "A registry that tracks bugs through a role-gated obligation cursor. Operators populate roles, obligations, and policies via the admin verbs (or :seed_minimal_policy for tests).",
+      "as": "the_taskboard",
+      "name": "Taskboard",
+      "description": "A registry that coordinates work items through a role-gated obligation cursor. Operators populate roles, obligations, and policies via the admin verbs (or :seed_minimal_policy for tests).",
       "properties": {
         "host_placement": "self"
       }
     },
     {
       "kind": "attach_feature",
-      "consumer": "the_bug_board",
+      "consumer": "the_taskboard",
       "feature": "chat:$transparent"
     }
   ]

@@ -19,7 +19,7 @@ This is the contract the implementation must produce on first start; without it,
 2. **`$system` (`#0`)** is created with the reserved ULID `00000000000000000000000000`. `parent = null`.
 3. **Remaining universal seed objects** are created in dependency order: `$root` → `$actor` → `$player` → `$wiz` / `$guest`, `$sequenced_log` → `$space`, `$thing` → `$catalog`, plus `$catalog_registry` and `$nowhere`. Corenames registered in Directory.
 4. **Configured local catalogs** are installed in dependency order. The bundled set is split between foundational class libraries (`@local:help`, `@local:chat`, `@local:note`, `@local:prog`), the demo seed catalog (`@local:demoworld`), and demo applications (`@local:dubspace`, `@local:pinboard`, `@local:tasks`); see [catalogs.md §CT15](../discovery/catalogs.md#ct15-bundled-catalogs-in-this-repo) for roles. The normative source is the catalog manifests; bootstrap no longer hard-seeds demo classes and instances directly.
-5. **Catalog scaffold and demo instances** are created by the configured local catalogs. The Living Room / Deck / Hot Tub set, `the_cockatoo`, exits, and props come from `@local:demoworld`. `the_dubspace` is seeded by `@local:dubspace` mounted in `demoworld:the_chatroom`; `the_pinboard` by `@local:pinboard` in `demoworld:the_deck`; `the_bug_board` by `@local:tasks`. `:add_feature` calls attach `$conversational` to ordinary rooms and `$transparent` (from `chat`) to embedded demo spaces, running as wizard at boot and satisfying both attach-policy gates.
+5. **Catalog scaffold and demo instances** are created by the configured local catalogs. The Living Room / Deck / Hot Tub set, `the_cockatoo`, exits, and props come from `@local:demoworld`. `the_dubspace` is seeded by `@local:dubspace` mounted in `demoworld:the_chatroom`; `the_pinboard` by `@local:pinboard` in `demoworld:the_deck`; `the_taskboard` by `@local:tasks`. `:add_feature` calls attach `$conversational` to ordinary rooms and `$transparent` (from `chat`) to embedded demo spaces, running as wizard at boot and satisfying both attach-policy gates.
 6. **Guest player pool** is pre-seeded so first connections don't need to mint identities.
 
 Boot is idempotent: running it twice should be a no-op (each seed is created only if its corename isn't already mapped). This makes test setup and dev-restart trivial.
@@ -501,7 +501,7 @@ The bootstrap step that creates demo chat surfaces ends with:
 the_chatroom:add_feature($conversational);    // running as wizard at boot
 the_dubspace:add_feature($transparent);
 the_pinboard:add_feature($transparent);
-the_bug_board:add_feature($transparent);
+the_taskboard:add_feature($transparent);
 ```
 
 ---
@@ -514,7 +514,7 @@ the_bug_board:add_feature($transparent);
 |---|---|---|---|
 | `$nowhere` | `$thing` | n/a | Seed default-home for players whose `home` is null. Holds disconnected guests after `:on_disfunc` and any object reparented to `null` location during recycle. Wizard-owned, no contents-emitted observations. |
 | `the_dubspace` | `$dubspace` | n/a (own host root) | The first runnable sound-space instance. It owns the sequenced coordination surface for four loop slots, one channel, one filter, one delay, and one default scene. |
-| `the_bug_board` | `$task_registry` | n/a (own host root) | The first runnable task coordination space. It owns the sequenced timeline and anchored task tree used by people or agents to create, claim, discuss, and complete work. Boots with `features: [$transparent]` so `:say`/`:emote`/`:enter`/`:leave` are available alongside task verbs and public speech reaches the containing audience when mounted. |
+| `the_taskboard` | `$task_registry` | n/a (own host root) | The first runnable task coordination space. It owns the sequenced timeline and anchored task tree used by people or agents to create, claim, discuss, and complete work. Boots with `features: [$transparent]` so `:say`/`:emote`/`:enter`/`:leave` are available alongside task verbs and public speech reaches the containing audience when mounted. |
 | `the_chatroom` | `$chatroom` | n/a (own host root) | The first runnable chat room. Standalone surface for testing the chat client and `$match` parser; carries `features: [$conversational]` set at boot. |
 
 For the dubspace, the demo creates the four loop slots, one channel, one filter, one delay, one percussion loop, and one scene as anchored children:
@@ -542,7 +542,7 @@ The anchored dubspace objects also carry descriptions:
 | `drum_1` | `$drum_loop` | Eight-step percussion loop for the demo dubspace. It is anchored to `the_dubspace` and stores tempo, transport state, and a shared kick/snare/hat/tone pattern. |
 | `default_scene` | `$scene` | Initial saved scene for the demo dubspace. It records a named control snapshot and gives scene recall a concrete object to read and rewrite. |
 
-For the tasks catalog, no instances exist at boot beyond `the_bug_board` itself — tasks are created at runtime by actor calls. All tasks anchor on `the_bug_board`, so the entire project lives on one host.
+For the tasks catalog, no instances exist at boot beyond `the_taskboard` itself — tasks are created at runtime by actor calls. All tasks anchor on `the_taskboard`, so the entire project lives on one host.
 
 ---
 

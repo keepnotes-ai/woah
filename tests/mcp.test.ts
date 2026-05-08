@@ -427,9 +427,9 @@ describe("McpHost", () => {
     const host = new McpHost(world);
     host.bindSession(session.id, session.actor);
 
-    const seeded = await world.directCall("seed-min", "$wiz", "the_bug_board", "seed_minimal_policy", [session.actor], { forceDirect: true, forceReason: "test" });
+    const seeded = await world.directCall("seed-min", "$wiz", "the_taskboard", "seed_minimal_policy", [session.actor], { forceDirect: true, forceReason: "test" });
     expect(seeded.op).toBe("result");
-    const created = await world.directCall("mcp-create-task", session.actor, "the_bug_board", "create_task", ["task", "Focus me", "test body", [], null], { forceDirect: true, forceReason: "test" });
+    const created = await world.directCall("mcp-create-task", session.actor, "the_taskboard", "create_task", ["task", "Focus me", "test body", [], null], { forceDirect: true, forceReason: "test" });
     expect(created.op).toBe("result");
     const taskRef = (created.op === "result" ? created.result : null) as string | null;
     expect(typeof taskRef).toBe("string");

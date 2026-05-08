@@ -50,7 +50,7 @@ describe("bundled catalog UI components", () => {
 
     expect(registry.resolveFrame("the_dubspace", undefined, (_subject, classRef) => classRef === "$dubspace" ? 1 : false)?.frame.id).toBe("dubspace.workspace");
     expect(registry.resolveFrame("the_pinboard", undefined, (_subject, classRef) => classRef === "$pinboard" ? 1 : false)?.frame.id).toBe("pinboard.board");
-    expect(registry.resolveFrame("the_bug_board", undefined, (_subject, classRef) => classRef === "$task_registry" ? 1 : false)?.frame.id).toBe("tasks.kanban");
+    expect(registry.resolveFrame("the_taskboard", undefined, (_subject, classRef) => classRef === "$task_registry" ? 1 : false)?.frame.id).toBe("tasks.kanban");
     expect(registry.componentsForSurface("title-badge").map((component) => component.declaration.tag)).toContain("woo-weather-badge");
 
     const weatherBadge = registry.componentsForSurface("title-badge").find((component) => component.declaration.tag === "woo-weather-badge");
@@ -87,7 +87,7 @@ describe("bundled catalog UI components", () => {
         name: "Triage cockatoo bug",
         kind: "bug",
         labels: ["urgent"],
-        location: "the_bug_board",
+        location: "the_taskboard",
         cursor_role: { key: "do:it", role: "doer", criterion: "Done." },
         wait_for_count: 0,
         terminal: false,
@@ -99,9 +99,9 @@ describe("bundled catalog UI components", () => {
     ];
     const woo: WooContext = {
       actor: "guest_1",
-      frame: { id: "test", subject: "the_bug_board", get: () => undefined, set: () => true },
-      neighborhood: { subject: "the_bug_board", refs: [], related: {}, has: () => true },
-      observe: (ref) => ({ id: ref, name: ref === "the_bug_board" ? "Bug Board" : ref === "guest_1" ? "Guest 1" : ref, props: {}, catalogState: {} }),
+      frame: { id: "test", subject: "the_taskboard", get: () => undefined, set: () => true },
+      neighborhood: { subject: "the_taskboard", refs: [], related: {}, has: () => true },
+      observe: (ref) => ({ id: ref, name: ref === "the_taskboard" ? "Taskboard" : ref === "guest_1" ? "Guest 1" : ref, props: {}, catalogState: {} }),
       call: async (target, verb, args = []) => {
         calls.push({ target, verb, args });
         if (verb === "listing") return listing;
@@ -115,12 +115,12 @@ describe("bundled catalog UI components", () => {
     };
     const element = document.createElement("woo-tasks-kanban") as HTMLElement & { woo?: WooContext; subject?: string; refresh?: () => Promise<void> };
     element.woo = woo;
-    element.subject = "the_bug_board";
+    element.subject = "the_taskboard";
     document.body.appendChild(element);
     await element.refresh!();
 
     expect(element.querySelector<HTMLElement>("[data-tasks-card]")?.dataset.tasksCard).toBe("obj_t_ready");
-    expect(element.querySelector("h2")?.textContent).toBe("Bug Board");
+    expect(element.querySelector("h2")?.textContent).toBe("Taskboard");
     expect(element.querySelector("[data-tasks-action=\"claim\"]")?.textContent).toBe("Claim");
 
     let detail: any;
@@ -138,9 +138,9 @@ describe("bundled catalog UI components", () => {
     const calls: { target: string; verb: string; args: unknown[] }[] = [];
     const woo: WooContext = {
       actor: "guest_1",
-      frame: { id: "test", subject: "the_bug_board", get: () => undefined, set: () => true },
-      neighborhood: { subject: "the_bug_board", refs: [], related: {}, has: () => true },
-      observe: (ref) => ({ id: ref, name: ref === "the_bug_board" ? "Bug Board" : ref, props: {}, catalogState: {} }),
+      frame: { id: "test", subject: "the_taskboard", get: () => undefined, set: () => true },
+      neighborhood: { subject: "the_taskboard", refs: [], related: {}, has: () => true },
+      observe: (ref) => ({ id: ref, name: ref === "the_taskboard" ? "Taskboard" : ref, props: {}, catalogState: {} }),
       call: async (target, verb, args = []) => {
         calls.push({ target, verb, args });
         if (verb === "listing") return [];
@@ -152,12 +152,12 @@ describe("bundled catalog UI components", () => {
     };
     const element = document.createElement("woo-tasks-kanban") as HTMLElement & { woo?: WooContext; subject?: string; data?: any };
     element.woo = woo;
-    element.subject = "the_bug_board";
+    element.subject = "the_taskboard";
     element.setAttribute("refresh-interval-ms", "0");
     document.body.appendChild(element);
     element.data = {
-      registryId: "the_bug_board",
-      registryName: "Bug Board",
+      registryId: "the_taskboard",
+      registryName: "Taskboard",
       actor: "guest_1",
       actorNames: { guest_1: "Guest 1" },
       tasks: [{
@@ -200,9 +200,9 @@ describe("bundled catalog UI components", () => {
     const calls: { target: string; verb: string; args: unknown[] }[] = [];
     const woo: WooContext = {
       actor: "guest_1",
-      frame: { id: "test", subject: "the_bug_board", get: () => undefined, set: () => true },
-      neighborhood: { subject: "the_bug_board", refs: [], related: {}, has: () => true },
-      observe: (ref) => ({ id: ref, name: ref === "the_bug_board" ? "Bug Board" : ref, props: {}, catalogState: {} }),
+      frame: { id: "test", subject: "the_taskboard", get: () => undefined, set: () => true },
+      neighborhood: { subject: "the_taskboard", refs: [], related: {}, has: () => true },
+      observe: (ref) => ({ id: ref, name: ref === "the_taskboard" ? "Taskboard" : ref, props: {}, catalogState: {} }),
       call: async (target, verb, args = []) => {
         calls.push({ target, verb, args });
         if (verb === "listing") return [];
@@ -214,12 +214,12 @@ describe("bundled catalog UI components", () => {
     };
     const element = document.createElement("woo-tasks-kanban") as HTMLElement & { woo?: WooContext; subject?: string; data?: any };
     element.woo = woo;
-    element.subject = "the_bug_board";
+    element.subject = "the_taskboard";
     element.setAttribute("refresh-interval-ms", "0");
     document.body.appendChild(element);
     element.data = {
-      registryId: "the_bug_board",
-      registryName: "Bug Board",
+      registryId: "the_taskboard",
+      registryName: "Taskboard",
       actor: "guest_1",
       actorNames: { guest_1: "Guest 1" },
       tasks: [{
@@ -227,7 +227,7 @@ describe("bundled catalog UI components", () => {
         name: "Drag-claim me",
         kind: "bug",
         labels: [],
-        location: "the_bug_board",
+        location: "the_taskboard",
         cursorRole: "doer",
         cursorKey: "do:it",
         cursorCriterion: "Done.",
@@ -270,9 +270,9 @@ describe("bundled catalog UI components", () => {
     let listingCalls = 0;
     const woo: WooContext = {
       actor: null,
-      frame: { id: "test", subject: "the_bug_board", get: () => undefined, set: () => true },
-      neighborhood: { subject: "the_bug_board", refs: [], related: {}, has: () => true },
-      observe: (ref) => ({ id: ref, name: ref === "the_bug_board" ? "Bug Board" : ref, props: {}, catalogState: {} }),
+      frame: { id: "test", subject: "the_taskboard", get: () => undefined, set: () => true },
+      neighborhood: { subject: "the_taskboard", refs: [], related: {}, has: () => true },
+      observe: (ref) => ({ id: ref, name: ref === "the_taskboard" ? "Taskboard" : ref, props: {}, catalogState: {} }),
       call: async (_target, verb) => {
         if (verb === "listing") {
           listingCalls += 1;
@@ -288,7 +288,7 @@ describe("bundled catalog UI components", () => {
     try {
       const element = document.createElement("woo-tasks-kanban") as HTMLElement & { woo?: WooContext; subject?: string };
       element.woo = woo;
-      element.subject = "the_bug_board";
+      element.subject = "the_taskboard";
       element.setAttribute("refresh-interval-ms", "100");
       document.body.appendChild(element);
       await vi.runOnlyPendingTimersAsync();
@@ -314,8 +314,8 @@ describe("bundled catalog UI components", () => {
     document.body.appendChild(element);
 
     element.data = {
-      registryId: "the_bug_board",
-      registryName: "Bug Board",
+      registryId: "the_taskboard",
+      registryName: "Taskboard",
       actor: "guest_1",
       actorNames: { guest_1: "Guest 1", guest_2: "Guest 2" },
       tasks: [
@@ -324,7 +324,7 @@ describe("bundled catalog UI components", () => {
           name: "Triage cockatoo bug",
           kind: "bug",
           labels: ["urgent", "frontend"],
-          location: "the_bug_board",
+          location: "the_taskboard",
           cursorRole: "doer",
           cursorKey: "do:it",
           cursorCriterion: "Done.",
@@ -341,7 +341,7 @@ describe("bundled catalog UI components", () => {
           name: "Wait for review",
           kind: "task",
           labels: [],
-          location: "the_bug_board",
+          location: "the_taskboard",
           cursorRole: "doer",
           cursorKey: "do:it",
           cursorCriterion: "Done.",
@@ -375,7 +375,7 @@ describe("bundled catalog UI components", () => {
           name: "Ship v1 catalog",
           kind: "task",
           labels: [],
-          location: "the_bug_board",
+          location: "the_taskboard",
           cursorRole: null,
           cursorKey: null,
           cursorCriterion: null,
@@ -392,7 +392,7 @@ describe("bundled catalog UI components", () => {
           name: "Old plan",
           kind: "task",
           labels: [],
-          location: "the_bug_board",
+          location: "the_taskboard",
           cursorRole: null,
           cursorKey: null,
           cursorCriterion: null,
@@ -407,7 +407,7 @@ describe("bundled catalog UI components", () => {
       ]
     };
 
-    expect(element.querySelector("h2")?.textContent).toBe("Bug Board");
+    expect(element.querySelector("h2")?.textContent).toBe("Taskboard");
     const colCounts = Array.from(element.querySelectorAll<HTMLElement>("[data-tasks-col]")).map((col) => ({
       id: col.dataset.tasksCol,
       count: col.querySelector<HTMLElement>("[data-tasks-col-count]")?.textContent

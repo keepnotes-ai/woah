@@ -31,13 +31,13 @@ See [DESIGN.md](DESIGN.md) for the model and the
 
 ```
 # Operator boots a fresh registry — empty by default
-the_bug_board:set_role("triager", { description: "Triages bugs", owners: [@alice] })
-the_bug_board:set_obligation("triage:confirm",
+the_taskboard:set_role("triager", { description: "Triages bugs", owners: [@alice] })
+the_taskboard:set_obligation("triage:confirm",
                              { role: "triager", criterion: "Bug reproduces." })
-the_bug_board:set_policy("bug", ["triage:confirm"])
+the_taskboard:set_policy("bug", ["triage:confirm"])
 
 # File a bug
-let t = the_bug_board:create_task("bug", "auth retry races",
+let t = the_taskboard:create_task("bug", "auth retry races",
                                   "intermittent 401 on token refresh", [], null)
 
 # Triager picks it up and moves the cursor
@@ -55,4 +55,4 @@ sufficient to exercise create→claim→pass→release end to end.
 This catalog supersedes `@local:taskspace`. The taskspace catalog is
 removed in the same change; there is no data migration. Existing demo
 worlds drop their `the_taskspace` instance and re-seed with
-`the_bug_board`.
+`the_taskboard`.

@@ -62,6 +62,7 @@ export interface Env {
   WOO_INTERNAL_SECRET?: string;
   WOO_AUTO_INSTALL_CATALOGS?: string;
   WOO_HOST_READ_TIMEOUT_MS?: string;
+  WOO_HOST_WRITE_TIMEOUT_MS?: string;
   WOO_HOST_OUT_FETCH_CONCURRENCY?: string;
 }
 
@@ -74,6 +75,16 @@ const METRIC_SAMPLE_WINDOW_MS = 1000;
 const HOST_STATE_CACHE_LIMIT = 32;
 const HOST_STATE_FETCH_TIMEOUT_MS = 2500;
 const HOST_READ_RPC_TIMEOUT_MS = 2500;
+// Mutating cross-host RPCs do not have an inherent deadline (a write that
+// takes 30s may still be making progress), but a wedged DO can park a slot
+// forever and the local task chain along with it. The watchdog is a
+// generous safety net: if no response has come back by this point, the
+// remote is assumed unreachable, the slot is released, and the caller sees
+// E_TIMEOUT. Aborting mid-write may leave ambiguous remote state — but
+// indefinite hang is already a worse failure mode (the whole DO becomes
+// unresponsive). Most operations on this codebase are inherently
+// idempotent (set_property, observe, mirror-contents).
+const HOST_WRITE_RPC_TIMEOUT_MS = 30_000;
 // Cap on concurrent DO->DO fetch() subrequests issued by this isolate. The
 // Workers runtime enforces its own ~6-slot limit; we self-limit slightly under
 // that and queue the overflow so cold-start fan-outs (compose_look hitting 4
@@ -2203,9 +2214,8 @@ export class PersistentObjectDO {
     options: { pure?: boolean } = {}
   ): Promise<DirectResultFrame | ErrorFrame> {
     const body = this.forwardBody(world, session, { frame_id: frameId, target, verb, args });
-    // Pure verbs get the read deadline; mutating verbs keep the no-timeout
-    // path (changing that requires idempotency at the destination, not yet
-    // available — see review-feedback discussion).
+    // Pure verbs get the read deadline; mutating verbs pass through the
+    // default write watchdog in forwardInternalRaw.
     const timeoutMs = options.pure === true ? this.hostReadRpcTimeoutMs() : undefined;
     const result = await this.forwardInternal<((DirectResultFrame & { deferred_host_effects?: DeferredHostEffect[] }) | ErrorFrame)>(host, "/__internal/ws-direct", body, { timeoutMs });
     if (result.op === "result" && Array.isArray(result.deferred_host_effects)) {
@@ -2287,6 +2297,11 @@ export class PersistentObjectDO {
   private hostReadRpcTimeoutMs(): number {
     const configured = Number(this.env.WOO_HOST_READ_TIMEOUT_MS);
     return Number.isFinite(configured) && configured > 0 ? configured : HOST_READ_RPC_TIMEOUT_MS;
+  }
+
+  private hostWriteRpcTimeoutMs(): number {
+    const configured = Number(this.env.WOO_HOST_WRITE_TIMEOUT_MS);
+    return Number.isFinite(configured) && configured > 0 ? configured : HOST_WRITE_RPC_TIMEOUT_MS;
   }
 
   private hostOutFetchConcurrency(): number {
@@ -2396,22 +2411,20 @@ export class PersistentObjectDO {
     // Logged here so a wedged fetch leaves a trace; the existing
     // `cross_host_rpc` end event only fires on settle.
     this.world?.recordMetric({ kind: "cross_host_rpc_start", route: path, host });
-    const timeoutMs = options.timeoutMs;
-    // For paths with an explicit deadline, the AbortController cancels both
-    // the queue wait and the underlying fetch on timeout; without this, a
-    // timed-out caller would still leave a Promise + a slot parked behind a
-    // wedged downstream. Mutating callers do NOT pass timeoutMs and so do
-    // not get cancellation — abort-mid-write would leave ambiguous remote
-    // state, and we have no idempotency layer to fix that yet.
-    const useTimeout = !!(timeoutMs && timeoutMs > 0);
-    const controller = useTimeout ? new AbortController() : undefined;
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    if (controller && timeoutMs) {
-      timeout = setTimeout(() => controller.abort(wooError("E_TIMEOUT", `cross-host RPC timed out: ${host}${path}`, { host, path, timeout_ms: timeoutMs })), timeoutMs);
-    }
+    // Every cross-host RPC gets a deadline. Read-only callers pick a tight
+    // one (HOST_READ_RPC_TIMEOUT_MS via forwardInternalReadChecked); mutating
+    // callers fall back to the much more generous HOST_WRITE_RPC_TIMEOUT_MS
+    // watchdog so a wedged downstream can't park the slot — and the entire
+    // local task chain — indefinitely. The AbortController cancels both the
+    // queue wait and the underlying fetch on timeout; aborting mid-write
+    // can leave ambiguous remote state, but indefinite hang is the worse
+    // failure mode (the whole DO becomes unresponsive).
+    const timeoutMs = options.timeoutMs ?? this.hostWriteRpcTimeoutMs();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(wooError("E_TIMEOUT", `cross-host RPC timed out: ${host}${path}`, { host, path, timeout_ms: timeoutMs })), timeoutMs);
     let observedQueueMs = 0;
     try {
-      const { response, queueMs } = await this.outboundFetch(id, request, controller?.signal);
+      const { response, queueMs } = await this.outboundFetch(id, request, controller.signal);
       observedQueueMs = queueMs;
       const parsed = await response.json() as T;
       const queueField = observedQueueMs > 0 ? { queue_ms: observedQueueMs } : {};
@@ -2421,16 +2434,16 @@ export class PersistentObjectDO {
       const queueField = observedQueueMs > 0 ? { queue_ms: observedQueueMs } : {};
       // E_TIMEOUT lifted out of the abort reason so callers see the same shape
       // as before this refactor.
-      const isAbortTimeout = controller?.signal.aborted && (controller.signal.reason as { code?: string } | undefined)?.code === "E_TIMEOUT";
+      const isAbortTimeout = controller.signal.aborted && (controller.signal.reason as { code?: string } | undefined)?.code === "E_TIMEOUT";
       if (isAbortTimeout) {
         this.world?.recordMetric({ kind: "cross_host_rpc", route: path, host, ms: Date.now() - startedAt, status: "timeout", ...queueField });
-        throw controller!.signal.reason;
+        throw controller.signal.reason;
       }
       const error = normalizeError(err);
       this.world?.recordMetric({ kind: "cross_host_rpc", route: path, host, ms: Date.now() - startedAt, status: "error", error: error.code, ...queueField });
       throw err;
     } finally {
-      if (timeout !== undefined) clearTimeout(timeout);
+      clearTimeout(timeout);
     }
   }
 

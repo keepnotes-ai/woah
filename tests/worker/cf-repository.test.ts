@@ -1627,6 +1627,53 @@ describe("PersistentObjectDO outbound-fetch limiter", () => {
     }
   });
 
+  it("times out a wedged mutating cross-host RPC under the write watchdog", async () => {
+    // Mutating-route forever-hang protection: the comment-and-old-code path
+    // had no deadline at all, so a wedged downstream parked the local slot
+    // and the entire task chain forever. The write watchdog fires at
+    // WOO_HOST_WRITE_TIMEOUT_MS and surfaces an E_TIMEOUT to the caller —
+    // ambiguous remote state is preferable to indefinite hang.
+    let aborted = false;
+    let fetchSettled = false;
+    const release = defer<void>();
+    const state = new FakeDurableObjectState("write-watchdog-test");
+    const env = {
+      WOO_INITIAL_WIZARD_TOKEN: "limiter-test-token",
+      WOO_INTERNAL_SECRET: "limiter-test-secret",
+      WOO_AUTO_INSTALL_CATALOGS: "",
+      WOO_HOST_WRITE_TIMEOUT_MS: "60",
+      DIRECTORY: new FakeDurableObjectNamespace(() => ({ fetch: handler })),
+      WOO: new FakeDurableObjectNamespace(() => ({ fetch: handler }))
+    } as unknown as Env;
+    async function handler(request: Request): Promise<Response> {
+      request.signal.addEventListener("abort", () => { aborted = true; });
+      try {
+        await release.promise;
+      } finally {
+        fetchSettled = true;
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    const po = new PersistentObjectDO(state as unknown as DurableObjectState, env);
+    const helper = po as unknown as Helper;
+    try {
+      await expect(
+        helper.forwardInternal("hostA", "/__internal/remote-dispatch", { actor: "$wiz", verb: "say", args: ["hi"] })
+      ).rejects.toMatchObject({ code: "E_TIMEOUT" });
+      // The downstream fetch is aborted as part of the timeout, and the slot
+      // is released so the next mutating call isn't blocked behind the wedge.
+      expect(aborted).toBe(true);
+      expect(helper.outFetchInFlight).toBe(0);
+      expect(helper.outFetchQueue).toHaveLength(0);
+    } finally {
+      release.resolve();
+      // Wait one microtask so the handler can settle without leaking warnings.
+      await Promise.resolve();
+      expect(fetchSettled).toBe(true);
+      state.close();
+    }
+  });
+
   it("does not coalesce mutating routes even with byte-identical bodies", async () => {
     let fetchCount = 0;
     const { helper, cleanup } = buildDO({

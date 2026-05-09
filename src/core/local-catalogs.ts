@@ -81,6 +81,12 @@ const LOCAL_CATALOG_TASKSPACE_NOTE_SHAPE_MIGRATION = "2026-05-06-taskspace-note-
 // :moveto override that disperses the note when dropped into a $space.
 const LOCAL_CATALOG_NOTE_READ_COMMAND_REPAIR_MIGRATION = "2026-05-09-note-read-command-repair";
 const LOCAL_CATALOG_DISPENSED_NOTE_MOVETO_REPAIR_MIGRATION = "2026-05-09-dispensed-note-moveto-repair";
+// LambdaCore inheritance: $wiz isa $programmer isa $builder isa $player. woo
+// bootstrap creates $wiz with parent $player because $builder/$programmer
+// live in the prog catalog. Once prog is installed, this migration anchors
+// $wiz onto $programmer so command-shaped builder/programmer verbs
+// (e.g. $builder:@recycle) resolve via normal parent-chain verb lookup.
+const LOCAL_CATALOG_WIZ_PROGRAMMER_PARENT_MIGRATION = "2026-05-09-wiz-programmer-parent";
 const CATALOG_MIGRATION_RECORD_LIMIT = 200;
 
 export const DEFAULT_LOCAL_CATALOGS = bundledCatalogAliases();
@@ -138,7 +144,8 @@ const LOCAL_CATALOG_MIGRATION_INDEX: Array<{ id: string; only?: string }> = [
   { id: LOCAL_CATALOG_DISPENSER_STALE_CLASS_VERBS_MIGRATION, only: "dispenser" },
   { id: LOCAL_CATALOG_TASKSPACE_NOTE_SHAPE_MIGRATION, only: "taskspace" },
   { id: LOCAL_CATALOG_NOTE_READ_COMMAND_REPAIR_MIGRATION, only: "note" },
-  { id: LOCAL_CATALOG_DISPENSED_NOTE_MOVETO_REPAIR_MIGRATION, only: "dispenser" }
+  { id: LOCAL_CATALOG_DISPENSED_NOTE_MOVETO_REPAIR_MIGRATION, only: "dispenser" },
+  { id: LOCAL_CATALOG_WIZ_PROGRAMMER_PARENT_MIGRATION, only: "prog" }
 ];
 
 export function bundledCatalogAliases(): string[] {
@@ -375,6 +382,7 @@ function runLocalCatalogMigrations(world: WooWorld, names: readonly string[], cl
   run(LOCAL_CATALOG_NOTE_READ_COMMAND_REPAIR_MIGRATION, { allowImplementationHints: true, reconcileClassVerbs: true, only: "note" });
   run(LOCAL_CATALOG_DISPENSED_NOTE_MOVETO_REPAIR_MIGRATION, { allowImplementationHints: true, reconcileClassVerbs: true, only: "dispenser" });
   runTaskspaceNoteShapeMigration(world, names);
+  runWizProgrammerParentMigration(world, names);
   return covered;
 }
 
@@ -558,6 +566,28 @@ function runDropSessionIdPropertyMigration(world: WooWorld): void {
     }
   }
   markMigrationApplied(world, LOCAL_CATALOG_DROP_SESSION_ID_PROPERTY_MIGRATION);
+}
+
+function runWizProgrammerParentMigration(world: WooWorld, names: readonly string[]): void {
+  if (migrationApplied(world, LOCAL_CATALOG_WIZ_PROGRAMMER_PARENT_MIGRATION)) return;
+  // Only act when prog is in the migration scope (avoids reaching into $wiz's
+  // ancestry on hosts that haven't taken the prog catalog yet).
+  if (!names.includes("prog")) return;
+  if (!world.objects.has("$wiz") || !world.objects.has("$programmer")) {
+    markMigrationApplied(world, LOCAL_CATALOG_WIZ_PROGRAMMER_PARENT_MIGRATION);
+    return;
+  }
+  if (world.isDescendantOf("$wiz", "$programmer")) {
+    markMigrationApplied(world, LOCAL_CATALOG_WIZ_PROGRAMMER_PARENT_MIGRATION);
+    return;
+  }
+  // chparentAuthoredObject runs the same gates as a wizard would: $wiz owns
+  // $wiz, $wiz can author its own parent change, and the cycle check confirms
+  // $programmer doesn't already inherit from $wiz. The reparent is the whole
+  // migration — descendants of $wiz pick up $programmer's verbs through the
+  // ordinary inheritance chain.
+  world.chparentAuthoredObject("$wiz", "$wiz", "$programmer");
+  markMigrationApplied(world, LOCAL_CATALOG_WIZ_PROGRAMMER_PARENT_MIGRATION);
 }
 
 function runDropPresenceInPropertyMigration(world: WooWorld): void {

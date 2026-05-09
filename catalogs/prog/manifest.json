@@ -1,10 +1,10 @@
 {
   "name": "prog",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "spec_version": "v1",
   "description": "Builder and programmer tooling. The same world is the IDE: tools inspect and mutate the live object graph, with no design-time/runtime split. The catalog deliberately preserves LambdaCore's builder/programmer authority split by installing them as player classes. Builder class membership exposes object/data tools. Programmer class membership exposes source/metadata tools, while progbit and wizbit remain the hard authority facts.",
   "license": "MIT",
-  "depends": ["@local:perm"],
+  "depends": ["@local:perm", "@local:chat"],
   "classes": [
     {
       "local_name": "$builder",
@@ -67,6 +67,18 @@
           "tool_exposed": true,
           "arg_spec": { "args": ["id", "opts?"] },
           "source": "verb :recycle(id, opts) rxd {\n  // The substrate `recycle()` builtin gates on the verb's effective\n  // principal (progr); this wrapper is catalog-owned, so progr is\n  // wizard. Two layers of defense are needed.\n  //\n  // Layer 1 — actor-side authority gate (LambdaCore @recycle pattern):\n  // route through the_perm so the auth rule lives in one place.\n  \"the_perm\":requires_perm(actor, id, \"only the owner or a wizard can recycle this object\");\n  // Layer 2 — strip user-intent wizard opts before forwarding. The\n  // substrate also gates force_reserved on actor (defense in depth at\n  // the substrate layer), but stripping here keeps the smuggle vector\n  // out of the substrate's parser entirely. force_reserved is the\n  // exclusive concern of $wiz:force_recycle.\n  let safe_opts = {};\n  if (typeof(opts) == \"map\") {\n    for k in keys(opts) {\n      if (k != \"force_reserved\") { safe_opts[k] = opts[k]; }\n    }\n  }\n  let result = recycle(id, safe_opts);\n  if (result[\"ok\"] && !result[\"dry_run\"]) {\n    observe({ type: \"builder_recycled\", actor: actor, id: id, ts: now() });\n  }\n  return result;\n}"
+        },
+        {
+          "name": "recycle_command",
+          "perms": "rxd",
+          "direct_callable": true,
+          "skip_presence_check": true,
+          "aliases": ["@recycle"],
+          "arg_spec": {
+            "args": ["dobjstr"],
+            "command": { "dobj": "any", "prep": "none", "iobj": "none", "args_from": ["dobjstr"] }
+          },
+          "source": "verb :recycle_command(dobjstr) rxd {\n  // LambdaCore $builder:@recycle (#630), faithfully ported. Divergences\n  // (1)–(3) are called out where they appear; aside from those the verb\n  // is line-for-line equivalent.\n  if (typeof(dobjstr) != \"string\" || dobjstr == \"\") {\n    tell(actor, \"Usage: @recycle <object>\");\n    return null;\n  }\n  // L2 Original: dobj = player:my_match_object(dobjstr).\n  // Divergence (1): woo's matcher is on $match (spec/semantics/match.md\n  // MA1), not on the player; the MA2 resolution rule mirrors LambdaCore's\n  // $string_utils:match_object.\n  let dobj = $match:match_object(dobjstr);\n  // L5-6 Original: $command_utils:object_match_failed handles both\n  // sentinels with a notify-and-bail. Divergence (2): woo has no\n  // $command_utils helper; the same logic is inline.\n  if (dobj == $failed_match) {\n    tell(actor, \"I don't see '\" + dobjstr + \"' here.\");\n    return null;\n  }\n  if (dobj == $ambiguous_match) {\n    tell(actor, \"I don't know which '\" + dobjstr + \"' you mean.\");\n    return null;\n  }\n  // L7-8 Self-recycle. Original reads $wiz_utils.suicide_string; woo\n  // doesn't carry that property, so a static line stands in.\n  if (actor == dobj) {\n    tell(actor, \"You can't recycle yourself.\");\n    return null;\n  }\n  // L9-10 Original: !$perm_utils:controls(player, dobj) -> notify(E_PERM).\n  // Divergence (3): woo routes the same owner-or-wizard rule through\n  // the_perm so the auth gate lives in one place; the_perm raises E_PERM\n  // and the chat layer renders it.\n  \"the_perm\":requires_perm(actor, dobj, \"only the owner or a wizard can recycle this object\");\n  // L1 set_task_perms(player) is omitted: woo's substrate authority gates\n  // on `actor` and `progr` directly, and recycle() re-checks RC2 on entry.\n  // L12-17 Capture name, recycle, notify with paste-able id.\n  let name = dobj.name;\n  let result = recycle(dobj, {});\n  if (typeof(result) != \"map\" || !result[\"ok\"]) {\n    tell(actor, \"Recycle failed: \" + to_string(result));\n    return result;\n  }\n  tell(actor, name + \" (#\" + dobj + \") recycled.\");\n  return result;\n}"
         },
         {
           "name": "set_property",

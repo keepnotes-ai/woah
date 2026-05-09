@@ -77,7 +77,7 @@ implicit so the array compresses well over the wire.
   "timezone": "America/New_York",
   "units":    "imperial",
   "t0":       1714656000000,        // epoch ms of every field's index 0
-  "step":     3600000,              // ms between samples (always 1 hour for v0.2)
+  "step":     3600000,              // ms between samples (always 1 hour for v1)
   "fields": {
     "temperature":      { "unit": "°F",   "agg": "mean", "values": [62.1, 61.7, /* ... */] },
     "temperature_apparent": { "unit": "°F", "agg": "mean", "values": [/* ... */] },
@@ -159,7 +159,7 @@ temperature.
 A `block-detail` surface component (not yet shipped) will read
 `timeseries` and render a multi-line d3 chart spanning the past week
 through the next week, with the now-line positioned from `anchor`. Chart
-work is tracked separately; it is not part of this v0.2 schema landing.
+work is tracked separately; it is not part of the v1 schema landing.
 
 ## Connection mode
 
@@ -187,26 +187,28 @@ Per-tick API calls: 3 (realtime + forecast + history). Hourly cron:
 many more if the cron is dropped to every 3-4 hours. The plug surfaces
 429 with `retry-after` so degradation is graceful.
 
-## Migration from v0.1.x
+## Migration from v0.x to v1
 
-v0.2.0 replaces the property surface:
+The v1.0.0 manifest replaces the property surface:
 
-- **Removed** — `forecast`, `history`, `forecast_hours` (and the
-  `set_forecast_hours` verb). `forecast_hours` was a v0.1 knob;
-  the v0.2 window is fixed at ±7 days.
+- **Removed** — `forecast`, `history`, `forecast_hours` properties and
+  the `set_forecast_hours` verb. `forecast_hours` was a v0 knob; the v1
+  window is fixed at ±7 days.
 - **Reshaped** — `current` was `{kind: "scalar", value, unit, label, weather_code, observed_at, observed_at_text?}`;
   it is now `{temperature, temperature_unit, humidity, weather_code, observed_at, observed_at_text}`.
   Verbs (`weather_line`, `look_self`) read `current.temperature` /
   `current.temperature_unit` instead of `current.value` / `current.unit`.
-- **Added** — `daily` (list<map>), `timeseries` (map).
+  No transform step ships — the plug rewrites `current` on its next tick;
+  in the interim `:weather_line` falls back to "no current reading yet".
+- **Added** — `daily` (list<map>), `timeseries` (map),
+  `dew_point` and `cloud_cover` fields inside `timeseries.fields`.
 
-Pre-1.0 minor bump (`0.1.x` → `0.2.0`) — the catalog migrations guard
-only requires a `migration-vN-to-v(N+1).json` file at major-version bumps,
-so no migration file is mandated. Existing local-boot reseeds the property
-defaults; live values for the dropped/reshaped props are inert and can be
-dropped on the next world refresh.
+This is a major-version bump (`0.x` → `1.0.0`); the catalog migrations
+guard requires `migration-v0-to-v1.json` next to this DESIGN. The
+migration drops the four dead surface elements via `drop_property` and
+`drop_verb` steps so already-installed worlds don't keep stale state.
 
-## Out of scope for v0.2
+## Out of scope for v1
 
 - The d3 detail-chart UI module (schema only this round).
 - Multiple places per block (one block, one location; spawn another

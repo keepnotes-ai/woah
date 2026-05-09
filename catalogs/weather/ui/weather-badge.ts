@@ -36,6 +36,11 @@ export class WooWeatherBadgeElement extends HTMLElement {
 
   connectedCallback(): void {
     this.addEventListener("click", this.handleClick);
+    // role="button" + tabindex on a non-button element means the browser
+    // makes it focusable but does NOT auto-fire click on Enter/Space —
+    // we wire that ourselves. Without this the badge is reachable by
+    // keyboard but un-activatable, which fails accessibility.
+    this.addEventListener("keydown", this.handleKeydown);
     this.openListener = (event: Event) => {
       const detail = (event as CustomEvent).detail;
       // An open trigger fired anywhere on the page; if it names this
@@ -54,10 +59,20 @@ export class WooWeatherBadgeElement extends HTMLElement {
       this.openListener = null;
     }
     this.removeEventListener("click", this.handleClick);
+    this.removeEventListener("keydown", this.handleKeydown);
   }
 
   private handleClick = (event: Event): void => {
     // Don't re-trigger via the chart's own internal clicks.
+    if ((event.target as HTMLElement | null)?.closest(".weather-chart-dialog")) return;
+    event.preventDefault();
+    this.openChart();
+  };
+
+  private handleKeydown = (event: KeyboardEvent): void => {
+    if (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar") return;
+    // Ignore key activations bubbled up from the chart's controls
+    // (close button, etc.) so Enter inside the dialog doesn't reopen it.
     if ((event.target as HTMLElement | null)?.closest(".weather-chart-dialog")) return;
     event.preventDefault();
     this.openChart();

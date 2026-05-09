@@ -40,7 +40,12 @@ describe("bundled catalog UI components", () => {
     expect(registry.componentsForSurface("title-badge").map((component) => component.declaration.tag)).toContain("woo-weather-badge");
 
     const weatherBadge = registry.componentsForSurface("title-badge").find((component) => component.declaration.tag === "woo-weather-badge");
-    expect(weatherBadge?.declaration.requires).toEqual(expect.arrayContaining(["current", "config_state"]));
+    // The badge launches the chart overlay, so its required projection
+    // fields must include everything the chart consumes — otherwise the
+    // chart opens with stale/empty data on a normal room load.
+    expect(weatherBadge?.declaration.requires).toEqual(expect.arrayContaining([
+      "current", "daily", "timeseries", "config_state", "place", "timezone", "last_error"
+    ]));
   });
 
   it("renders the weather title badge from current block data", async () => {
@@ -133,6 +138,43 @@ describe("bundled catalog UI components", () => {
     // Close button closes.
     dialog!.querySelector<HTMLButtonElement>("[data-weather-close]")?.click();
     expect(dialog!.open).toBe(false);
+  });
+
+  it("badge activates the chart on Enter and Space (not just click)", async () => {
+    const { WooWeatherBadgeElement } = await import("../catalogs/weather/ui/weather-badge");
+    const { WooWeatherChartElement } = await import("../catalogs/weather/ui/weather-chart");
+    defineOnce("woo-weather-badge", WooWeatherBadgeElement);
+    defineOnce("woo-weather-chart", WooWeatherChartElement);
+    const badge = document.createElement("woo-weather-badge") as HTMLElement & { data?: any; chart?: HTMLElement };
+    document.body.appendChild(badge);
+    badge.data = {
+      id: "the_weather",
+      props: {
+        place: "X",
+        config_state: { status: "confirmed" },
+        current: { temperature: 60, temperature_unit: "°F", weather_code: 1000 },
+        timeseries: { anchor: Date.parse("2026-05-09T12:00:00Z"), t0: Date.parse("2026-05-09T12:00:00Z") - 168 * 3_600_000, step: 3_600_000, units: "imperial", fields: {} },
+        daily: []
+      }
+    };
+    // Earlier tests in this file leave their dialog elements in the
+    // shared jsdom document; scope this assertion to the chart created
+    // by THIS badge so we don't read stale state.
+    const ownDialog = () => (badge as any).chart?.querySelector(".weather-chart-dialog") as HTMLDialogElement | null;
+
+    // Enter on the focused badge opens the chart.
+    badge.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    expect(ownDialog()?.open).toBe(true);
+    ownDialog()!.removeAttribute("open");
+
+    // Space also activates.
+    badge.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true }));
+    expect(ownDialog()?.open).toBe(true);
+    ownDialog()!.removeAttribute("open");
+
+    // Other keys do nothing.
+    badge.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true, cancelable: true }));
+    expect(ownDialog()?.open).toBe(false);
   });
 
   it("symmetric daily slice yields today ± max(past, fwd) with placeholders for missing dates", async () => {

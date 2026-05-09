@@ -1,6 +1,6 @@
 ---
 name: weather
-version: 0.2.0
+version: 1.0.0
 spec_version: v1
 license: MIT
 description: Weather block class — a $block subclass driven by an external plug that fetches tomorrow.io and pushes a flat current scalar, a 14-entry per-day rollup, and a column-major hourly time-series spanning the past week through the next week.

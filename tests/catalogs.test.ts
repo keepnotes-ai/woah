@@ -3417,7 +3417,7 @@ describe("local catalogs", () => {
       expect(world.getProp("the_weather", "place")).toBe("Mountain View CA");
       expect(world.getProp("the_weather", "timezone")).toBe("America/Los_Angeles");
       expect(world.getProp("the_weather", "units")).toBe("imperial");
-      // v0.2 dropped forecast_hours; the window is now fixed at ±7 days.
+      // v1 dropped forecast_hours; the window is now fixed at ±7 days.
       expect(() => world.getProp("the_weather", "forecast_hours")).toThrow(/forecast_hours/);
       world.setProp("the_weather", "current", { temperature: 72, temperature_unit: "°F", humidity: 60, weather_code: 1000, observed_at: Date.parse("2026-05-06T16:01:00Z"), observed_at_text: "May 6, 2026, 9:01 AM PDT", observed_timezone: "America/Los_Angeles" });
       world.setProp("the_weather", "last_pushed_at", 1778073000000);
@@ -3746,11 +3746,88 @@ describe("local catalogs", () => {
       expect(entry?.title).not.toContain("abcdefghij");
     });
 
+    it("$weather_block migration v0 → v1 drops forecast/history/forecast_hours and set_forecast_hours", async () => {
+      const world = createWorld({ catalogs: false });
+
+      // Synthetic v0 surface — the props and verb the v1 manifest retired.
+      const v0: RuntimeCatalogManifest = {
+        name: "weather",
+        version: "0.2.0",
+        spec_version: "v1",
+        classes: [
+          {
+            local_name: "$weather_block",
+            parent: "$thing",
+            properties: [
+              { name: "place", type: "str", default: "" },
+              { name: "current", type: "map", default: {} },
+              { name: "forecast", type: "map", default: {} },
+              { name: "history", type: "map", default: {} },
+              { name: "forecast_hours", type: "int", default: 12 }
+            ],
+            verbs: [
+              {
+                name: "set_forecast_hours",
+                perms: "rx",
+                arg_spec: { args: ["hours"] },
+                source: "verb :set_forecast_hours(hours) rx { return hours; }"
+              }
+            ]
+          }
+        ],
+        seed_hooks: [
+          {
+            kind: "create_instance",
+            class: "$weather_block",
+            as: "weather_demo_block",
+            properties: { forecast_hours: 24, forecast: { kind: "series" } }
+          }
+        ]
+      };
+      installCatalogManifest(world, v0, { tap: "@local", alias: "weather" });
+      expect(world.getProp("weather_demo_block", "forecast_hours")).toBe(24);
+      expect(world.ownVerbExact("$weather_block", "set_forecast_hours")).toBeDefined();
+
+      const migration = JSON.parse(
+        readFileSync(join(root, "weather", "migration-v0-to-v1.json"), "utf8")
+      ) as { from_version: string; to_version: string; spec_version: string; steps: unknown[] };
+
+      // Minimal v1 shell — assertion is on the migration's drop_property /
+      // drop_verb steps, not on a full v1 reinstall (the seed/verb surface
+      // is exercised by the "installs cleanly" test above).
+      const v1: RuntimeCatalogManifest = {
+        name: "weather",
+        version: "1.0.0",
+        spec_version: "v1",
+        classes: [{ local_name: "$weather_block", parent: "$thing", properties: [{ name: "current", type: "map", default: {} }] }]
+      };
+      const record = updateCatalogManifest(world, v1, {
+        tap: "@local",
+        alias: "weather",
+        acceptMajor: true,
+        migration: migration as NonNullable<Parameters<typeof updateCatalogManifest>[2]>["migration"]
+      });
+
+      expect(record.migration_state).toMatchObject({
+        status: "completed",
+        completed_steps: expect.arrayContaining([
+          "1:drop_property:$weather_block.forecast",
+          "2:drop_property:$weather_block.history",
+          "3:drop_property:$weather_block.forecast_hours",
+          "4:drop_verb:$weather_block:set_forecast_hours"
+        ])
+      });
+      expect(world.ownVerbExact("$weather_block", "set_forecast_hours")).toBeNull();
+      expect(world.propOrNull("weather_demo_block", "forecast")).toBeNull();
+      expect(world.propOrNull("weather_demo_block", "history")).toBeNull();
+      expect(world.propOrNull("weather_demo_block", "forecast_hours")).toBeNull();
+    });
+
     it("$weather_block installs cleanly and ships the configured tier lists", async () => {
       const world = createWorld({ catalogs: false });
       installLocalCatalogs(world, ["weather"]);
       expect(world.object("$weather_block").flags.fertile).toBe(true);
-      // v0.2 surface: forecast/history/forecast_hours dropped, daily/timeseries added.
+      // v1 surface: forecast/history/forecast_hours dropped, daily/timeseries added.
       expect(world.getProp("$weather_block", "writable_owner")).toEqual(["place", "timezone", "units"]);
       expect(world.getProp("$weather_block", "writable_self")).toEqual(["last_pushed_at", "last_error", "current", "daily", "timeseries", "config_state"]);
       expect(world.ownVerbExact("$weather_block", "set_location")).toMatchObject({ direct_callable: true, tool_exposed: true });

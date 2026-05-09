@@ -1,6 +1,6 @@
 {
   "name": "weather",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "spec_version": "v1",
   "description": "Weather block class — a $block subclass that displays current conditions, a 14-day daily rollup, and a column-major hourly time-series payload for chart UIs. Owner sets `place`, `timezone`, and `units`; an external plug Worker (catalogs/weather/plug) fetches tomorrow.io on a schedule and pushes the bundle via apikey-bound session.",
   "license": "MIT",
@@ -23,7 +23,7 @@
         "neighborhood": {
           "include": ["subject"]
         },
-        "requires": ["current", "config_state", "place", "last_error"]
+        "requires": ["current", "daily", "timeseries", "config_state", "place", "timezone", "last_error"]
       },
       {
         "id": "weather.chart",

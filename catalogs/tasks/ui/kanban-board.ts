@@ -1350,12 +1350,25 @@ export class WooTasksKanbanElement extends HTMLElement {
         </div>
       </section>
     `;
+    const existingChatPanel = this.querySelector<HTMLElement & { dataset: DOMStringMap; remove: () => void }>(
+      "[data-space-chat-shell] [data-space-chat-panel]"
+    );
+    if (existingChatPanel && existingChatPanel.dataset.spaceChatSpace !== registryId) {
+      existingChatPanel.remove();
+    }
+    const preservedPanel = this.querySelector<HTMLElement & { dataset: DOMStringMap; remove: () => void }>(
+      "[data-space-chat-shell] [data-space-chat-panel]"
+    );
     this.innerHTML = `
-      <section class="space-chat-shell" data-space-chat-shell="${escapeHtml(registryId)}">
+      <section class="space-chat-shell tasks-space-chat-shell" data-space-chat-shell="${escapeHtml(registryId)}">
         ${board}
         <div data-tool-space-chat></div>
       </section>
     `;
+    if (preservedPanel) {
+      const slot = this.querySelector<HTMLElement>("[data-tool-space-chat]");
+      if (slot) slot.append(preservedPanel);
+    }
     this.dispatchEvent(new CustomEvent("woo-tasks-rendered", { bubbles: true }));
   }
 
@@ -1418,7 +1431,7 @@ export class WooTasksKanbanElement extends HTMLElement {
       ? `<input class="woo-tasks-detail-name-input" type="text" name="name" value="${escapeHtml(draft?.name ?? detailName)}" placeholder="Task name" required autocomplete="off">`
       : `<span class="woo-tasks-detail-name">${escapeHtml(detailName || detailId)}</span>`;
     const editToggle = (!isNew && !editing)
-      ? `<button type="button" data-tasks-detail-edit-toggle class="woo-tasks-detail-edit-toggle">Edit</button>`
+      ? `<button type="button" data-tasks-detail-edit-toggle class="woo-tasks-detail-edit-toggle woo-tasks-action">Edit</button>`
       : "";
 
     const policyOptions = this.model.policies
@@ -1455,7 +1468,7 @@ export class WooTasksKanbanElement extends HTMLElement {
 
     const formActions = (isNew || editing)
       ? `<div class="woo-tasks-detail-actions">
-          <button type="button" data-tasks-detail-cancel>Cancel</button>
+          <button type="button" data-tasks-detail-cancel class="woo-tasks-action">Cancel</button>
           <button type="submit" class="woo-tasks-primary-action">${isNew ? "Create" : "Save"}</button>
         </div>`
       : "";
@@ -1616,7 +1629,7 @@ export class WooTasksKanbanElement extends HTMLElement {
         : `<table class="woo-tasks-admin-table">
             <thead><tr><th>Name</th><th>Description</th><th>Owners</th></tr></thead>
             <tbody>${roles.map((r) => `
-              <tr data-tasks-admin-row data-tasks-admin-section="role" data-key="${escapeHtml(r.name)}">
+              <tr tabindex="0" role="button" aria-label="Open role ${escapeHtml(r.name)}" data-tasks-admin-row data-tasks-admin-section="role" data-key="${escapeHtml(r.name)}">
                 <td>${escapeHtml(r.name)}</td>
                 <td>${escapeHtml(r.description || "—")}</td>
                 <td>${escapeHtml(r.owners.join(", ") || "(no owners)")}</td>
@@ -1628,7 +1641,7 @@ export class WooTasksKanbanElement extends HTMLElement {
           : `<table class="woo-tasks-admin-table">
               <thead><tr><th>Key</th><th>Role</th><th>Criterion</th></tr></thead>
               <tbody>${obligations.map((o) => `
-                <tr data-tasks-admin-row data-tasks-admin-section="obligation" data-key="${escapeHtml(o.key)}">
+                <tr tabindex="0" role="button" aria-label="Open obligation ${escapeHtml(o.key)}" data-tasks-admin-row data-tasks-admin-section="obligation" data-key="${escapeHtml(o.key)}">
                   <td>${escapeHtml(o.key)}</td>
                   <td>${escapeHtml(o.role || "—")}</td>
                   <td>${escapeHtml(o.criterion || "—")}</td>
@@ -1639,7 +1652,7 @@ export class WooTasksKanbanElement extends HTMLElement {
           : `<table class="woo-tasks-admin-table">
               <thead><tr><th>Task kind</th><th>Obligation order</th></tr></thead>
               <tbody>${Object.entries(policiesMap).map(([kind, keys]) => `
-                <tr data-tasks-admin-row data-tasks-admin-section="policy" data-key="${escapeHtml(kind)}">
+                <tr tabindex="0" role="button" aria-label="Open policy ${escapeHtml(kind)}" data-tasks-admin-row data-tasks-admin-section="policy" data-key="${escapeHtml(kind)}">
                   <td>${escapeHtml(kind)}</td>
                   <td>${escapeHtml(keys.join(" → ") || "(empty)")}</td>
                 </tr>`).join("")}</tbody>
@@ -1660,7 +1673,7 @@ export class WooTasksKanbanElement extends HTMLElement {
           </div>
           <div class="woo-tasks-admin-listhead">
             <h3>${escapeHtml(tabs.find((tab) => tab.key === section)?.label ?? "Admin")}</h3>
-            <button type="button" class="woo-tasks-primary-action" data-tasks-admin-new="${escapeHtml(section)}">New</button>
+            <button type="button" class="woo-tasks-action" data-tasks-admin-new="${escapeHtml(section)}">New</button>
           </div>
           ${this.renderAdminStatus(section)}
           <div class="woo-tasks-admin-tablewrap">${table}</div>
@@ -1688,7 +1701,7 @@ export class WooTasksKanbanElement extends HTMLElement {
             <label class="woo-tasks-admin-view-field"><span>Description</span><p>${escapeHtml(this.adminDrafts.role.description || "—")}</p></label>
             <label class="woo-tasks-admin-view-field"><span>Owners</span><p>${escapeHtml(this.adminDrafts.role.owners || "—")}</p></label>
             <div class="woo-tasks-admin-form-actions">
-              <button type="button" data-tasks-admin-edit="${escapeHtml(editing.section)}" data-key="${escapeHtml(editing.key)}">Edit</button>
+              <button type="button" class="woo-tasks-action" data-tasks-admin-edit="${escapeHtml(editing.section)}" data-key="${escapeHtml(editing.key)}">Edit</button>
               ${remove}
             </div>
           </section>`
@@ -1698,7 +1711,7 @@ export class WooTasksKanbanElement extends HTMLElement {
               <label class="woo-tasks-admin-view-field"><span>Role</span><p>${escapeHtml(this.adminDrafts.obligation.role || "—")}</p></label>
               <label class="woo-tasks-admin-view-field"><span>Criterion</span><p>${escapeHtml(this.adminDrafts.obligation.criterion || "—")}</p></label>
               <div class="woo-tasks-admin-form-actions">
-                <button type="button" data-tasks-admin-edit="${escapeHtml(editing.section)}" data-key="${escapeHtml(editing.key)}">Edit</button>
+                <button type="button" class="woo-tasks-action" data-tasks-admin-edit="${escapeHtml(editing.section)}" data-key="${escapeHtml(editing.key)}">Edit</button>
                 ${remove}
               </div>
             </section>`
@@ -1706,7 +1719,7 @@ export class WooTasksKanbanElement extends HTMLElement {
               <label class="woo-tasks-admin-view-field"><span>Task kind</span><strong>${escapeHtml(this.adminDrafts.policy.kind || "—")}</strong></label>
               <label class="woo-tasks-admin-view-field"><span>Obligation order</span><p>${escapeHtml(this.adminDrafts.policy.keys || "—")}</p></label>
               <div class="woo-tasks-admin-form-actions">
-                <button type="button" data-tasks-admin-edit="${escapeHtml(editing.section)}" data-key="${escapeHtml(editing.key)}">Edit</button>
+                <button type="button" class="woo-tasks-action" data-tasks-admin-edit="${escapeHtml(editing.section)}" data-key="${escapeHtml(editing.key)}">Edit</button>
                 ${remove}
               </div>
             </section>`
@@ -1717,8 +1730,8 @@ export class WooTasksKanbanElement extends HTMLElement {
           <label>Owners<input type="text" name="owners" value="${escapeHtml(this.adminDrafts.role.owners)}" autocomplete="off"></label>
           <div class="woo-tasks-admin-form-actions">
             ${remove}
-            <button type="button" data-tasks-admin-edit-cancel>Cancel</button>
-            <button type="submit">Add / update</button>
+            <button type="button" data-tasks-admin-edit-cancel class="woo-tasks-action">Cancel</button>
+            <button type="submit" class="woo-tasks-action">Add / update</button>
           </div>
         </form>`
         : editing.section === "obligation"
@@ -1728,8 +1741,8 @@ export class WooTasksKanbanElement extends HTMLElement {
             <label>Criterion<input type="text" name="criterion" value="${escapeHtml(this.adminDrafts.obligation.criterion)}" required autocomplete="off"></label>
             <div class="woo-tasks-admin-form-actions">
               ${remove}
-              <button type="button" data-tasks-admin-edit-cancel>Cancel</button>
-              <button type="submit"${roleNames.length === 0 ? " disabled" : ""}>Add / update</button>
+              <button type="button" data-tasks-admin-edit-cancel class="woo-tasks-action">Cancel</button>
+              <button type="submit" class="woo-tasks-action"${roleNames.length === 0 ? " disabled" : ""}>Add / update</button>
             </div>
           </form>`
           : `<form class="woo-tasks-admin-form" data-tasks-admin-form="policy">
@@ -1737,8 +1750,8 @@ export class WooTasksKanbanElement extends HTMLElement {
             <label>Obligation order<input type="text" name="keys" placeholder="${obligationKeys.length ? `e.g. ${escapeHtml(obligationKeys.join(", "))}` : ""}" value="${escapeHtml(this.adminDrafts.policy.keys)}" required autocomplete="off"></label>
             <div class="woo-tasks-admin-form-actions">
               ${remove}
-              <button type="button" data-tasks-admin-edit-cancel>Cancel</button>
-              <button type="submit"${obligationKeys.length === 0 ? " disabled" : ""}>Add / update</button>
+            <button type="button" data-tasks-admin-edit-cancel class="woo-tasks-action">Cancel</button>
+            <button type="submit" class="woo-tasks-action"${obligationKeys.length === 0 ? " disabled" : ""}>Add / update</button>
             </div>
             </form>`;
     return `
@@ -1829,8 +1842,8 @@ export class WooTasksKanbanElement extends HTMLElement {
         <div class="woo-tasks-prompt-header">${escapeHtml(action.label)}</div>
         ${fields}
         <div class="woo-tasks-prompt-actions">
-          <button type="submit" data-tasks-prompt-submit>Submit</button>
-          <button type="button" data-tasks-prompt-cancel>Cancel</button>
+          <button type="submit" data-tasks-prompt-submit class="woo-tasks-action">Submit</button>
+          <button type="button" data-tasks-prompt-cancel class="woo-tasks-action">Cancel</button>
         </div>
       </form>
     `;

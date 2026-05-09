@@ -36,6 +36,7 @@ export type SpaceChatPanelData = {
   lines: ChatLine[];
   draft: string;
   height: number;
+  collapsed: boolean;
 };
 
 type ActorLabeler = (id: string | undefined) => string;
@@ -175,12 +176,14 @@ export class WooSpaceChatPanelElement extends HTMLElement {
     space: "",
     lines: [],
     draft: "",
-    height: 280
+    height: 280,
+    collapsed: false
   };
   private collapsed = false;
 
   set data(value: SpaceChatPanelData) {
     this.model = value;
+    this.collapsed = value.collapsed;
     this.render();
   }
 
@@ -237,6 +240,7 @@ export class WooSpaceChatPanelElement extends HTMLElement {
     const space = this.model.space || this.subject || this.dataset.spaceChatSpace || "";
     this.querySelector<HTMLButtonElement>("[data-space-chat-toggle]")?.addEventListener("click", () => {
       this.collapsed = !this.collapsed;
+      this.dispatch("collapse", { space, collapsed: this.collapsed });
       this.render();
     });
     if (this.collapsed) return;

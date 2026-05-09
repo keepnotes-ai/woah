@@ -112,7 +112,8 @@ describe("chat catalog UI components", () => {
       spaceName: "Pinboard",
       lines: [{ kind: "emoted", actor: "guest_2", text: "waves" }],
       draft: "mini",
-      height: 160
+      height: 160,
+      collapsed: false
     };
 
     expect(element.dataset.spaceChatSpace).toBe("the_pinboard");

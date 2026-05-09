@@ -1252,9 +1252,17 @@ input[type="range"] {
 }
 
 .pinboard-layout.has-space-chat {
-  height: auto;
+  height: 100%;
   min-height: 0;
   overflow: hidden;
+}
+
+.pinboard-toolbar {
+  min-height: 2.125rem;
+}
+
+.tasks-space-chat-shell {
+  margin-top: 3.125rem;
 }
 
 .space-chat-shell {
@@ -1803,6 +1811,24 @@ input[type="range"] {
   color: var(--color-surface);
 }
 
+.woo-tasks-action {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-surface);
+}
+
+.woo-tasks-primary-action:hover,
+.woo-tasks-action:hover {
+  background: var(--color-accent-hover);
+  color: var(--color-surface);
+}
+
+.woo-tasks-primary-action:focus-visible,
+.woo-tasks-action:focus-visible {
+  outline: 2px solid var(--color-accent-hover);
+  outline-offset: 1px;
+}
+
 .woo-tasks-kanban-groupby {
   display: inline-grid;
   grid-template-columns: auto minmax(6.5rem, auto);
@@ -1810,6 +1836,7 @@ input[type="range"] {
   align-items: center;
   color: var(--color-text-muted);
   font-size: 0.82rem;
+  min-width: 0;
 }
 
 .woo-tasks-workarea {
@@ -1840,7 +1867,7 @@ input[type="range"] {
 
 .woo-tasks-kanban-filterbar {
   display: grid;
-  grid-template-columns: minmax(12rem, 1fr) minmax(0, auto) auto auto auto;
+  grid-template-columns: minmax(12rem, 1.25fr) minmax(9rem, 0.9fr) minmax(0, 1fr) auto auto auto;
   gap: 0.45rem;
   align-items: center;
   padding: 0.55rem;
@@ -2475,10 +2502,12 @@ input[type="range"] {
   white-space: nowrap;
 }
 
-.woo-tasks-admin-table td:last-child,
-.woo-tasks-admin-table th:last-child {
-  width: 1%;
-  text-align: right;
+.woo-tasks-admin-table tbody tr {
+  cursor: pointer;
+}
+
+.woo-tasks-admin-table tbody tr:hover {
+  background: var(--color-surface-2);
 }
 
 .woo-tasks-admin-table button {
@@ -2503,6 +2532,29 @@ input[type="range"] {
 .woo-tasks-admin-form select,
 .woo-tasks-admin-form button {
   min-width: 0;
+}
+
+.woo-tasks-admin-view {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.woo-tasks-admin-view-field {
+  display: grid;
+  gap: 0.18rem;
+  color: var(--color-text);
+}
+
+.woo-tasks-admin-view-field span {
+  color: var(--color-text-muted);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.woo-tasks-admin-view-field p {
+  margin: 0;
+  color: var(--color-text);
+  white-space: pre-wrap;
 }
 
 .woo-tasks-admin-form-actions {
@@ -2935,15 +2987,6 @@ textarea {
   }
 }
 
-/* The default .space-chat-shell height (`100dvh - 5.25rem`) reserves 3.25rem
-   above the shell for a sibling toolbar, like pinboard's and dubspace's.
-   Tasks renders the title/header inside the shell instead, so the shell
-   should fill the full main content area (.main has 1rem padding on top
-   and bottom). Without this override the chat panel stops 3.25rem above
-   the viewport bottom. */
 woo-tasks-kanban {
   display: block;
-}
-woo-tasks-kanban > .space-chat-shell {
-  height: calc(100dvh - 2rem);
 }

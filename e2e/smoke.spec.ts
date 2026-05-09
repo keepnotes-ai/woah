@@ -172,6 +172,34 @@ test("tool tabs load scoped overlays without /api/state", async ({ page }) => {
   expect(stateCalls).toEqual([]);
 });
 
+test("space chat panel bottoms are visually aligned", async ({ page, request }) => {
+  const response = await request.post("/api/auth", { data: { token: "guest:e2e-chat-alignment" } });
+  expect(response.ok()).toBe(true);
+  const payload = await response.json() as { session?: string };
+  expect(payload.session).toBeTruthy();
+  const session = payload.session ?? "";
+  await page.addInitScript((nextSession: string) => {
+    localStorage.setItem("woo.session", nextSession);
+    sessionStorage.setItem("woo.session", nextSession);
+  }, session);
+  const measureBottom = async (target: string) => {
+    await page.goto(target);
+    const panel = page.locator("woo-space-chat-panel[data-space-chat-panel]");
+    await expect(panel).toBeVisible({ timeout: 5_000 });
+    return panel.evaluate((element) => Math.round(element.getBoundingClientRect().bottom));
+  };
+  const chatBottoms: Array<{ space: string; bottom: number }> = [
+    { space: "Dubspace", bottom: await measureBottom("/objects/the_dubspace") },
+    { space: "Pinboard", bottom: await measureBottom("/objects/the_pinboard") },
+    { space: "Taskboard", bottom: await measureBottom("/objects/the_taskboard") }
+  ];
+
+  const bottoms = chatBottoms.map((entry) => entry.bottom);
+  const max = Math.max(...bottoms);
+  const min = Math.min(...bottoms);
+  expect(max - min, `chat bottom mismatch: ${JSON.stringify(chatBottoms)}`).toBeLessThanOrEqual(2);
+});
+
 test("dubspace cue keeps loop controls local", async ({ page, request }) => {
   const sentFrames: string[] = [];
   page.on("websocket", (socket) => {
@@ -630,6 +658,18 @@ test("chat command enters dubspace UI", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Dubspace" })).toHaveClass(/active/);
   await expect(page.locator(".dubspace-presence")).toContainText(actor);
   await expect(page.getByRole("button", { name: "Leave" })).toBeVisible();
+});
+
+test("taskspace enters with chat focus", async ({ page }) => {
+  await page.goto("/");
+  const continueAsGuest = page.getByRole("button", { name: "Continue as guest" });
+  if (await continueAsGuest.isVisible()) {
+    await continueAsGuest.click();
+  }
+  await expect(page.locator(".actor")).not.toHaveText("connecting...", { timeout: 10_000 });
+  await page.getByRole("button", { name: "Tasks" }).click();
+  await expect(page.locator("[data-space-chat-input]")).toBeVisible({ timeout: 5_000 });
+  await expect(page.locator("[data-space-chat-input]")).toBeFocused();
 });
 
 test("taskspace supports hierarchical task workflow", async ({ page, request }) => {

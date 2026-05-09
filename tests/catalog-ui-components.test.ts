@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import chatManifest from "../catalogs/chat/manifest.json";
@@ -40,6 +42,32 @@ function testWooContext(names: Record<string, string> = {}): WooContext {
 }
 
 describe("bundled catalog UI components", () => {
+  it("keeps the chat-shell-enabled layouts vertically consistent across tools", () => {
+    const css = readFileSync(resolve(process.cwd(), "src/client/styles.css"), "utf8");
+    const pinboardMatch = css.match(/\.pinboard-layout\.has-space-chat\s*\{([\s\S]*?)\}/);
+    const dubspaceMatch = css.match(/\.dubspace-layout\.has-space-chat\s*\{([\s\S]*?)\}/);
+    const tasksMatch = css.match(/\.woo-tasks-workspace\.has-space-chat\s*\{([\s\S]*?)\}/);
+
+    expect(pinboardMatch, "pinboard has-space-chat rule present").not.toBeNull();
+    expect(dubspaceMatch, "dubspace has-space-chat rule present").not.toBeNull();
+    expect(tasksMatch, "tasks has-space-chat rule present").not.toBeNull();
+
+    const pinboardBlock = pinboardMatch?.[1] ?? "";
+    const dubspaceBlock = dubspaceMatch?.[1] ?? "";
+    const tasksBlock = tasksMatch?.[1] ?? "";
+
+    expect(pinboardBlock).toMatch(/height:\s*100%/);
+    expect(dubspaceBlock).toMatch(/height:\s*100%/);
+    expect(tasksBlock).toMatch(/height:\s*100%/);
+
+    const pinboardPanelMatch = pinboardBlock.match(/height:\s*([^;]+);/);
+    const dubspacePanelMatch = dubspaceBlock.match(/height:\s*([^;]+);/);
+    const tasksPanelMatch = tasksBlock.match(/height:\s*([^;]+);/);
+    expect(pinboardPanelMatch?.[1]).toBe("100%");
+    expect(dubspacePanelMatch?.[1]).toBe("100%");
+    expect(tasksPanelMatch?.[1]).toBe("100%");
+  });
+
   it("declares and resolves first-party tool frames", () => {
     const registry = new CatalogUiRegistry();
     expect(registry.installCatalogUi({ alias: "chat", catalog: "chat", objects: { "$space": "$space", "$chatroom": "$chatroom" }, ui: (chatManifest as any).ui })).toEqual([]);
@@ -287,6 +315,7 @@ describe("bundled catalog UI components", () => {
 
     // Remove buttons confirm first, then fire the matching remove_* verbs with the targeted key.
     element.querySelector<HTMLButtonElement>('[data-tasks-admin-tab="role"]')!.click();
+    element.querySelector<HTMLElement>('tr[data-tasks-admin-section="role"][data-key="doer"]')!.click();
     element.querySelector<HTMLButtonElement>('[data-tasks-admin-edit="role"][data-key="doer"]')!.click();
     expect(element.querySelector<HTMLButtonElement>('[data-tasks-admin-remove="role"][data-key="doer"]')).not.toBeNull();
     confirmSpy.mockReturnValueOnce(false);
@@ -297,9 +326,11 @@ describe("bundled catalog UI components", () => {
     confirmSpy.mockReturnValue(true);
     element.querySelector<HTMLButtonElement>('[data-tasks-admin-remove="role"][data-key="doer"]')!.click();
     element.querySelector<HTMLButtonElement>('[data-tasks-admin-tab="obligation"]')!.click();
+    element.querySelector<HTMLElement>('tr[data-tasks-admin-section="obligation"][data-key="do:it"]')!.click();
     element.querySelector<HTMLButtonElement>('[data-tasks-admin-edit="obligation"][data-key="do:it"]')!.click();
     element.querySelector<HTMLButtonElement>('[data-tasks-admin-remove="obligation"][data-key="do:it"]')!.click();
     element.querySelector<HTMLButtonElement>('[data-tasks-admin-tab="policy"]')!.click();
+    element.querySelector<HTMLElement>('tr[data-tasks-admin-section="policy"][data-key="task"]')!.click();
     element.querySelector<HTMLButtonElement>('[data-tasks-admin-edit="policy"][data-key="task"]')!.click();
     element.querySelector<HTMLButtonElement>('[data-tasks-admin-remove="policy"][data-key="task"]')!.click();
     await flush();
@@ -1055,6 +1086,68 @@ describe("bundled catalog UI components", () => {
     setGroup("state");
     const draggableCard = element.querySelector<HTMLElement>("[data-tasks-card]")!;
     expect(draggableCard.getAttribute("draggable")).toBe("true");
+  });
+
+  it("preserves an existing task-space chat panel across rerenders", async () => {
+    const { WooTasksKanbanElement } = await import("../catalogs/tasks/ui/kanban-board");
+    defineOnce("woo-tasks-kanban", WooTasksKanbanElement);
+    if (!customElements.get("woo-space-chat-panel")) {
+      customElements.define("woo-space-chat-panel", class extends HTMLElement {});
+    }
+    const element = document.createElement("woo-tasks-kanban") as HTMLElement & { woo?: WooContext; data?: any };
+    document.body.appendChild(element);
+
+    element.data = {
+      registryId: "the_taskboard",
+      registryName: "Taskboard",
+      actor: "guest_1",
+      actorNames: { guest_1: "Guest 1" },
+      tasks: [],
+      policies: [],
+      isOwner: false,
+      roles: [],
+      obligations: [],
+      policiesMap: {}
+    };
+
+    const slot = element.querySelector<HTMLElement>("[data-tool-space-chat]");
+    const existingPanel = document.createElement("woo-space-chat-panel");
+    existingPanel.setAttribute("data-space-chat-panel", "true");
+    existingPanel.setAttribute("data-space-chat-space", "the_taskboard");
+    slot?.append(existingPanel);
+    expect(element.querySelector<HTMLElement>("[data-space-chat-panel]")).toBe(existingPanel);
+
+    element.data = {
+      registryId: "the_taskboard",
+      registryName: "Taskboard",
+      actor: "guest_1",
+      actorNames: { guest_1: "Guest 1" },
+      tasks: [{
+        id: "obj_t_1",
+        name: "Next",
+        kind: "bug",
+        labels: [],
+        location: "the_taskboard",
+        cursorRole: null,
+        cursorKey: null,
+        cursorCriterion: null,
+        waitForCount: 0,
+        terminal: false,
+        complete: false,
+        linkCount: 0,
+        ageMs: 0,
+        lastChange: 0,
+        actions: []
+      }],
+      policies: [],
+      isOwner: false,
+      roles: [],
+      obligations: [],
+      policiesMap: {}
+    };
+    const rerenderedPanel = element.querySelector<HTMLElement>("[data-space-chat-panel]");
+    expect(rerenderedPanel).toBe(existingPanel);
+    expect(element.querySelector<HTMLElement>("[data-space-chat-panel]")).toBe(existingPanel);
   });
 
   it("filters by free-text search and label chips", async () => {

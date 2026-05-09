@@ -41,6 +41,7 @@ type AppState = {
   chatDraft: string;
   spaceChatDrafts: Record<string, string>;
   spaceChatHeights: Record<string, number>;
+  spaceChatCollapsed: boolean;
   observations: any[];
   observationsCollapsed: boolean;
   selectedObject: string;
@@ -134,6 +135,7 @@ const state: AppState = {
   chatDraft: "",
   spaceChatDrafts: {},
   spaceChatHeights: {},
+  spaceChatCollapsed: false,
   observations: [],
   observationsCollapsed: true,
   selectedObject: "",
@@ -163,6 +165,7 @@ const chatHistoryKey = "woo.chat.history";
 const pinboardNewColorKey = "woo.pinboard.newColor";
 const legacyPinboardChatHeightKey = "woo.pinboard.chatHeight";
 const spaceChatHeightsKey = "woo.spaceChat.heights";
+const spaceChatCollapsedKey = "woo.spaceChat.collapsed";
 const scopedProjectionSmokeEnabled = new URLSearchParams(location.search).has("scopedProjectionSmoke");
 let scopedProjectionEnabled = (() => {
   const params = new URLSearchParams(location.search);
@@ -226,6 +229,7 @@ const PINBOARD_OPTIMISTIC_TTL_MS = 5_000;
 let pinboardTextHydrationRequestedBoard = "";
 let pinboardTextHydrationRequestedSignature = "";
 let pinboardTextHydrationRequested = false;
+let focusTasksChatOnEntry = false;
 let catalogUiEtag = "";
 let catalogUiCache: any;
 const installedCatalogUiAliases = new Set<string>();
@@ -235,6 +239,8 @@ let chatHistoryDraft = "";
 let startupRoute: RouteLocation | null = parseLocationRoute(location.pathname, location.search);
 let routeInitialized = false;
 state.spaceChatHeights = loadSpaceChatHeights();
+const persistedSpaceChatCollapsed = readStorage(spaceChatCollapsedKey);
+state.spaceChatCollapsed = persistedSpaceChatCollapsed === "1" || persistedSpaceChatCollapsed === "true";
 
 installBundledCatalogUi();
 state.authStatus = readStorage(sessionKey) ? "authenticated" : "anonymous";
@@ -809,11 +815,17 @@ function setTab(tab: AppState["tab"], options: { mode?: "replace" | "push"; leav
   const mode = options.mode ?? "push";
   const leaveCurrent = options.leaveCurrent ?? true;
   const current = state.tab;
+  if (current === "tasks" && tab !== "tasks") {
+    focusTasksChatOnEntry = false;
+  } else if (current !== "tasks" && tab === "tasks") {
+    focusTasksChatOnEntry = true;
+  }
   const finalize = () => {
     if (state.tab !== tab) state.tab = tab;
     syncUrlFromCurrentState(mode);
     if (typeof done === "function") done();
     render();
+    requestTasksChatFocusIfPending();
     if (scopedProjectionEnabled && tab !== "chat" && tab !== "ide") {
       void ensureScopedOverlayForTab(tab).then(() => {
         if (state.tab === tab) render();
@@ -2463,6 +2475,22 @@ function dubspaceOperators(): string[] {
 function mountToolSpaceChat(element: HTMLElement, space: string) {
   const slot = element.querySelector<HTMLElement>("[data-tool-space-chat]");
   if (!slot || !space) return;
+  const existing = slot.querySelector<HTMLElement & WooElement & { data?: SpaceChatPanelData }>(`[data-space-chat-panel]`);
+  if (existing && existing.dataset.spaceChatSpace === space) {
+    const lines = chatLinesForSpace(space);
+    existing.subject = space;
+    existing.woo = createChatWooContext(space, chatLineActorRefs(lines));
+    setCustomElementData(existing, {
+      space,
+      spaceName: projectedObjectView(space)?.name ?? objectName(state.world, space),
+      lines,
+      draft: spaceChatDraft(space),
+      height: Math.round(spaceChatHeight(space)),
+      collapsed: state.spaceChatCollapsed
+    });
+    return;
+  }
+  if (existing) existing.remove();
   slot.innerHTML = renderSpaceChatPanel(space);
   bindSpaceChatPanels();
 }
@@ -3271,6 +3299,24 @@ function spaceChatDraft(space: string): string {
   return state.spaceChatDrafts[space] ?? "";
 }
 
+function setSpaceChatCollapsed(collapsed: boolean) {
+  state.spaceChatCollapsed = collapsed;
+  writeStorage(spaceChatCollapsedKey, collapsed ? "1" : "0");
+  document.querySelectorAll<HTMLElement & WooElement & { data?: SpaceChatPanelData }>(`[data-space-chat-panel]`).forEach((panel) => {
+    const space = panel.dataset.spaceChatSpace ?? "";
+    const lines = chatLinesForSpace(space);
+    panel.woo = createChatWooContext(space, chatLineActorRefs(lines));
+    setCustomElementData(panel, {
+      space,
+      spaceName: projectedObjectView(space)?.name ?? objectName(state.world, space),
+      lines,
+      draft: spaceChatDraft(space),
+      height: Math.round(spaceChatHeight(space)),
+      collapsed
+    });
+  });
+}
+
 function setSpaceChatDraft(space: string, value: string) {
   if (!space) return;
   state.spaceChatDrafts = { ...state.spaceChatDrafts, [space]: value };
@@ -3981,6 +4027,7 @@ function bindPinboard() {
 
 function bindTasks() {
   mountTasksKanbanComponent();
+  requestTasksChatFocusIfPending();
   bindSpaceChatPanels();
 }
 
@@ -3999,6 +4046,21 @@ function mountTasksKanbanComponent() {
     });
   }
   mountToolSpaceChat(element, boardId);
+  requestTasksChatFocusIfPending();
+}
+
+function requestTasksChatFocusIfPending() {
+  if (!focusTasksChatOnEntry) return;
+  if (state.tab !== "tasks") return;
+  const active = document.activeElement;
+  const space = tasksSpace();
+  if (!space) return;
+  if (active instanceof HTMLElement) {
+    const inTasksWithoutChat = active.closest("[data-tasks-board]") !== null && active.closest("[data-space-chat-panel]") === null;
+    if (inTasksWithoutChat) return;
+  }
+  requestSpaceChatFocus(space);
+  focusTasksChatOnEntry = false;
 }
 
 function bindSpaceChatPanels() {
@@ -4015,7 +4077,8 @@ function bindSpaceChatPanel(panel: HTMLElement & WooElement & { data?: SpaceChat
     spaceName: projectedObjectView(space)?.name ?? objectName(state.world, space),
     lines,
     draft: spaceChatDraft(space),
-    height: Math.round(spaceChatHeight(space))
+    height: Math.round(spaceChatHeight(space)),
+    collapsed: state.spaceChatCollapsed
   }, () => panel.scrollFeedToEnd?.());
   bindSpaceChatComponentEvents(panel);
   bindSpaceChatResize(panel);
@@ -4037,6 +4100,10 @@ function bindSpaceChatComponentEvents(panel: HTMLElement & WooElement) {
   panel.addEventListener("woo-chat-history", (event) => {
     const detail = (event as CustomEvent<{ event?: KeyboardEvent; input?: HTMLInputElement }>).detail ?? {};
     if (detail.event && detail.input) navigateChatHistory(detail.event, detail.input);
+  });
+  panel.addEventListener("woo-chat-collapse", (event) => {
+    const detail = (event as CustomEvent<{ collapsed?: unknown }>).detail ?? {};
+    setSpaceChatCollapsed(Boolean(detail.collapsed));
   });
   panel.addEventListener("woo-chat-submit", (event) => {
     const detail = (event as CustomEvent<{ space?: unknown; text?: unknown; input?: HTMLInputElement }>).detail ?? {};
@@ -4081,6 +4148,18 @@ function bindSpaceChatResize(panel: HTMLElement | null) {
 
 function applySpaceChatHeight(panel: HTMLElement, height: number) {
   const space = panel.dataset.spaceChatSpace ?? "";
+  const isCollapsed = panel.classList.contains("is-collapsed");
+  if (isCollapsed) {
+    panel.style.removeProperty("height");
+    const shell = panel.closest<HTMLElement>("[data-space-chat-shell]");
+    if (shell) shell.style.removeProperty("--space-chat-h");
+    if (panel.parentElement instanceof HTMLElement) {
+      panel.parentElement.style.removeProperty("--space-chat-h");
+      const layout = panel.parentElement.querySelector<HTMLElement>(`[data-space-chat-layout="${cssAttrValue(space)}"]`);
+      if (layout) layout.style.removeProperty("--space-chat-h");
+    }
+    return;
+  }
   const normalizedHeight = normalizeSpaceChatHeight(height);
   if (space) state.spaceChatHeights = { ...state.spaceChatHeights, [space]: normalizedHeight };
   const rounded = `${Math.round(normalizedHeight)}px`;

@@ -627,17 +627,18 @@ export class PersistentObjectDO {
     if (hostKey === WORLD_HOST) {
       await this.registerObjectRoutes(world);
     } else {
-      // Satellite cold-load: populate publishedRoutes from the local
-      // slice without firing register-objects RPCs. The gateway
-      // registers routes during its own cold-load and during catalog
-      // install; satellites trust the gateway's registrations and only
-      // need the in-memory cache so adoptLocalObjectRoute /
-      // registerRoutes can short-circuit. Without this, every routed
-      // verb call after wake fired a 1-route RPC even though the
-      // directory already knew the route — observed as ~17 single
-      // register-objects calls per walkaround on every satellite.
+      // Satellite cold-load: prime `routeCache` from the local slice so
+      // `resolveObjectHostForWorld` can answer locally without firing a
+      // resolve-object RPC. Do NOT touch `publishedRoutes` — that map
+      // means "this DO has successfully published this route to the
+      // Directory." Marking entries published-without-publishing means
+      // any later call that goes through registerRoutes() (which skips
+      // anything in publishedRoutes per the dedup filter) cannot repair
+      // a missing or stale Directory entry. We rely on the gateway
+      // having registered satellite routes during its own cold-load and
+      // catalog install, but if that contract ever drifts, the
+      // satellite still has a path to repair via adoptLocalObjectRoute.
       for (const route of world.objectRoutes()) {
-        this.publishedRoutes.set(route.id, route.host);
         this.routeCache.set(route.id, route.host);
       }
     }
@@ -1639,11 +1640,17 @@ export class PersistentObjectDO {
     this.remoteRouteSyncAt.set(host, now);
     try {
       const routes = await this.forwardInternal<Array<{ id: ObjRef; host: string; anchor: ObjRef | null }>>(host, "/__internal/object-routes", {});
-      await this.registerRoutes(routes.filter((route) => route.host === host));
+      const ok = await this.registerRoutes(routes.filter((route) => route.host === host));
+      // registerRoutes returns false when the directory publish itself
+      // failed (non-OK status, transport error). Drop the throttle entry
+      // so the next caller retries instead of suppressing for the full
+      // TTL — directory acceleration is best-effort but the comment
+      // promised retry on failure, and forgetting to honor that
+      // contract turned a transient publish failure into a 60s blackout.
+      if (!ok) this.remoteRouteSyncAt.delete(host);
     } catch {
-      // The applied frame is already durable on the target host; route
-      // registration can be retried by a later state read or call.
-      // Drop the throttle entry so the next call retries.
+      // Fetch threw (transport, timeout, etc.). Same retry semantics as
+      // a failed publish — drop the throttle entry.
       this.remoteRouteSyncAt.delete(host);
     }
   }

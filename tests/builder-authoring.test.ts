@@ -133,7 +133,7 @@ describe("$builder:@set (LambdaCore #630 port)", () => {
     if (result.op !== "result") return;
     expect(world.getProp(id, "color")).toBe("red");
     const text = findTextObservation(result.observations, "$wiz");
-    expect(text).toMatch(/Property #obj_.* set to red\./);
+    expect(text).toMatch(/Property #obj_.* set to "red"\./);
   });
 
   it("strips matching double quotes from quoted string values", async () => {

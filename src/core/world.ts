@@ -3378,9 +3378,14 @@ export class WooWorld {
       throw wooError("E_VERSION", "property value version conflict", { expected: expectedVersion, actual: currentVersion });
     }
     if (!exists) {
-      this.assertCanBuildOwnedObject(actor, objRef);
-      this.defineProperty(objRef, { name, defaultValue: null, owner: actor, perms: "rw", typeHint: typeHintForValue(value) });
-    } else if (!this.canWriteProperty(actor, objRef, name)) {
+      // The builder surface is documented as "ordinary data value setting"
+      // — no metadata changes (catalogs/prog/README.md). Defining a brand-
+      // new property is metadata, not value, so reject. Property creation
+      // is a programmer-class operation: $programmer:@property (or the
+      // add_property builtin from a programmer-owned verb).
+      throw wooError("E_PROPNF", `property not found: ${name}`, { obj: objRef, property: name });
+    }
+    if (!this.canWriteProperty(actor, objRef, name)) {
       throw wooError("E_PERM", `${actor} cannot write ${objRef}.${name}`, { actor, obj: objRef, property: name });
     }
     this.setProp(objRef, name, value);

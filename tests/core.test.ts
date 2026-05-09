@@ -998,35 +998,50 @@ describe("woo core", () => {
     expect(readAfter?.arg_spec).toEqual(expect.objectContaining({ command: expect.objectContaining({ dobj: "this" }) }));
   });
 
+  it("setProp is idempotent on equal values — no version bump, no persist", () => {
+    // The host-seed merge depends on propertyVersions[name] tracking
+    // *real* changes. Every gateway-side `setProp(equal_value)` would
+    // otherwise propagate as a forced satellite snapshot every cold-load
+    // (catalog repair, returnGuest cleanup that re-clears already-empty
+    // fields, periodic reconciliation, etc.). Pin the new contract:
+    // value-equal means no bump.
+    const w = createWorld();
+    w.setProp("$system", "extra_attr", { foo: 1, bar: [2, 3] });
+    const v1 = w.object("$system").propertyVersions.get("extra_attr");
+    expect(v1).toBeGreaterThanOrEqual(1);
+    // Re-set the same value (deep-equal but a fresh object reference).
+    w.setProp("$system", "extra_attr", { foo: 1, bar: [2, 3] });
+    expect(w.object("$system").propertyVersions.get("extra_attr")).toBe(v1);
+    // Real change does bump.
+    w.setProp("$system", "extra_attr", { foo: 2, bar: [2, 3] });
+    expect(w.object("$system").propertyVersions.get("extra_attr")).toBe((v1 ?? 0) + 1);
+  });
+
   it("HS2.2: propertyVersion drift with equal value does NOT drive a merge change", () => {
-    // setProp bumps propertyVersions[name] on every call, even when the
-    // value is unchanged. Gateway-side code that rewrites the same value
-    // (e.g. periodic reconciliation, presence touch, idempotent
-    // catalog repair) makes the gateway's seed arrive with a higher
-    // version than stored — but the same value. The merge previously
-    // took that bumped version, declared changed=true, and burned a
-    // satellite snapshot every cold-load. Version must travel with
-    // value: only bump when value also changes.
+    // setProp bumps propertyVersions[name] on every call. Older
+    // gateway-side code (and stored worlds persisted before the
+    // setProp idempotency fix) could rewrite the same value and
+    // produce a seed with a higher version than stored even though
+    // the actual value matched. The merge previously took the bumped
+    // version, declared changed=true, and burned a satellite snapshot
+    // every cold-load. Version must travel with value: only bump when
+    // the value also changes.
+    //
+    // setProp is now idempotent on equal values, so the trap is
+    // simulated by tampering with the seed's propertyVersions
+    // directly — same data shape a pre-fix world would have produced.
     const gateway = createWorld();
     const satellite = createWorld();
-
-    // Seed both worlds with an equal property value but bumped seed version.
     gateway.setProp("$system", "extra_attr", "shared_value");
     satellite.setProp("$system", "extra_attr", "shared_value");
-    // Bump gateway's version by re-setting the same value (setProp
-    // bumps unconditionally).
-    gateway.setProp("$system", "extra_attr", "shared_value");
-    gateway.setProp("$system", "extra_attr", "shared_value");
 
     const storedSlice = nonEmptyHostScopedWorld(satellite.exportWorld(), "the_pinboard");
     expect(storedSlice).not.toBeNull();
     const seed = gateway.buildHostSeedForDelivery("the_pinboard");
-
-    const sysSeed = seed.objects.find((o) => o.id === "$system");
-    const seedV = new Map(sysSeed!.propertyVersions).get("extra_attr") as number;
-    const sysStored = storedSlice!.objects.find((o) => o.id === "$system");
-    const storedV = new Map(sysStored!.propertyVersions).get("extra_attr") as number;
-    expect(seedV).toBeGreaterThan(storedV); // confirms the trap exists
+    const sysSeedIdx = seed.objects.findIndex((o) => o.id === "$system");
+    const sysSeed = { ...seed.objects[sysSeedIdx] };
+    sysSeed.propertyVersions = sysSeed.propertyVersions.map(([n, v]) => n === "extra_attr" ? [n, v + 100] as [string, number] : [n, v]);
+    seed.objects[sysSeedIdx] = sysSeed;
 
     const merged = mergeHostScopedSeedWithStatus(storedSlice!, seed, "the_pinboard");
     expect(merged.changed).toBe(false);

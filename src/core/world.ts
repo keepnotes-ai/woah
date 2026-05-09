@@ -688,20 +688,37 @@ export class WooWorld {
   }
 
   setProp(objRef: ObjRef, name: string, value: WooValue): void {
-    this.setPropLocal(objRef, name, value);
-    this.persistProperty(objRef, name);
-    this.persist();
+    if (this.setPropLocal(objRef, name, value)) {
+      this.persistProperty(objRef, name);
+      this.persist();
+    }
   }
 
-  private setPropLocal(objRef: ObjRef, name: string, value: WooValue): void {
+  /** Returns true iff the in-memory state actually changed. setProp now
+   * skips both the version bump and the persist when the new value
+   * equals the current one — `setProp(equal_value)` is a no-op rather
+   * than a counter increment. propertyVersions is read by the host-seed
+   * merge to detect cross-host divergence; bumping it on a no-op
+   * fanned out to a full satellite snapshot every cold-load whenever
+   * gateway-side code idempotently re-set the same value (catalog
+   * repair, returnGuest cleanup that re-clears already-empty fields,
+   * etc.). The optimistic-version locks for compile-and-install use
+   * propertyDefs.version (separate counter), so this change does not
+   * affect that contract. */
+  private setPropLocal(objRef: ObjRef, name: string, value: WooValue): boolean {
     this.assertOrdinaryPropertyName(name);
     const obj = this.object(objRef);
+    const before = obj.properties.get(name);
+    if (obj.properties.has(name) && valuesEqual(before as WooValue, value)) {
+      return false;
+    }
     obj.properties.set(name, cloneValue(value));
     obj.propertyVersions.set(name, (obj.propertyVersions.get(name) ?? 0) + 1);
     obj.modified = Date.now();
     if (name === "subscribers" || name === "session_subscribers") {
       this.invalidatePresenceIndex();
     }
+    return true;
   }
 
   // Drop the in-memory presence index. The next read rebuilds it. Call

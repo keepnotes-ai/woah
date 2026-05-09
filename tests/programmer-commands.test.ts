@@ -870,6 +870,171 @@ describe("review-cycle 2 conformance fixes", () => {
   });
 });
 
+describe("review-cycle 3 conformance fixes", () => {
+  it("to_value rejects an unterminated quoted string", async () => {
+    const world = createWorld();
+    const result = await world.directCall(
+      "tov-unterm",
+      "$wiz",
+      "$string_utils",
+      "to_value",
+      ['"open and never close']
+    );
+    expect(result.op).toBe("result");
+    if (result.op !== "result") return;
+    expect(result.result).toEqual([false, "unterminated string literal"]);
+  });
+
+  it("to_value rejects a list-literal start", async () => {
+    const world = createWorld();
+    const result = await world.directCall(
+      "tov-list",
+      "$wiz",
+      "$string_utils",
+      "to_value",
+      ["{1, 2"]
+    );
+    expect(result.op).toBe("result");
+    if (result.op !== "result") return;
+    expect(result.result).toEqual([false, "list literals not yet supported in to_value"]);
+  });
+
+  it("to_value rejects a map-literal start", async () => {
+    const world = createWorld();
+    const result = await world.directCall(
+      "tov-map",
+      "$wiz",
+      "$string_utils",
+      "to_value",
+      ["[a: 1"]
+    );
+    expect(result.op).toBe("result");
+    if (result.op !== "result") return;
+    expect((result.result as [boolean, string])[0]).toBe(false);
+  });
+
+  it("to_value rejects a malformed objref literal (`#` alone)", async () => {
+    const world = createWorld();
+    const result = await world.directCall(
+      "tov-bad-hash",
+      "$wiz",
+      "$string_utils",
+      "to_value",
+      ["#"]
+    );
+    expect(result.op).toBe("result");
+    if (result.op !== "result") return;
+    expect((result.result as [boolean, string])[0]).toBe(false);
+  });
+
+  it("to_value rejects a malformed corename literal (embedded space)", async () => {
+    const world = createWorld();
+    const result = await world.directCall(
+      "tov-bad-corename",
+      "$wiz",
+      "$string_utils",
+      "to_value",
+      ["$wiz oops"]
+    );
+    expect(result.op).toBe("result");
+    if (result.op !== "result") return;
+    expect((result.result as [boolean, string])[0]).toBe(false);
+  });
+
+  it("toint accepts leading-zero forms LambdaCore accepts (01, 000)", async () => {
+    const world = createWorld();
+    for (const [input, want] of [["01", 1], ["000", 0], ["007", 7]] as const) {
+      const result = await world.directCall(
+        `toint-zero-${input}`,
+        "$wiz",
+        "$code_utils",
+        "toint",
+        [input]
+      );
+      expect(result.op).toBe("result");
+      if (result.op !== "result") return;
+      expect(result.result).toBe(want);
+    }
+  });
+
+  it("toint accepts -0 (LambdaCore parses it as 0)", async () => {
+    const world = createWorld();
+    const result = await world.directCall(
+      "toint-neg-zero",
+      "$wiz",
+      "$code_utils",
+      "toint",
+      ["-0"]
+    );
+    expect(result.op).toBe("result");
+    if (result.op !== "result") return;
+    expect(result.result).toBe(0);
+  });
+
+  it("toint still rejects non-integer text", async () => {
+    const world = createWorld();
+    const result = await world.directCall(
+      "toint-bad",
+      "$wiz",
+      "$code_utils",
+      "toint",
+      ["12abc"]
+    );
+    expect(result.op).toBe("result");
+    if (result.op !== "result") return;
+    expect(result.result).toBe(false);
+  });
+
+  it("parse_argspec returns a partial 1-element spec when only the dobj is given", async () => {
+    const world = createWorld();
+    const result = await world.directCall(
+      "pa-partial-1",
+      "$wiz",
+      "$code_utils",
+      "parse_argspec",
+      [["this"]]
+    );
+    expect(result.op).toBe("result");
+    if (result.op !== "result") return;
+    expect(result.result).toEqual([["this"], []]);
+  });
+
+  it("parse_argspec returns a partial 2-element spec when only dobj+prep are given", async () => {
+    const world = createWorld();
+    const result = await world.directCall(
+      "pa-partial-2",
+      "$wiz",
+      "$code_utils",
+      "parse_argspec",
+      [["this", "with"]]
+    );
+    expect(result.op).toBe("result");
+    if (result.op !== "result") return;
+    expect(result.result).toEqual([["this", "with"], []]);
+  });
+
+  it("object_match_failed prints `<id> does not exist` for an invalid # objref (not just $failed_match)", async () => {
+    // The !valid(match_result) branch — direct utility callers can
+    // pass a tombstoned/non-existent ObjRef along with the original
+    // #-prefixed string. Pre-fix, the wording dropped the # because
+    // to_string(ObjRef) returns the bare id; now the input string is
+    // consulted first.
+    const world = createWorld();
+    const result = await world.directCall(
+      "omf-invalid-hash",
+      "$wiz",
+      "$command_utils",
+      "object_match_failed",
+      ["obj_doesnt_exist", "#obj_doesnt_exist"]
+    );
+    expect(result.op).toBe("result");
+    if (result.op !== "result") return;
+    expect(result.result).toBe(true);
+    const text = findTextObservation(result.observations, "$wiz");
+    expect(text).toBe("#obj_doesnt_exist does not exist.");
+  });
+});
+
 describe("$code_utils helpers (LambdaCore #153)", () => {
   it("parse_verbref splits obj:verb correctly", async () => {
     const world = createWorld();

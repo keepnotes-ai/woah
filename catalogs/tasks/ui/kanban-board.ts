@@ -756,6 +756,15 @@ export class WooTasksKanbanElement extends HTMLElement {
 
   private handleSubmit = (event: Event): void => {
     const target = event.target as HTMLElement | null;
+    // The user just submitted — they're between operations, not typing. Blur
+    // whatever is focused (typically the submit button) so the upcoming
+    // refresh()'s data setter doesn't see focus-still-in-the-form and defer
+    // the render. Without this, createOpen=false / new role / etc. take
+    // effect in state but the stale form stays on screen until something
+    // else moves focus, producing the "needs two clicks, nothing happens"
+    // symptom.
+    const active = this.ownerDocument.activeElement;
+    if (active instanceof HTMLElement && this.contains(active)) active.blur();
     const detailEditForm = target?.closest<HTMLFormElement>("[data-tasks-detail-edit]");
     if (detailEditForm) {
       event.preventDefault();

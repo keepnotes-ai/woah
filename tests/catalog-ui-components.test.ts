@@ -382,7 +382,7 @@ describe("bundled catalog UI components", () => {
     element.data = data;
 
     element.querySelector<HTMLButtonElement>("[data-tasks-create-open]")!.click();
-    const create = element.querySelector<HTMLFormElement>("[data-tasks-create]")!;
+    const create = element.querySelector<HTMLFormElement>("[data-tasks-detail-form]")!;
     create.querySelector<HTMLSelectElement>('select[name="kind"]')!.value = "bug";
     create.querySelector<HTMLSelectElement>('select[name="kind"]')!.dispatchEvent(new Event("change", { bubbles: true }));
     create.querySelector<HTMLInputElement>('input[name="name"]')!.value = "Half typed task";
@@ -392,29 +392,23 @@ describe("bundled catalog UI components", () => {
     create.querySelector<HTMLInputElement>('input[name="labels"]')!.value = "frontend, urgent";
     create.querySelector<HTMLInputElement>('input[name="labels"]')!.dispatchEvent(new Event("input", { bubbles: true }));
 
-    // Opening admin closes create, but the create draft should survive reopening.
+    // Polling refresh shouldn't blow away the half-typed new-task draft.
+    element.data = data;
+
+    const survivor = element.querySelector<HTMLFormElement>("[data-tasks-detail-form]")!;
+    expect(survivor.querySelector<HTMLSelectElement>('select[name="kind"]')!.value).toBe("bug");
+    expect(survivor.querySelector<HTMLInputElement>('input[name="name"]')!.value).toBe("Half typed task");
+    expect(survivor.querySelector<HTMLTextAreaElement>('textarea[name="text"]')!.value).toBe("draft body");
+    expect(survivor.querySelector<HTMLInputElement>('input[name="labels"]')!.value).toBe("frontend, urgent");
+
+    // Admin draft survives the same way.
     element.querySelector<HTMLButtonElement>("[data-tasks-admin-toggle]")!.click();
-    expect(element.querySelector("[data-tasks-create]")).toBeNull();
     element.querySelector<HTMLButtonElement>('[data-tasks-admin-new="role"]')!.click();
     const roleForm = element.querySelector<HTMLFormElement>("[data-tasks-admin-form='role']")!;
     roleForm.querySelector<HTMLInputElement>('input[name="name"]')!.value = "reviewer";
     roleForm.querySelector<HTMLInputElement>('input[name="name"]')!.dispatchEvent(new Event("input", { bubbles: true }));
-
-    // Simulate the polling refresh repainting with fresh data.
     element.data = data;
-
     expect(element.querySelector<HTMLInputElement>("[data-tasks-admin-form='role'] input[name='name']")!.value).toBe("reviewer");
-    expect(element.querySelector<HTMLButtonElement>("[data-tasks-create-open]")).toBeNull();
-
-    element.querySelector<HTMLButtonElement>(".woo-tasks-admin-head [data-tasks-admin-toggle]")!.click();
-    expect(element.querySelector("[data-tasks-admin-form='role']")).toBeNull();
-    expect(element.querySelector<HTMLButtonElement>("[data-tasks-create-open]")).not.toBeNull();
-    element.querySelector<HTMLButtonElement>("[data-tasks-create-open]")!.click();
-    const createAfter = element.querySelector<HTMLFormElement>("[data-tasks-create]")!;
-    expect(createAfter.querySelector<HTMLSelectElement>('select[name="kind"]')!.value).toBe("bug");
-    expect(createAfter.querySelector<HTMLInputElement>('input[name="name"]')!.value).toBe("Half typed task");
-    expect(createAfter.querySelector<HTMLTextAreaElement>('textarea[name="text"]')!.value).toBe("draft body");
-    expect(createAfter.querySelector<HTMLInputElement>('input[name="labels"]')!.value).toBe("frontend, urgent");
   });
 
   it("defers refresh repaint while a tasks input is focused", async () => {
@@ -457,21 +451,21 @@ describe("bundled catalog UI components", () => {
     element.data = baseData;
 
     element.querySelector<HTMLButtonElement>("[data-tasks-create-open]")!.click();
-    const nameInput = element.querySelector<HTMLInputElement>("[data-tasks-create] input[name='name']")!;
+    const nameInput = element.querySelector<HTMLInputElement>("[data-tasks-detail-form] input[name='name']")!;
     nameInput.focus();
     nameInput.value = "typing is still here";
     nameInput.dispatchEvent(new Event("input", { bubbles: true }));
     await element.refresh!();
 
     expect(document.activeElement).toBe(nameInput);
-    expect(element.querySelector<HTMLInputElement>("[data-tasks-create] input[name='name']")).toBe(nameInput);
+    expect(element.querySelector<HTMLInputElement>("[data-tasks-detail-form] input[name='name']")).toBe(nameInput);
     expect(nameInput.value).toBe("typing is still here");
     expect(element.querySelector("h2")?.textContent).toBe("Taskboard");
 
     nameInput.blur();
     await Promise.resolve();
     expect(element.querySelector("h2")?.textContent).toBe("Taskboard refreshed");
-    expect(element.querySelector<HTMLInputElement>("[data-tasks-create] input[name='name']")?.value).toBe("typing is still here");
+    expect(element.querySelector<HTMLInputElement>("[data-tasks-detail-form] input[name='name']")?.value).toBe("typing is still here");
   });
 
   it("inline-edits name, body, and labels in the detail panel", async () => {
@@ -531,28 +525,18 @@ describe("bundled catalog UI components", () => {
     element.querySelector<HTMLElement>('[data-tasks-card="obj_t_edit"]')!.click();
     await flush();
 
-    // Rename
-    element.querySelector<HTMLButtonElement>('[data-tasks-detail-edit-open="name"]')!.click();
-    const nameForm = element.querySelector<HTMLFormElement>('[data-tasks-detail-edit="name"]')!;
-    nameForm.querySelector<HTMLInputElement>('input[name="name"]')!.value = "Renamed";
-    nameForm.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+    // Single Edit toggle puts the whole detail panel into edit mode; one Save
+    // dispatches all changed fields at once.
+    element.querySelector<HTMLButtonElement>("[data-tasks-detail-edit-toggle]")!.click();
+    const form = element.querySelector<HTMLFormElement>("[data-tasks-detail-form]")!;
+    form.querySelector<HTMLInputElement>('input[name="name"]')!.value = "Renamed";
+    form.querySelector<HTMLTextAreaElement>('textarea[name="text"]')!.value = "new body content";
+    form.querySelector<HTMLInputElement>('input[name="labels"]')!.value = "beta, gamma";
+    form.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
     await flush();
+
     expect(calls.find((c) => c.verb === "set_name")?.args).toEqual(["Renamed"]);
-
-    // Edit body
-    element.querySelector<HTMLButtonElement>('[data-tasks-detail-edit-open="text"]')!.click();
-    const textForm = element.querySelector<HTMLFormElement>('[data-tasks-detail-edit="text"]')!;
-    textForm.querySelector<HTMLTextAreaElement>('textarea[name="text"]')!.value = "new body content";
-    textForm.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
-    await flush();
     expect(calls.find((c) => c.verb === "set_text")?.args).toEqual(["new body content"]);
-
-    // Edit labels
-    element.querySelector<HTMLButtonElement>('[data-tasks-detail-edit-open="labels"]')!.click();
-    const labForm = element.querySelector<HTMLFormElement>('[data-tasks-detail-edit="labels"]')!;
-    labForm.querySelector<HTMLInputElement>('input[name="labels"]')!.value = "beta, gamma";
-    labForm.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
-    await flush();
     expect(calls.find((c) => c.verb === "set_labels")?.args).toEqual([["beta", "gamma"]]);
   });
 
@@ -681,12 +665,14 @@ describe("bundled catalog UI components", () => {
     const openBtn = element.querySelector<HTMLButtonElement>("[data-tasks-create-open]");
     expect(openBtn).not.toBeNull();
     openBtn!.click();
-    const form = element.querySelector<HTMLFormElement>("[data-tasks-create]");
+    const form = element.querySelector<HTMLFormElement>("[data-tasks-detail-form]");
     expect(form).not.toBeNull();
-    expect(element.querySelector("[data-tasks-filter-text]")).toBeNull();
-    expect(element.querySelector("[data-tasks-col]")).toBeNull();
-    expect(Array.from(form!.querySelectorAll(".woo-tasks-create-row [name]")).map((input) => (input as HTMLInputElement | HTMLSelectElement).name)).toEqual(["name", "kind", "labels"]);
-    expect(form!.querySelector(".woo-tasks-create-body textarea[name='text']")).not.toBeNull();
+    // Unified panel: filter bar and kanban columns stay visible alongside.
+    const detail = element.querySelector<HTMLElement>("[data-tasks-detail]");
+    expect(detail?.dataset.taskMode).toBe("new");
+    // Obligations / log are hidden for the not-yet-minted draft.
+    expect(form!.querySelector(".woo-tasks-detail-obligations")).toBeNull();
+    expect(form!.querySelector(".woo-tasks-detail-log")).toBeNull();
     const kindSelect = form!.querySelector<HTMLSelectElement>('select[name="kind"]')!;
     expect(Array.from(kindSelect.options).map((opt) => opt.value)).toEqual(["task", "bug"]);
     kindSelect.value = "bug";

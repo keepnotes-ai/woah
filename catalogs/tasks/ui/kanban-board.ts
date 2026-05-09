@@ -428,8 +428,6 @@ export class WooTasksKanbanElement extends HTMLElement {
   private boundSubmit = false;
   private pollHandle: ReturnType<typeof setInterval> | null = null;
   private openPrompt: { taskId: string; verb: string } | null = null;
-  private createOpen = false;
-  private createDraft: CreateDraft = { kind: "", name: "", text: "", labels: "" };
   private adminOpen = false;
   private adminSection: AdminSection = "role";
   private adminEditing: AdminEditing | null = null;
@@ -443,8 +441,8 @@ export class WooTasksKanbanElement extends HTMLElement {
     obligation: { state: "idle", message: "" },
     policy: { state: "idle", message: "" }
   };
-  private openDetail: { taskId: string; detail: TaskDetail | null; loading: boolean; error?: string } | null = null;
-  private detailEdit: "name" | "text" | "labels" | null = null;
+  private openDetail: { taskId: string; detail: TaskDetail | null; loading: boolean; error?: string; isNew?: boolean } | null = null;
+  private detailDraft: CreateDraft | null = null;
   private groupBy: GroupBy = "state";
   private boundChange = false;
   private boundInput = false;
@@ -670,16 +668,11 @@ export class WooTasksKanbanElement extends HTMLElement {
     if (!target) return;
     if (target.closest<HTMLButtonElement>("[data-tasks-create-open]")) {
       event.preventDefault();
-      this.createOpen = true;
       this.adminOpen = false;
+      this.openDetail = { taskId: "", detail: null, loading: false, isNew: true };
+      this.detailDraft = { kind: this.model.policies[0] ?? "", name: "", text: "", labels: "" };
       this.render();
-      this.querySelector<HTMLInputElement>("[data-tasks-create] input[name=\"name\"]")?.focus();
-      return;
-    }
-    if (target.closest<HTMLButtonElement>("[data-tasks-create-cancel]")) {
-      event.preventDefault();
-      this.createOpen = false;
-      this.render();
+      this.querySelector<HTMLInputElement>("[data-tasks-detail-form] input[name=\"name\"]")?.focus();
       return;
     }
     if (target.closest<HTMLButtonElement>("[data-tasks-seed-policy]")) {
@@ -690,34 +683,42 @@ export class WooTasksKanbanElement extends HTMLElement {
     if (target.closest<HTMLButtonElement>("[data-tasks-detail-close]")) {
       event.preventDefault();
       this.openDetail = null;
-      this.detailEdit = null;
+      this.detailDraft = null;
       this.render();
       return;
     }
-    const editOpen = target.closest<HTMLButtonElement>("[data-tasks-detail-edit-open]");
-    if (editOpen) {
+    if (target.closest<HTMLButtonElement>("[data-tasks-detail-edit-toggle]")) {
       event.preventDefault();
-      const field = editOpen.dataset.tasksDetailEditOpen;
-      if (field === "name" || field === "text" || field === "labels") {
-        this.detailEdit = field;
+      const detail = this.openDetail?.detail;
+      if (detail) {
+        this.detailDraft = {
+          kind: detail.kind ?? "",
+          name: detail.name ?? "",
+          text: detail.text ?? "",
+          labels: detail.labels.join(", ")
+        };
         this.render();
-        const focusSel = field === "text"
-          ? "[data-tasks-detail-edit] textarea"
-          : `[data-tasks-detail-edit] input[name="${field}"]`;
-        this.querySelector<HTMLInputElement | HTMLTextAreaElement>(focusSel)?.focus();
+        this.querySelector<HTMLInputElement>("[data-tasks-detail-form] input[name=\"name\"]")?.focus();
       }
       return;
     }
-    if (target.closest<HTMLButtonElement>("[data-tasks-detail-edit-cancel]")) {
+    if (target.closest<HTMLButtonElement>("[data-tasks-detail-cancel]")) {
       event.preventDefault();
-      this.detailEdit = null;
+      if (this.openDetail?.isNew) {
+        // Cancelling a new-task draft closes the panel entirely.
+        this.openDetail = null;
+      }
+      this.detailDraft = null;
       this.render();
       return;
     }
     if (target.closest<HTMLButtonElement>("[data-tasks-admin-toggle]")) {
       event.preventDefault();
       this.adminOpen = !this.adminOpen;
-      if (this.adminOpen) this.createOpen = false;
+      if (this.adminOpen) {
+        this.openDetail = null;
+        this.detailDraft = null;
+      }
       this.render();
       return;
     }
@@ -887,19 +888,18 @@ export class WooTasksKanbanElement extends HTMLElement {
     const active = this.ownerDocument.activeElement;
     if (!(active instanceof HTMLElement) || !this.contains(active)) return false;
     if (active.closest("[data-tasks-prompt]")) return true;
-    if (active.closest("[data-tasks-create]")) return true;
+    if (active.closest("[data-tasks-detail-form]")) return true;
     if (active.closest("[data-tasks-admin-form]")) return true;
-    if (active.closest("[data-tasks-detail-edit]")) return true;
     if (active.matches("[data-tasks-filter-text]")) return true;
     return active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement || active instanceof HTMLSelectElement;
   }
 
   private captureDraftInput(target: HTMLElement | null): void {
     if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement)) return;
-    const createForm = target.closest<HTMLFormElement>("[data-tasks-create]");
-    if (createForm) {
+    const detailForm = target.closest<HTMLFormElement>("[data-tasks-detail-form]");
+    if (detailForm && this.detailDraft) {
       const name = target.name as keyof CreateDraft;
-      if (name === "kind" || name === "name" || name === "text" || name === "labels") this.createDraft[name] = target.value;
+      if (name === "kind" || name === "name" || name === "text" || name === "labels") this.detailDraft[name] = target.value;
       return;
     }
     const adminForm = target.closest<HTMLFormElement>("[data-tasks-admin-form]");
@@ -954,29 +954,16 @@ export class WooTasksKanbanElement extends HTMLElement {
     // symptom.
     const active = this.ownerDocument.activeElement;
     if (active instanceof HTMLElement && this.contains(active)) active.blur();
-    const detailEditForm = target?.closest<HTMLFormElement>("[data-tasks-detail-edit]");
-    if (detailEditForm) {
+    const detailForm = target?.closest<HTMLFormElement>("[data-tasks-detail-form]");
+    if (detailForm) {
       event.preventDefault();
-      void this.submitDetailEditForm(detailEditForm);
+      void this.submitDetailForm(detailForm);
       return;
     }
     const adminForm = target?.closest<HTMLFormElement>("[data-tasks-admin-form]");
     if (adminForm) {
       event.preventDefault();
       void this.submitAdminForm(adminForm);
-      return;
-    }
-    const createForm = target?.closest<HTMLFormElement>("[data-tasks-create]");
-    if (createForm) {
-      event.preventDefault();
-      const kind = (createForm.querySelector<HTMLSelectElement>('select[name="kind"]')?.value ?? "").trim();
-      const name = (createForm.querySelector<HTMLInputElement>('input[name="name"]')?.value ?? "").trim();
-      const text = createForm.querySelector<HTMLTextAreaElement>('textarea[name="text"]')?.value ?? "";
-      const labelsRaw = createForm.querySelector<HTMLInputElement>('input[name="labels"]')?.value ?? "";
-      this.createDraft = { kind, name, text, labels: labelsRaw };
-      const labels = labelsRaw.split(",").map((s) => s.trim()).filter(Boolean);
-      if (!kind || !name) return;
-      void this.createTask(kind, name, text, labels);
       return;
     }
     const form = target?.closest<HTMLFormElement>("[data-tasks-prompt]");
@@ -1002,11 +989,11 @@ export class WooTasksKanbanElement extends HTMLElement {
     const woo = this.woo;
     const subject = this.subject ?? this.model.registryId;
     if (!woo || !subject) return;
-    // Optimistic close: drop the form right away so the user gets immediate
+    // Optimistic close: drop the panel right away so the user gets immediate
     // feedback. The new task will materialize once the server confirms via
     // task_created (eagerly nudged by the background refresh below).
-    this.createOpen = false;
-    this.createDraft = { kind: "", name: "", text: "", labels: "" };
+    this.openDetail = null;
+    this.detailDraft = null;
     this.render();
     try {
       await woo.directCall(subject, "create_task", [kind, name, text, labels, null]);
@@ -1140,57 +1127,62 @@ export class WooTasksKanbanElement extends HTMLElement {
     void this.refresh();
   }
 
-  private async submitDetailEditForm(form: HTMLFormElement): Promise<void> {
+  private async submitDetailForm(form: HTMLFormElement): Promise<void> {
     const woo = this.woo;
-    if (!woo || !this.openDetail || !this.openDetail.detail) return;
-    const taskId = this.openDetail.taskId;
-    const field = form.dataset.tasksDetailEdit;
-    const detail = this.openDetail.detail;
-    const taskRow = this.model.tasks.find((t) => t.id === taskId);
-    // Optimistic patches — apply locally and close the editor immediately so
-    // typing-and-saving feels instant. Server confirms via the background
-    // refresh; if it disagrees, the next listing wins.
-    if (field === "name") {
-      const value = (form.querySelector<HTMLInputElement>('input[name="name"]')?.value ?? "").trim();
-      if (!value) return;
-      detail.name = value;
-      if (taskRow) taskRow.name = value;
-      this.detailEdit = null;
-      this.render();
-      try { await woo.directCall(taskId, "set_name", [value]); } catch { /* surfaces in refresh */ }
-    } else if (field === "text") {
-      const value = form.querySelector<HTMLTextAreaElement>('textarea[name="text"]')?.value ?? "";
-      detail.text = value;
-      this.detailEdit = null;
-      this.render();
-      try { await woo.directCall(taskId, "set_text", [value]); } catch { /* surfaces in refresh */ }
-    } else if (field === "labels") {
-      const raw = form.querySelector<HTMLInputElement>('input[name="labels"]')?.value ?? "";
-      const labels = raw.split(",").map((s) => s.trim()).filter(Boolean);
-      detail.labels = labels;
-      if (taskRow) taskRow.labels = labels;
-      this.detailEdit = null;
-      this.render();
-      try { await woo.directCall(taskId, "set_labels", [labels]); } catch { /* surfaces in refresh */ }
-    } else {
+    if (!woo || !this.openDetail || !this.detailDraft) return;
+    const open = this.openDetail;
+    const draft = this.detailDraft;
+    const name = (form.querySelector<HTMLInputElement>('input[name="name"]')?.value ?? "").trim();
+    const text = form.querySelector<HTMLTextAreaElement>('textarea[name="text"]')?.value ?? "";
+    const labelsRaw = form.querySelector<HTMLInputElement>('input[name="labels"]')?.value ?? "";
+    const labels = labelsRaw.split(",").map((s) => s.trim()).filter(Boolean);
+    if (open.isNew) {
+      const kind = (form.querySelector<HTMLSelectElement>('select[name="kind"]')?.value ?? draft.kind ?? "").trim();
+      if (!kind || !name) return;
+      void this.createTask(kind, name, text, labels);
       return;
     }
+    // Existing task: dispatch only the fields that actually changed, optimistically.
+    const detail = open.detail;
+    if (!detail) return;
+    const taskId = open.taskId;
+    const taskRow = this.model.tasks.find((t) => t.id === taskId);
+    const calls: Array<Promise<unknown>> = [];
+    if (name && name !== detail.name) {
+      detail.name = name;
+      if (taskRow) taskRow.name = name;
+      calls.push(woo.directCall(taskId, "set_name", [name]).catch(() => undefined));
+    }
+    if (text !== detail.text) {
+      detail.text = text;
+      calls.push(woo.directCall(taskId, "set_text", [text]).catch(() => undefined));
+    }
+    const labelsChanged = labels.length !== detail.labels.length || labels.some((l, i) => l !== detail.labels[i]);
+    if (labelsChanged) {
+      detail.labels = labels;
+      if (taskRow) taskRow.labels = labels;
+      calls.push(woo.directCall(taskId, "set_labels", [labels]).catch(() => undefined));
+    }
+    this.detailDraft = null;
+    this.render();
+    await Promise.all(calls);
     void this.refresh();
   }
 
   private async openTaskDetail(taskId: string): Promise<void> {
     const woo = this.woo;
     if (!woo) return;
-    this.openDetail = { taskId, detail: null, loading: true };
+    this.openDetail = { taskId, detail: null, loading: true, isNew: false };
+    this.detailDraft = null;
     this.render();
     try {
       const result = await woo.directCall(taskId, "detail", []);
       const detail = readDetail(result);
       this.openDetail = detail
-        ? { taskId, detail, loading: false }
-        : { taskId, detail: null, loading: false, error: "no detail returned" };
+        ? { taskId, detail, loading: false, isNew: false }
+        : { taskId, detail: null, loading: false, error: "no detail returned", isNew: false };
     } catch (err) {
-      this.openDetail = { taskId, detail: null, loading: false, error: err instanceof Error ? err.message : String(err) };
+      this.openDetail = { taskId, detail: null, loading: false, error: err instanceof Error ? err.message : String(err), isNew: false };
     }
     this.render();
   }
@@ -1348,9 +1340,7 @@ export class WooTasksKanbanElement extends HTMLElement {
 
     const boardContent = this.adminOpen
       ? this.renderAdminPanel()
-      : this.createOpen
-        ? this.renderCreateForm()
-        : `${this.renderFilterBar(tasks.length)}
+      : `${this.renderFilterBar(tasks.length)}
           <section class="woo-tasks-kanban" aria-label="Task board">
             <div class="woo-tasks-kanban-columns">${columnsHtml}</div>
           </section>`;
@@ -1358,7 +1348,7 @@ export class WooTasksKanbanElement extends HTMLElement {
       <section class="woo-tasks-workspace has-space-chat" data-space-chat-layout="${escapeHtml(registryId)}">
         ${this.renderHeader(registryName || "Tasks")}
         <div class="woo-tasks-workarea">
-          <div class="woo-tasks-board${this.createOpen ? " has-create" : ""}${this.adminOpen ? " has-admin" : ""}">
+          <div class="woo-tasks-board${this.adminOpen ? " has-admin" : ""}">
             ${boardContent}
           </div>
           ${!this.adminOpen && this.openDetail ? this.renderDetailPanel(actorNames) : ""}
@@ -1377,7 +1367,8 @@ export class WooTasksKanbanElement extends HTMLElement {
   private renderDetailPanel(actorNames: Record<string, string>): string {
     const open = this.openDetail;
     if (!open) return "";
-    if (open.loading) {
+    const isNew = !!open.isNew;
+    if (!isNew && open.loading) {
       return `
         <aside class="woo-tasks-detail" data-tasks-detail data-task-id="${escapeHtml(open.taskId)}">
           <header class="woo-tasks-detail-header">
@@ -1388,7 +1379,7 @@ export class WooTasksKanbanElement extends HTMLElement {
         </aside>
       `;
     }
-    if (!open.detail) {
+    if (!isNew && !open.detail) {
       const message = open.error ? `Failed to load task: ${open.error}` : "No detail returned.";
       return `
         <aside class="woo-tasks-detail" data-tasks-detail data-task-id="${escapeHtml(open.taskId)}">
@@ -1400,42 +1391,84 @@ export class WooTasksKanbanElement extends HTMLElement {
         </aside>
       `;
     }
+    const editing = this.detailDraft !== null;
+    const draft = this.detailDraft;
     const detail = open.detail;
-    const editing = this.detailEdit;
-    const labelsBody = editing === "labels"
-      ? `<form class="woo-tasks-detail-edit" data-tasks-detail-edit="labels">
-          <input type="text" name="labels" value="${escapeHtml(detail.labels.join(", "))}" autocomplete="off">
-          <button type="submit" data-tasks-detail-edit-submit>Save</button>
-          <button type="button" data-tasks-detail-edit-cancel>Cancel</button>
-        </form>`
+    const detailId = detail?.id ?? "";
+    const detailName = detail?.name ?? "";
+    const detailKind = detail?.kind ?? "";
+    const detailText = detail?.text ?? "";
+    const detailLabels = detail?.labels ?? [];
+    const detailObligations = detail?.obligations ?? [];
+    const detailLog = detail?.log ?? [];
+    const detailWaitFor = detail?.waitFor ?? [];
+    const detailLinks = detail?.links ?? [];
+    const detailLocation = detail?.location ?? null;
+    const detailComplete = detail?.complete ?? false;
+    const detailTerminal = detail?.terminal ?? false;
+    const detailCursorKey = detail?.cursorKey ?? null;
+    const dataTaskId = isNew ? "new" : detailId;
+    const mode = isNew ? "new" : editing ? "edit" : "view";
+    const status = isNew
+      ? "draft"
+      : detailComplete
+        ? "complete"
+        : detailTerminal
+          ? "dropped"
+          : detailLocation && detailLocation !== this.model.registryId
+            ? `held by ${actorDisplay(detailLocation, actorNames)}`
+            : "ready";
+
+    const headerTitle = (isNew || editing)
+      ? `<input class="woo-tasks-detail-name-input" type="text" name="name" value="${escapeHtml(draft?.name ?? detailName)}" placeholder="Task name" required autocomplete="off">`
+      : `<span class="woo-tasks-detail-name">${escapeHtml(detailName || detailId)}</span>`;
+    const editToggle = (!isNew && !editing)
+      ? `<button type="button" data-tasks-detail-edit-toggle class="woo-tasks-detail-edit-toggle">Edit</button>`
+      : "";
+
+    const policyOptions = this.model.policies
+      .map((kind) => `<option value="${escapeHtml(kind)}"${kind === (draft?.kind ?? detailKind) ? " selected" : ""}>${escapeHtml(kind)}</option>`)
+      .join("");
+    const kindBlock = isNew
+      ? `<label class="woo-tasks-detail-field">
+          <span class="woo-tasks-detail-field-label">Kind</span>
+          <select name="kind" required>${policyOptions}</select>
+        </label>`
+      : `<span class="woo-tasks-detail-kind">${escapeHtml(detailKind || "task")}</span>`;
+
+    const labelsValue = draft?.labels ?? detailLabels.join(", ");
+    const labelsBlock = (isNew || editing)
+      ? `<label class="woo-tasks-detail-field">
+          <span class="woo-tasks-detail-field-label">Labels <span class="woo-tasks-detail-field-hint">(comma-separated)</span></span>
+          <input type="text" name="labels" value="${escapeHtml(labelsValue)}" autocomplete="off">
+        </label>`
       : `<div class="woo-tasks-detail-labels" data-tasks-detail-field="labels">
-          ${detail.labels.length === 0
+          ${detailLabels.length === 0
             ? `<span class="woo-tasks-detail-empty-inline">no labels</span>`
-            : detail.labels.map((l) => `<span class="woo-tasks-card-label">${escapeHtml(l)}</span>`).join("")}
-          <button type="button" data-tasks-detail-edit-open="labels" class="woo-tasks-detail-edit-icon" aria-label="Edit labels">✎</button>
+            : detailLabels.map((l) => `<span class="woo-tasks-card-label">${escapeHtml(l)}</span>`).join("")}
         </div>`;
-    const labels = labelsBody;
-    const text = editing === "text"
-      ? `<form class="woo-tasks-detail-edit" data-tasks-detail-edit="text">
-          <textarea name="text" rows="6" autocomplete="off">${escapeHtml(detail.text)}</textarea>
-          <div class="woo-tasks-detail-edit-actions">
-            <button type="submit" data-tasks-detail-edit-submit>Save</button>
-            <button type="button" data-tasks-detail-edit-cancel>Cancel</button>
-          </div>
-        </form>`
-      : detail.text
-        ? `<div class="woo-tasks-detail-text-wrap" data-tasks-detail-field="text">
-            <pre class="woo-tasks-detail-text">${escapeHtml(detail.text)}</pre>
-            <button type="button" data-tasks-detail-edit-open="text" class="woo-tasks-detail-edit-icon" aria-label="Edit body">✎</button>
-          </div>`
-        : `<div class="woo-tasks-detail-text-wrap" data-tasks-detail-field="text">
-            <p class="woo-tasks-detail-empty">No body.</p>
-            <button type="button" data-tasks-detail-edit-open="text" class="woo-tasks-detail-edit-icon" aria-label="Edit body">✎</button>
-          </div>`;
-    const obligationsHtml = detail.obligations.length === 0
+
+    const textValue = draft?.text ?? detailText;
+    const bodyBlock = (isNew || editing)
+      ? `<label class="woo-tasks-detail-field">
+          <span class="woo-tasks-detail-field-label">Body</span>
+          <textarea name="text" rows="${isNew ? 12 : 8}" placeholder="markdown body (optional)">${escapeHtml(textValue)}</textarea>
+        </label>`
+      : detailText
+        ? `<pre class="woo-tasks-detail-text">${escapeHtml(detailText)}</pre>`
+        : `<p class="woo-tasks-detail-empty">No body.</p>`;
+
+    const formActions = (isNew || editing)
+      ? `<div class="woo-tasks-detail-actions">
+          <button type="button" data-tasks-detail-cancel>Cancel</button>
+          <button type="submit" class="woo-tasks-primary-action">${isNew ? "Create" : "Save"}</button>
+        </div>`
+      : "";
+
+    const obligationsHtml = detailObligations.length === 0
       ? `<p class="woo-tasks-detail-empty">No obligations.</p>`
-      : `<ol class="woo-tasks-detail-obligations">${detail.obligations.map((o) => {
-          const here = o.key === detail.cursorKey;
+      : `<ol class="woo-tasks-detail-obligations">${detailObligations.map((o) => {
+          const here = o.key === detailCursorKey;
           const flag = o.met ? "✓" : here ? "▶" : " ";
           const role = o.role ? `<span class="woo-tasks-detail-obligation-role">${escapeHtml(o.role)}</span>` : "";
           const criterion = o.criterion ? `<span class="woo-tasks-detail-obligation-criterion">${escapeHtml(o.criterion)}</span>` : "";
@@ -1445,9 +1478,9 @@ export class WooTasksKanbanElement extends HTMLElement {
             ${role}${criterion}
           </li>`;
         }).join("")}</ol>`;
-    const logHtml = detail.log.length === 0
+    const logHtml = detailLog.length === 0
       ? `<p class="woo-tasks-detail-empty">No log entries.</p>`
-      : `<ul class="woo-tasks-detail-log">${[...detail.log].reverse().map((entry) => {
+      : `<ul class="woo-tasks-detail-log">${[...detailLog].reverse().map((entry) => {
           const ts = entry.ts ? new Date(entry.ts).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
           const actorLabel = entry.actor ? actorDisplay(entry.actor, actorNames) : "—";
           const detailParts = [
@@ -1461,54 +1494,55 @@ export class WooTasksKanbanElement extends HTMLElement {
             ${detailParts}
           </li>`;
         }).join("")}</ul>`;
-    const waitHtml = detail.waitFor.length === 0
+    const waitHtml = detailWaitFor.length === 0
       ? ""
       : `<section class="woo-tasks-detail-waitfor">
           <h4>Waiting on</h4>
-          <ul>${detail.waitFor.map((w) => `<li>${escapeHtml(JSON.stringify(w))}</li>`).join("")}</ul>
+          <ul>${detailWaitFor.map((w) => `<li>${escapeHtml(JSON.stringify(w))}</li>`).join("")}</ul>
         </section>`;
-    const linksHtml = detail.links.length === 0
+    const linksHtml = detailLinks.length === 0
       ? ""
       : `<section class="woo-tasks-detail-links">
           <h4>Links</h4>
-          <ul>${detail.links.map((l) => `<li>${escapeHtml(l.role ?? "link")} → ${escapeHtml(l.to ?? "—")}</li>`).join("")}</ul>
+          <ul>${detailLinks.map((l) => `<li>${escapeHtml(l.role ?? "link")} → ${escapeHtml(l.to ?? "—")}</li>`).join("")}</ul>
         </section>`;
-    const status = detail.complete ? "complete" : detail.terminal ? "dropped" : detail.location && detail.location !== this.model.registryId ? `held by ${actorDisplay(detail.location, actorNames)}` : "ready";
-    const nameBody = editing === "name"
-      ? `<form class="woo-tasks-detail-edit" data-tasks-detail-edit="name">
-          <input type="text" name="name" value="${escapeHtml(detail.name || detail.id)}" required autocomplete="off">
-          <button type="submit" data-tasks-detail-edit-submit>Save</button>
-          <button type="button" data-tasks-detail-edit-cancel>Cancel</button>
-        </form>`
-      : `<h3 data-tasks-detail-field="name">
-          <span class="woo-tasks-detail-name">${escapeHtml(detail.name || detail.id)}</span>
-          <button type="button" data-tasks-detail-edit-open="name" class="woo-tasks-detail-edit-icon" aria-label="Rename task">✎</button>
-        </h3>`;
+
+    // Sections that only make sense for an existing, persisted task. New
+    // tasks haven't been minted yet, so obligations / log / waitFor / links
+    // would be empty and confusing.
+    const persistentSections = isNew ? "" : `
+      <section class="woo-tasks-detail-section">
+        <h4>Obligations</h4>
+        ${obligationsHtml}
+      </section>
+      ${waitHtml}
+      ${linksHtml}
+      <section class="woo-tasks-detail-section">
+        <h4>Log</h4>
+        ${logHtml}
+      </section>
+    `;
+
     return `
-      <aside class="woo-tasks-detail" data-tasks-detail data-task-id="${escapeHtml(detail.id)}">
-        <header class="woo-tasks-detail-header">
-          ${nameBody}
-          <button type="button" data-tasks-detail-close aria-label="Close">×</button>
-        </header>
-        <div class="woo-tasks-detail-meta">
-          <span class="woo-tasks-detail-kind">${escapeHtml(detail.kind || "task")}</span>
-          <span class="woo-tasks-detail-status">${escapeHtml(status)}</span>
-        </div>
-        ${labels}
-        <section class="woo-tasks-detail-section">
-          <h4>Body</h4>
-          ${text}
-        </section>
-        <section class="woo-tasks-detail-section">
-          <h4>Obligations</h4>
-          ${obligationsHtml}
-        </section>
-        ${waitHtml}
-        ${linksHtml}
-        <section class="woo-tasks-detail-section">
-          <h4>Log</h4>
-          ${logHtml}
-        </section>
+      <aside class="woo-tasks-detail" data-tasks-detail data-task-id="${escapeHtml(dataTaskId)}" data-task-mode="${escapeHtml(mode)}">
+        <form data-tasks-detail-form class="woo-tasks-detail-form">
+          <header class="woo-tasks-detail-header">
+            ${headerTitle}
+            ${editToggle}
+            <button type="button" data-tasks-detail-close aria-label="Close">×</button>
+          </header>
+          <div class="woo-tasks-detail-meta">
+            ${kindBlock}
+            <span class="woo-tasks-detail-status">${escapeHtml(status)}</span>
+          </div>
+          ${labelsBlock}
+          <section class="woo-tasks-detail-section">
+            <h4>Body</h4>
+            ${bodyBlock}
+          </section>
+          ${formActions}
+          ${persistentSections}
+        </form>
       </aside>
     `;
   }
@@ -1555,7 +1589,7 @@ export class WooTasksKanbanElement extends HTMLElement {
 
   private renderFilterBar(visibleCount = this.filteredTasks().length): string {
     const labels = Array.from(this.filterLabels);
-    const canCreate = this.model.policies.length > 0 && !this.createOpen;
+    const canCreate = this.model.policies.length > 0 && !this.openDetail?.isNew;
     const chips = labels.map((label) => `
       <span class="woo-tasks-filter-chip" data-tasks-filter-chip>
         <span class="woo-tasks-filter-chip-label">${escapeHtml(label)}</span>
@@ -1703,43 +1737,6 @@ export class WooTasksKanbanElement extends HTMLElement {
     const status = this.adminStatus[section];
     if (status.state === "idle" || !status.message) return "";
     return `<p class="woo-tasks-admin-status ${escapeHtml(status.state)}" role="status">${escapeHtml(status.message)}</p>`;
-  }
-
-  private renderCreateForm(): string {
-    const { policies } = this.model;
-    const draftKind = this.createDraft.kind || policies[0] || "";
-    const options = policies
-      .map((kind) => `<option value="${escapeHtml(kind)}"${kind === draftKind ? " selected" : ""}>${escapeHtml(kind)}</option>`)
-      .join("");
-    return `
-      <form class="woo-tasks-create" data-tasks-create>
-        <div class="woo-tasks-create-head">
-          <h3>New task</h3>
-          <button type="button" data-tasks-create-cancel aria-label="Cancel">×</button>
-        </div>
-        <div class="woo-tasks-create-row">
-          <label class="woo-tasks-create-field woo-tasks-create-name">
-            <span class="woo-tasks-create-label">Name</span>
-            <input type="text" name="name" value="${escapeHtml(this.createDraft.name)}" required maxlength="240" autocomplete="off">
-          </label>
-          <label class="woo-tasks-create-field woo-tasks-create-kind">
-            <span class="woo-tasks-create-label">Kind</span>
-            <select name="kind" required>${options}</select>
-          </label>
-          <label class="woo-tasks-create-field woo-tasks-create-labels-field">
-            <span class="woo-tasks-create-label">Labels <span class="woo-tasks-create-hint">(comma-separated)</span></span>
-            <input type="text" name="labels" value="${escapeHtml(this.createDraft.labels)}" autocomplete="off">
-          </label>
-        </div>
-        <label class="woo-tasks-create-field woo-tasks-create-body">
-          <span class="woo-tasks-create-label">Body</span>
-          <textarea name="text" rows="12" placeholder="markdown body (optional)">${escapeHtml(this.createDraft.text)}</textarea>
-        </label>
-        <div class="woo-tasks-create-actions">
-          <button type="submit" data-tasks-create-submit>Create</button>
-        </div>
-      </form>
-    `;
   }
 
   private renderCard(task: KanbanTask, actorNames: Record<string, string>): string {

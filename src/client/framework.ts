@@ -845,116 +845,29 @@ export function registerCoreObservationHandlers(registry: ObservationRegistry) {
       if (room) draft.patchObject(item, { location: room });
     }
   });
-  registry.observation({
-    types: ["pin_moved", "note_moved", "pin_resized", "note_resized"],
-    route: "sequenced",
-    reduce: (draft, envelope) => {
-      const obs = envelope.observation;
-      const pin = String(obs.pin ?? obs.id ?? "");
-      if (!pin) return;
-      const fields: Record<string, unknown> = {};
-      for (const key of ["x", "y", "z", "w", "h"]) {
-        const value = Number(obs[key]);
-        if (Number.isFinite(value)) fields[key] = value;
-      }
-      if (Object.keys(fields).length > 0) draft.patchCatalogState(pin, "pinboard_note", fields);
-      const board = String(obs.board ?? "");
-      // `pinboard_layout` is a sparse per-pin overlay, not a full layout map.
-      // Readers must merge it with the board's authoritative props.layout.
-      if (board && Object.keys(fields).length > 0) draft.patchCatalogState(board, "pinboard_layout", { [pin]: fields });
-    }
-  });
-  registry.observation({
-    types: ["pin_recolored", "note_color_changed"],
-    route: "sequenced",
-    reduce: (draft, envelope) => {
-      const obs = envelope.observation;
-      const pin = String(obs.pin ?? obs.note ?? obs.id ?? "");
-      if (!pin) return;
-      draft.patchCatalogState(pin, "pinboard_note", { color: obs.color });
-    }
-  });
+  // `note_edited` / `note_writers_changed` update the underlying $note's
+  // canonical props so any surface (inventory, look-at, search) sees the new
+  // text/writers. Catalog overlays (pinboard_note, taskspace_task) that mirror
+  // these fields for fast component access are patched by the catalog's own
+  // observation handler — see catalogs/pinboard/ui and catalogs/taskspace/ui.
   registry.observation({
     types: ["note_edited"],
     route: "sequenced",
     reduce: (draft, envelope) => {
-      const obs = envelope.observation;
-      const note = String(obs.note ?? obs.pin ?? obs.id ?? "");
-      if (!note) return;
-      const text = obs.text;
-      // $note descendants live under several catalog overlays; without a
-      // class hint on the wire we patch all the surfaces that subscribe
-      // to note text. Surfaces that don't carry the note key ignore the
-      // patch (catalogState is per-subject scoped).
-      draft.patchCatalogState(note, "pinboard_note", { text });
-      draft.patchCatalogState(note, "taskspace_task", { text });
-      draft.patchObjectProps(note, { text });
+      const note = String(envelope.observation.note ?? envelope.observation.pin ?? envelope.observation.id ?? "");
+      if (note) draft.patchObjectProps(note, { text: envelope.observation.text });
     }
   });
   registry.observation({
     types: ["note_writers_changed"],
     route: "sequenced",
     reduce: (draft, envelope) => {
-      const obs = envelope.observation;
-      const note = String(obs.note ?? obs.pin ?? obs.id ?? "");
+      const note = String(envelope.observation.note ?? envelope.observation.pin ?? envelope.observation.id ?? "");
       if (!note) return;
-      const writers = Array.isArray(obs.writers) ? obs.writers.filter((item) => typeof item === "string") : [];
-      draft.patchCatalogState(note, "pinboard_note", { writers });
-      draft.patchCatalogState(note, "taskspace_task", { writers });
+      const writers = Array.isArray(envelope.observation.writers)
+        ? envelope.observation.writers.filter((item) => typeof item === "string")
+        : [];
       draft.patchObjectProps(note, { writers });
-    }
-  });
-  registry.observation({
-    types: ["note_added"],
-    route: "sequenced",
-    reduce: (draft, envelope) => {
-      const note = envelope.observation.note;
-      if (!note || typeof note !== "object" || Array.isArray(note)) return;
-      const id = String((note as any).id ?? envelope.observation.pin ?? "");
-      if (!id) return;
-      const board = String(envelope.observation.board ?? "");
-      draft.patchObject(id, {
-        name: typeof (note as any).name === "string" ? (note as any).name : undefined,
-        owner: typeof (note as any).owner === "string" ? (note as any).owner : undefined
-      });
-      draft.patchCatalogState(id, "pinboard_note", pinboardNoteState(note));
-      // `pinboard_layout` entries are sparse overlays keyed by pin id; merge
-      // with props.layout before rendering.
-      if (board) draft.patchCatalogState(board, "pinboard_layout", { [id]: pinboardLayoutState(note) });
-    }
-  });
-  registry.observation({
-    types: ["pin_removed", "note_deleted"],
-    route: "sequenced",
-    reduce: (draft, envelope) => {
-      const id = String(envelope.observation.pin ?? envelope.observation.note ?? envelope.observation.id ?? "");
-      if (id) {
-        draft.clearAuthoritative(id);
-        draft.clearCatalogState(id, "pinboard_note");
-      }
-      const board = String(envelope.observation.board ?? "");
-      if (board && id) draft.patchCatalogState(board, "pinboard_layout", { [id]: null });
-    }
-  });
-  registry.observation({
-    types: ["pinboard_entered", "pinboard_left"],
-    route: "sequenced",
-    reduce: (draft, envelope) => {
-      const board = String(envelope.observation.board ?? "");
-      const actor = String(envelope.observation.actor ?? "");
-      if (!board || !actor) return;
-      draft.patchCatalogState(board, "pinboard_presence", {
-        [actor]: envelope.observation.type === "pinboard_left" ? false : true
-      });
-    }
-  });
-  registry.observation({
-    types: ["notes_cleared"],
-    route: "sequenced",
-    reduce: (draft, envelope) => {
-      for (const id of Array.isArray(envelope.observation.notes) ? envelope.observation.notes : []) {
-        if (typeof id === "string" && id) draft.clearCatalogState(id, "pinboard_note");
-      }
     }
   });
   registry.observation({
@@ -999,186 +912,6 @@ export function registerCoreObservationHandlers(registry: ObservationRegistry) {
       const name = String(obs.name ?? "");
       if (!target || !name) return;
       draft.patchObjectProps(target, { [name]: obs.value });
-    }
-  });
-  registry.observation({
-    types: ["loop_started"],
-    route: "both",
-    reduce: (draft, envelope) => {
-      const slot = String(envelope.observation.slot ?? "");
-      if (slot) draft.patchObjectProps(slot, { playing: true });
-    }
-  });
-  registry.observation({
-    types: ["loop_stopped"],
-    route: "both",
-    reduce: (draft, envelope) => {
-      const slot = String(envelope.observation.slot ?? "");
-      if (slot) draft.patchObjectProps(slot, { playing: false });
-    }
-  });
-  registry.observation({
-    types: ["tempo_changed"],
-    route: "both",
-    reduce: (draft, envelope) => {
-      const obs = envelope.observation;
-      const target = String(obs.target ?? "");
-      const bpm = Number(obs.bpm);
-      if (target && Number.isFinite(bpm)) draft.patchObjectProps(target, { bpm });
-    }
-  });
-  registry.observation({
-    types: ["transport_started"],
-    route: "both",
-    reduce: (draft, envelope) => {
-      const obs = envelope.observation;
-      const target = String(obs.target ?? "");
-      if (!target) return;
-      const props: Record<string, unknown> = { playing: true };
-      const startedAt = Number(obs.started_at);
-      const bpm = Number(obs.bpm);
-      if (Number.isFinite(startedAt)) props.started_at = startedAt;
-      if (Number.isFinite(bpm)) props.bpm = bpm;
-      draft.patchObjectProps(target, props);
-    }
-  });
-  registry.observation({
-    types: ["transport_stopped"],
-    route: "both",
-    reduce: (draft, envelope) => {
-      const target = String(envelope.observation.target ?? "");
-      if (target) draft.patchObjectProps(target, { playing: false });
-    }
-  });
-  registry.observation({
-    types: ["drum_step_changed"],
-    route: "both",
-    reduce: (draft, envelope) => {
-      const obs = envelope.observation;
-      const target = String(obs.target ?? "");
-      const pattern = obs.pattern;
-      // Dubspace 0.2.4 made the full pattern snapshot the observation
-      // contract; older logs that only carry voice/step/enabled cannot be
-      // safely reconstructed inside a deterministic reducer.
-      if (target && pattern && typeof pattern === "object" && !Array.isArray(pattern)) draft.patchObjectProps(target, { pattern });
-    }
-  });
-  registry.observation({
-    types: ["scene_recalled"],
-    route: "both",
-    reduce: (draft, envelope) => {
-      const controls = envelope.observation.controls;
-      if (!controls || typeof controls !== "object" || Array.isArray(controls)) return;
-      for (const [target, props] of Object.entries(controls)) {
-        if (!props || typeof props !== "object" || Array.isArray(props)) continue;
-        draft.patchObjectProps(target, props as Record<string, unknown>);
-      }
-    }
-  });
-  registry.observation({
-    types: ["task_created"],
-    route: "sequenced",
-    reduce: (draft, envelope) => {
-      const obs = envelope.observation;
-      const task = String(obs.task ?? "");
-      if (!task) return;
-      const parent = typeof obs.parent === "string" ? obs.parent : null;
-      const space = String(obs.space ?? envelope.delivered.space ?? "");
-      // The taskspace verb emits `name` (the v0.2 $note identity slot).
-      // Tolerate the legacy `title` shape from older world frames during
-      // gap recovery so a mid-upgrade replay still projects cleanly.
-      const name = typeof obs.name === "string" ? obs.name : typeof obs.title === "string" ? obs.title : undefined;
-      draft.patchObject(task, { name });
-      const text = typeof obs.text === "string" ? obs.text : undefined;
-      draft.patchObjectProps(task, {
-        name,
-        text,
-        parent_task: parent,
-        status: "open",
-        space: space || undefined
-      });
-      draft.patchCatalogState(task, "taskspace_task", {
-        name,
-        text,
-        parent_task: parent,
-        status: "open",
-        space: space || undefined
-      });
-      if (space) draft.patchCatalogState(space, "taskspace_tree", { [task]: parent });
-    }
-  });
-  registry.observation({
-    types: ["subtask_added", "task_moved"],
-    route: "sequenced",
-    reduce: (draft, envelope) => {
-      const obs = envelope.observation;
-      const task = String(obs.child ?? obs.task ?? "");
-      if (!task) return;
-      const parent = typeof obs.parent === "string"
-        ? obs.parent
-        : typeof obs.to_parent === "string"
-          ? obs.to_parent
-          : null;
-      const index = Number(obs.index);
-      const space = String(obs.space ?? envelope.delivered.space ?? "");
-      draft.patchObjectProps(task, { parent_task: parent });
-      draft.patchCatalogState(task, "taskspace_task", { parent_task: parent });
-      if (space) {
-        draft.patchCatalogState(space, "taskspace_tree", {
-          [task]: parent,
-          [`index:${task}`]: Number.isFinite(index) ? index : undefined
-        });
-      }
-    }
-  });
-  registry.observation({
-    types: ["task_claimed", "task_released", "status_changed"],
-    route: "sequenced",
-    reduce: (draft, envelope) => {
-      const obs = envelope.observation;
-      const task = String(obs.task ?? "");
-      if (!task) return;
-      const props: Record<string, unknown> = {};
-      if (obs.type === "task_claimed") {
-        props.assignee = obs.actor;
-        props.status = "claimed";
-      } else if (obs.type === "task_released") {
-        props.assignee = null;
-        props.status = "open";
-      } else {
-        props.status = obs.to;
-      }
-      draft.patchObjectProps(task, props);
-      draft.patchCatalogState(task, "taskspace_task", props);
-    }
-  });
-  registry.observation({
-    types: ["requirement_added", "requirement_checked", "message_added", "artifact_attached"],
-    route: "sequenced",
-    reduce: (draft, envelope) => {
-      const obs = envelope.observation;
-      const task = String(obs.task ?? "");
-      if (!task) return;
-      if (obs.type === "requirement_added") {
-        const index = Number(obs.index);
-        if (Number.isFinite(index)) {
-          draft.patchCatalogState(task, "taskspace_task", { [`requirement:${index}`]: { text: obs.text, checked: false } });
-        }
-      } else if (obs.type === "requirement_checked") {
-        const index = Number(obs.index);
-        if (Number.isFinite(index)) {
-          draft.patchCatalogState(task, "taskspace_task", { [`requirement_checked:${index}`]: obs.checked === true });
-        }
-      } else if (obs.type === "message_added") {
-        const ts = Number(obs.ts);
-        const key = Number.isFinite(ts) ? `message:${ts}` : `message:${envelope.delivered.seq ?? envelope.delivered.receivedAt}`;
-        draft.patchCatalogState(task, "taskspace_task", { [key]: { actor: obs.actor, body: obs.body, ts: Number.isFinite(ts) ? ts : undefined } });
-      } else {
-        const ref = obs.ref;
-        const addedAt = ref && typeof ref === "object" && !Array.isArray(ref) ? Number((ref as any).added_at) : NaN;
-        const key = Number.isFinite(addedAt) ? `artifact:${addedAt}` : `artifact:${envelope.delivered.seq ?? envelope.delivered.receivedAt}`;
-        draft.patchCatalogState(task, "taskspace_task", { [key]: ref });
-      }
     }
   });
   registry.observation({
@@ -1369,14 +1102,6 @@ function stripUndefined<T extends Record<string, unknown>>(value: T): T {
 function pinboardNoteState(note: any): Record<string, unknown> {
   const fields: Record<string, unknown> = {};
   for (const key of ["x", "y", "z", "w", "h", "text", "color", "author", "owner", "writers"]) {
-    if (note?.[key] !== undefined) fields[key] = note[key];
-  }
-  return fields;
-}
-
-function pinboardLayoutState(note: any): Record<string, unknown> {
-  const fields: Record<string, unknown> = {};
-  for (const key of ["x", "y", "z", "w", "h"]) {
     if (note?.[key] !== undefined) fields[key] = note[key];
   }
   return fields;

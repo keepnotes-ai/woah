@@ -36,6 +36,25 @@
           "chat": [{ "component": "chat:chat.space-mini", "subject": "this" }]
         }
       }
+    ],
+    "observation_handlers": [
+      {
+        "module": "taskspace-ui",
+        "types": [
+          "task_created",
+          "subtask_added",
+          "task_moved",
+          "task_claimed",
+          "task_released",
+          "status_changed",
+          "requirement_added",
+          "requirement_checked",
+          "message_added",
+          "artifact_attached",
+          "note_edited",
+          "note_writers_changed"
+        ]
+      }
     ]
   },
   "classes": [

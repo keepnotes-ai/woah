@@ -1,4 +1,9 @@
-import { escapeHtml, type WooComponentRegistry, type WooContext } from "../../../src/client/framework";
+import {
+  escapeHtml,
+  type ObservationRegistry,
+  type WooComponentRegistry,
+  type WooContext
+} from "../../../src/client/framework";
 
 export type TaskspaceTask = {
   id: string;
@@ -266,4 +271,136 @@ function renderArtifact(item: any): string {
 
 export function registerWooComponents(registry: WooComponentRegistry): void {
   registry.defineTag("woo-taskspace-workspace", WooTaskspaceWorkspaceElement);
+}
+
+export function registerWooObservationHandlers(registry: ObservationRegistry): void {
+  registry.observation({
+    types: ["task_created"],
+    route: "sequenced",
+    reduce: (draft, envelope) => {
+      const obs = envelope.observation;
+      const task = String(obs.task ?? "");
+      if (!task) return;
+      const parent = typeof obs.parent === "string" ? obs.parent : null;
+      const space = String(obs.space ?? envelope.delivered.space ?? "");
+      // The taskspace verb emits `name` (the v0.2 $note identity slot).
+      // Tolerate the legacy `title` shape from older world frames during
+      // gap recovery so a mid-upgrade replay still projects cleanly.
+      const name = typeof obs.name === "string" ? obs.name : typeof obs.title === "string" ? obs.title : undefined;
+      draft.patchObject(task, { name });
+      const text = typeof obs.text === "string" ? obs.text : undefined;
+      draft.patchObjectProps(task, {
+        name,
+        text,
+        parent_task: parent,
+        status: "open",
+        space: space || undefined
+      });
+      draft.patchCatalogState(task, "taskspace_task", {
+        name,
+        text,
+        parent_task: parent,
+        status: "open",
+        space: space || undefined
+      });
+      if (space) draft.patchCatalogState(space, "taskspace_tree", { [task]: parent });
+    }
+  });
+  registry.observation({
+    types: ["subtask_added", "task_moved"],
+    route: "sequenced",
+    reduce: (draft, envelope) => {
+      const obs = envelope.observation;
+      const task = String(obs.child ?? obs.task ?? "");
+      if (!task) return;
+      const parent = typeof obs.parent === "string"
+        ? obs.parent
+        : typeof obs.to_parent === "string"
+          ? obs.to_parent
+          : null;
+      const index = Number(obs.index);
+      const space = String(obs.space ?? envelope.delivered.space ?? "");
+      draft.patchObjectProps(task, { parent_task: parent });
+      draft.patchCatalogState(task, "taskspace_task", { parent_task: parent });
+      if (space) {
+        draft.patchCatalogState(space, "taskspace_tree", {
+          [task]: parent,
+          [`index:${task}`]: Number.isFinite(index) ? index : undefined
+        });
+      }
+    }
+  });
+  registry.observation({
+    types: ["task_claimed", "task_released", "status_changed"],
+    route: "sequenced",
+    reduce: (draft, envelope) => {
+      const obs = envelope.observation;
+      const task = String(obs.task ?? "");
+      if (!task) return;
+      const props: Record<string, unknown> = {};
+      if (obs.type === "task_claimed") {
+        props.assignee = obs.actor;
+        props.status = "claimed";
+      } else if (obs.type === "task_released") {
+        props.assignee = null;
+        props.status = "open";
+      } else {
+        props.status = obs.to;
+      }
+      draft.patchObjectProps(task, props);
+      draft.patchCatalogState(task, "taskspace_task", props);
+    }
+  });
+  registry.observation({
+    types: ["requirement_added", "requirement_checked", "message_added", "artifact_attached"],
+    route: "sequenced",
+    reduce: (draft, envelope) => {
+      const obs = envelope.observation;
+      const task = String(obs.task ?? "");
+      if (!task) return;
+      if (obs.type === "requirement_added") {
+        const index = Number(obs.index);
+        if (Number.isFinite(index)) {
+          draft.patchCatalogState(task, "taskspace_task", { [`requirement:${index}`]: { text: obs.text, checked: false } });
+        }
+      } else if (obs.type === "requirement_checked") {
+        const index = Number(obs.index);
+        if (Number.isFinite(index)) {
+          draft.patchCatalogState(task, "taskspace_task", { [`requirement_checked:${index}`]: obs.checked === true });
+        }
+      } else if (obs.type === "message_added") {
+        const ts = Number(obs.ts);
+        const key = Number.isFinite(ts) ? `message:${ts}` : `message:${envelope.delivered.seq ?? envelope.delivered.receivedAt}`;
+        draft.patchCatalogState(task, "taskspace_task", { [key]: { actor: obs.actor, body: obs.body, ts: Number.isFinite(ts) ? ts : undefined } });
+      } else {
+        const ref = obs.ref;
+        const addedAt = ref && typeof ref === "object" && !Array.isArray(ref) ? Number((ref as any).added_at) : NaN;
+        const key = Number.isFinite(addedAt) ? `artifact:${addedAt}` : `artifact:${envelope.delivered.seq ?? envelope.delivered.receivedAt}`;
+        draft.patchCatalogState(task, "taskspace_task", { [key]: ref });
+      }
+    }
+  });
+  // The board overlay on a task mirrors text/writers for fast component access;
+  // the underlying obj.props patch happens in the framework's generic handler
+  // so non-board surfaces also see the update.
+  registry.observation({
+    types: ["note_edited"],
+    route: "sequenced",
+    reduce: (draft, envelope) => {
+      const note = String(envelope.observation.note ?? envelope.observation.id ?? "");
+      if (note) draft.patchCatalogState(note, "taskspace_task", { text: envelope.observation.text });
+    }
+  });
+  registry.observation({
+    types: ["note_writers_changed"],
+    route: "sequenced",
+    reduce: (draft, envelope) => {
+      const note = String(envelope.observation.note ?? envelope.observation.id ?? "");
+      if (!note) return;
+      const writers = Array.isArray(envelope.observation.writers)
+        ? envelope.observation.writers.filter((item) => typeof item === "string")
+        : [];
+      draft.patchCatalogState(note, "taskspace_task", { writers });
+    }
+  });
 }

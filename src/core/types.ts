@@ -281,7 +281,14 @@ export type MetricEvent =
   // for a remote pure verb (forwardInternalReadChecked, 2.5s timeout), and
   // "mutating" for a remote impure verb (forwardInternalChecked, no
   // timeout). Critical for diagnosing wedges that previously left no trail.
-  | { kind: "dispatch_resolved"; target: ObjRef; verb: string; host: string; path: "local" | "read" | "mutating"; pure: boolean };
+  | { kind: "dispatch_resolved"; target: ObjRef; verb: string; host: string; path: "local" | "read" | "mutating"; pure: boolean }
+  // Emitted when a parent-chain walk hits a missing intermediate. The parent
+  // ref on `start` (or one of its ancestors) points at `missing`, which has
+  // no entry in the local objects map. Treated as end-of-chain by the walk
+  // (so dispatch keeps working) and surfaced here so the orphan can be
+  // repaired via a host-scoped data migration. `tombstoned` distinguishes
+  // a recycled-out-from-under-it ancestor from a never-present id.
+  | { kind: "dangling_parent_ref"; start: ObjRef; missing: ObjRef; tombstoned: boolean };
 
 export type SequencedMessage = {
   space: ObjRef;

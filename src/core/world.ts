@@ -580,6 +580,36 @@ export class WooWorld {
   }
 
   /**
+   * Parent-chain walk helper: return the WooObject at `current` along a
+   * walk that started at `startRef`, or `null` when `current` is missing
+   * (recycled, tombstoned, or never present on this host slice). Records
+   * a `dangling_parent_ref` metric so the leak is visible.
+   *
+   * Callers that walk the parent chain (verb resolution, property
+   * inheritance, ancestry enumeration, etc.) MUST use this helper rather
+   * than `this.object(current)`. A single dangling intermediate ref —
+   * e.g. an instance whose ancestor class was recycled out from under it
+   * — would otherwise throw E_OBJNF and break unrelated dispatch on any
+   * caller that touched the broken instance. Treating dangling
+   * intermediates as end-of-chain degrades the failure to E_VERBNF /
+   * E_PROPNF / `inheritsFrom == false`, which callers already handle.
+   *
+   * Repair belongs in a host-scoped data migration; this helper is the
+   * runtime safety net.
+   */
+  private parentWalkLookup(startRef: ObjRef, current: ObjRef): WooObject | null {
+    const obj = this.objects.get(current);
+    if (obj) return obj;
+    this.recordMetric({
+      kind: "dangling_parent_ref",
+      start: startRef,
+      missing: current,
+      tombstoned: this.tombstones.has(current)
+    });
+    return null;
+  }
+
+  /**
    * Synchronous local tombstone lookup. Use isRecycledChecked for the
    * host-transparent version. Returns true for ULIDs tombstoned on this
    * host; for ULIDs owned by a remote host, this returns the local view
@@ -837,7 +867,8 @@ export class WooWorld {
     if (name === "name") return obj.name;
     let parent = obj.parent;
     while (parent) {
-      const ancestor = this.object(parent);
+      const ancestor = this.parentWalkLookup(objRef, parent);
+      if (!ancestor) break;
       const def = ancestor.propertyDefs.get(name);
       if (def) return cloneValue(def.defaultValue);
       parent = ancestor.parent;
@@ -889,6 +920,49 @@ export class WooWorld {
     this.setProp(objRef, "name", name);
   }
 
+  /**
+   * Migration-only parent rewrite. Sets `obj.parent = newParent` for an
+   * object on this host slice and persists. Updates the children-set
+   * cache only on whichever endpoints are local: tolerates a
+   * tombstoned/missing old parent and a remote/missing new parent so
+   * the call is safe even when neither end of the rewrite has a local
+   * stub. Skips permission and cycle checks — caller must ensure those
+   * (typically a host-scoped data migration with system authority).
+   *
+   * Returns true when a rewrite happened, false when `objRef` isn't on
+   * this host or already has the requested parent (so reruns are safe).
+   *
+   * Use cases:
+   *   - Repairing dangling parent refs after a class object was
+   *     recycled out from under instances on a different host
+   *     (e.g. the 2026-05-09 $horoscope_note repair).
+   *   - Ditto for any future class-removal that wants to graft live
+   *     instances up to a known-good ancestor without requiring
+   *     cross-cluster coordination.
+   *
+   * For ordinary @chparent / catalog-migration `change_parent` use
+   * builderChparent or chparentAuthoredObject, which enforce auth and
+   * cycle checks and require both endpoints to be locally reachable.
+   */
+  migrationSetObjectParent(objRef: ObjRef, newParent: ObjRef): boolean {
+    const obj = this.objects.get(objRef);
+    if (!obj) return false;
+    if (obj.parent === newParent) return false;
+    if (obj.parent && this.objects.has(obj.parent)) {
+      this.object(obj.parent).children.delete(objRef);
+      this.persistObject(obj.parent);
+    }
+    obj.parent = newParent;
+    if (this.objects.has(newParent)) {
+      this.object(newParent).children.add(objRef);
+      this.persistObject(newParent);
+    }
+    obj.modified = Date.now();
+    this.persistObject(objRef);
+    this.persist();
+    return true;
+  }
+
   // Permission-gated wrapper exposed as the `set_object_name` builtin.
   // Used by catalog verbs (e.g. $root:@rename) that need to mutate an
   // object's display name from woocode without holding wizard authority
@@ -934,6 +1008,14 @@ export class WooWorld {
   }
 
   resolveVerb(objRef: ObjRef, name: string): ResolvedVerb {
+    // Dispatching to a recycled/tombstoned target must raise E_OBJNF, not
+    // fall through to E_VERBNF. The parent-chain walk inside
+    // resolveVerbFrom tolerates missing *intermediate* ancestors (so
+    // dispatch keeps working when one of the target's ancestor classes
+    // is gone) — this start-object check preserves the
+    // "no stale-dispatch window" guarantee that tests/recycle.test.ts
+    // relies on for callers that hold the target ULID after recycle.
+    if (!this.objects.has(objRef)) throw wooError("E_OBJNF", `object not found: ${objRef}`, objRef);
     const parentMatch = this.resolveVerbFrom(objRef, name, false);
     if (parentMatch) return parentMatch;
     if (this.canCarryFeatures(objRef)) {
@@ -951,7 +1033,8 @@ export class WooWorld {
   resolveVerbFrom(startRef: ObjRef | null, name: string, required = true): ResolvedVerb | null {
     let current: ObjRef | null = startRef;
     while (current) {
-      const obj = this.object(current);
+      const obj = startRef !== null ? this.parentWalkLookup(startRef, current) : this.objects.get(current) ?? null;
+      if (!obj) break;
       const verb = this.ownVerbNamed(current, name);
       if (verb) return { definer: current, verb };
       current = obj.parent;
@@ -998,7 +1081,8 @@ export class WooWorld {
     const names = new Set<string>();
     let current: ObjRef | null = objRef;
     while (current) {
-      const obj = this.object(current);
+      const obj: WooObject | null = current === objRef ? this.object(current) : this.parentWalkLookup(objRef, current);
+      if (!obj) break;
       for (const name of obj.propertyDefs.keys()) names.add(name);
       for (const name of obj.properties.keys()) names.add(name);
       current = obj.parent;
@@ -1579,7 +1663,8 @@ export class WooWorld {
       let walker: ObjRef | null = objRef;
       let hasDef = false;
       while (walker) {
-        const ancestor = this.object(walker);
+        const ancestor: WooObject | null = walker === objRef ? obj : this.parentWalkLookup(objRef, walker);
+        if (!ancestor) break;
         if (ancestor.propertyDefs.has(name)) { hasDef = true; break; }
         walker = ancestor.parent;
       }
@@ -1598,7 +1683,8 @@ export class WooWorld {
     }
     let current: ObjRef | null = objRef;
     while (current) {
-      const obj = this.object(current);
+      const obj: WooObject | null = current === objRef ? this.object(current) : this.parentWalkLookup(objRef, current);
+      if (!obj) break;
       const def = obj.propertyDefs.get(name);
       if (def) {
         return {
@@ -3057,7 +3143,9 @@ export class WooWorld {
     while (current && !seen.has(current)) {
       ancestors.push(current);
       seen.add(current);
-      current = this.object(current).parent;
+      const obj = this.parentWalkLookup(objRef, current);
+      if (!obj) break;
+      current = obj.parent;
     }
     return ancestors.reverse();
   }
@@ -3787,7 +3875,11 @@ export class WooWorld {
     const parentChain: Record<string, WooValue>[] = [];
     let current: ObjRef | null = objRef;
     while (current) {
-      const item = this.object(current);
+      const item: WooObject | null = current === objRef ? this.object(current) : this.parentWalkLookup(objRef, current);
+      if (!item) {
+        parentChain.push({ id: current, name: "<missing>", missing: true });
+        break;
+      }
       parentChain.push({
         id: current,
         name: item.name,
@@ -3928,7 +4020,8 @@ export class WooWorld {
   private editorSessionPropertyInfo(editorRef: ObjRef): PropertyDef | null {
     let current: ObjRef | null = editorRef;
     while (current) {
-      const obj = this.object(current);
+      const obj: WooObject | null = current === editorRef ? this.object(current) : this.parentWalkLookup(editorRef, current);
+      if (!obj) break;
       const def = obj.propertyDefs.get("sessions");
       if (def) return def.perms === "" ? def : null;
       current = obj.parent;
@@ -4033,7 +4126,9 @@ export class WooWorld {
       const match = this.ownVerbNamed(current, name);
       walk.push({ id: current, kind: "parent", matched: match !== null });
       if (match) return { definer: current, verb: match };
-      current = this.object(current).parent;
+      const obj = this.parentWalkLookup(objRef, current);
+      if (!obj) break;
+      current = obj.parent;
     }
     if (this.canCarryFeatures(objRef)) {
       for (const feature of this.featureList(objRef)) {
@@ -4042,7 +4137,9 @@ export class WooWorld {
           const match = this.ownVerbNamed(featureCurrent, name);
           walk.push({ id: featureCurrent, kind: "feature", feature, matched: match !== null });
           if (match) return { definer: featureCurrent, verb: match };
-          featureCurrent = this.object(featureCurrent).parent;
+          const obj = this.parentWalkLookup(feature, featureCurrent);
+          if (!obj) break;
+          featureCurrent = obj.parent;
         }
       }
     }
@@ -4140,7 +4237,8 @@ export class WooWorld {
     const summaries: Record<string, WooValue>[] = [];
     let current = this.object(objRef).parent;
     while (current) {
-      const obj = this.object(current);
+      const obj = this.parentWalkLookup(objRef, current);
+      if (!obj) break;
       for (const verb of obj.verbs) {
         if (shadowed.has(verb.name)) continue;
         summaries.push(this.verbSummaryForActor(actor, current, verb, { includeSource }));
@@ -4152,7 +4250,8 @@ export class WooWorld {
       for (const feature of this.featureList(objRef)) {
         let featureCurrent: ObjRef | null = feature;
         while (featureCurrent) {
-          const obj = this.object(featureCurrent);
+          const obj = this.parentWalkLookup(feature, featureCurrent);
+          if (!obj) break;
           for (const verb of obj.verbs) {
             if (shadowed.has(verb.name)) continue;
             summaries.push({ ...this.verbSummaryForActor(actor, featureCurrent, verb, { includeSource }), feature });
@@ -4176,7 +4275,8 @@ export class WooWorld {
     const summaries: Record<string, WooValue>[] = [];
     let current = this.object(objRef).parent;
     while (current) {
-      const obj = this.object(current);
+      const obj = this.parentWalkLookup(objRef, current);
+      if (!obj) break;
       for (const name of obj.propertyDefs.keys()) {
         if (seen.has(name)) continue;
         seen.add(name);
@@ -6089,7 +6189,8 @@ export class WooWorld {
   private collectVerbNames(startRef: ObjRef | null, names: Set<string>): void {
     let current: ObjRef | null = startRef;
     while (current) {
-      const obj = this.object(current);
+      const obj = startRef !== null ? this.parentWalkLookup(startRef, current) : this.objects.get(current) ?? null;
+      if (!obj) break;
       for (const verb of obj.verbs) names.add(verb.name);
       current = obj.parent;
     }
@@ -6098,7 +6199,8 @@ export class WooWorld {
   private collectSchemaNames(startRef: ObjRef | null, names: Set<string>): void {
     let current: ObjRef | null = startRef;
     while (current) {
-      const obj = this.object(current);
+      const obj = startRef !== null ? this.parentWalkLookup(startRef, current) : this.objects.get(current) ?? null;
+      if (!obj) break;
       for (const name of obj.eventSchemas.keys()) names.add(name);
       current = obj.parent;
     }
@@ -6399,7 +6501,9 @@ export class WooWorld {
     let current: ObjRef | null = objRef;
     while (current) {
       if (current === ancestorRef) return true;
-      current = this.object(current).parent;
+      const obj = this.parentWalkLookup(objRef, current);
+      if (!obj) return false;
+      current = obj.parent;
     }
     return false;
   }
@@ -8207,9 +8311,11 @@ export class WooWorld {
     const out: CommandVerbSummary[] = [];
     const seen = new Set<string>();
     const collectFrom = (start: ObjRef | null) => {
-      let current = start;
+      if (!start) return;
+      let current: ObjRef | null = start;
       while (current) {
-        const obj = this.object(current);
+        const obj: WooObject | null = current === start ? this.object(current) : this.parentWalkLookup(start, current);
+        if (!obj) break;
         for (const verb of obj.verbs) {
           if (!verbNameMatches(verb, name)) continue;
           const key = `${current}:${verb.slot ?? verb.name}`;

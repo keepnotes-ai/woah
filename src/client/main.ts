@@ -2529,7 +2529,7 @@ function renderLogin() {
         <button type="submit" class="login-submit" ${pending ? "disabled" : ""}>
           ${pending ? "Signing in..." : "Sign in"}
         </button>
-        ${error ? `<p class="login-error" role="alert">${escapeHtml(error)}</p>` : ""}
+        ${error ? `<p class="alert alert--danger login-error" role="alert">${escapeHtml(error)}</p>` : ""}
       </form>
     </div>
   `;
@@ -2631,7 +2631,7 @@ function renderObservationsPanel() {
           ${state.observations.map((item) => `<pre class="card card--pre">${escapeHtml(JSON.stringify(item, null, 2))}</pre>`).join("") || "<p>No observations yet.</p>"}
         </div>
       `}
-      <button class="events-logout" data-logout aria-label="Log out${state.actor ? ` ${state.actor}` : ""}" title="Log out${state.actor ? ` ${state.actor}` : ""}">
+      <button class="icon-button events-logout" data-logout aria-label="Log out${state.actor ? ` ${state.actor}` : ""}" title="Log out${state.actor ? ` ${state.actor}` : ""}">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
       </button>
     </aside>
@@ -2706,7 +2706,7 @@ function renderDubspace() {
   if (!tag) {
     return `
       <section class="toolbar"><h1>Dubspace</h1></section>
-      <section class="panel"><p class="empty-state">No dubspace UI is registered for this space.</p></section>
+      <section class="card"><p class="empty-state">No dubspace UI is registered for this space.</p></section>
     `;
   }
   const spaceId = dubspaceSpace();
@@ -3533,7 +3533,7 @@ function setCurrentChatRoom(room: string) {
 
 function renderChat() {
   const tag = chatFrameComponentTag();
-  if (!tag) return `<section class="panel"><p class="empty-state">No chat UI is registered for this room.</p></section>`;
+  if (!tag) return `<section class="card"><p class="empty-state">No chat UI is registered for this room.</p></section>`;
   return `<${tag} data-chat-space-host></${tag}>`;
 }
 
@@ -3884,7 +3884,7 @@ function renderPinboard() {
   if (!tag) {
     return `
       <section class="toolbar"><h1>Pinboard</h1></section>
-      <section class="panel"><p class="empty-state">No pinboard UI is registered for this board.</p></section>
+      <section class="card"><p class="empty-state">No pinboard UI is registered for this board.</p></section>
     `;
   }
   const boardId = pinboardSpace();
@@ -3897,12 +3897,12 @@ function renderSpaceChatPanel(space: string) {
   const tag = component?.declaration.tag;
   if (!tag) {
     return `
-      <section class="panel space-chat-panel" data-space-chat-missing="${escapeHtml(space)}" style="height:${height}px">
+      <section class="card space-chat-panel" data-space-chat-missing="${escapeHtml(space)}" style="height:${height}px">
         <p class="chat-empty">No chat UI is registered for this space.</p>
       </section>
     `;
   }
-  return `<${tag} class="panel space-chat-panel" data-space-chat-panel data-space-chat-space="${escapeHtml(space)}" style="height:${height}px"></${tag}>`;
+  return `<${tag} class="card space-chat-panel" data-space-chat-panel data-space-chat-space="${escapeHtml(space)}" style="height:${height}px"></${tag}>`;
 }
 
 function renderPinboardMap(notes: any[], present: string[], width: number, height: number, palette: string[] = pinboardModel()?.palette ?? []) {
@@ -4827,7 +4827,7 @@ function renderTaskspace() {
   if (!tag) {
     return `
       <section class="toolbar"><h1>Taskspace</h1></section>
-      <section class="panel"><p class="empty-state">No taskspace UI is registered for this space.</p></section>
+      <section class="card"><p class="empty-state">No taskspace UI is registered for this space.</p></section>
     `;
   }
   const space = taskspaceSpace();
@@ -4989,7 +4989,7 @@ function renderIde() {
   const objects = Object.keys(state.world?.objects ?? {}).sort();
   const installTarget = state.selectedObject || defaultSelectedObject();
   const scopedSmoke = scopedProjectionSmokeEnabled
-    ? `<div class="panel"><h2>Scoped projection smoke</h2><pre>${escapeHtml(JSON.stringify(state.scopedProjectionSmoke ?? {}, null, 2))}</pre></div>`
+    ? `<div class="card"><h2>Scoped projection smoke</h2><pre>${escapeHtml(JSON.stringify(state.scopedProjectionSmoke ?? {}, null, 2))}</pre></div>`
     : "";
   return `
     <section class="toolbar">
@@ -4998,8 +4998,8 @@ function renderIde() {
       <button data-refresh-object>Inspect</button>
     </section>
     <section class="split">
-      <div class="panel"><pre>${escapeHtml(JSON.stringify(state.world?.objects?.[state.selectedObject] ?? {}, null, 2))}</pre></div>
-      <div class="panel editor">
+      <div class="card"><pre>${escapeHtml(JSON.stringify(state.world?.objects?.[state.selectedObject] ?? {}, null, 2))}</pre></div>
+      <div class="card editor">
         <input data-verb-name value="set_feedback" />
         <textarea data-source>${escapeHtml(defaultSource())}</textarea>
         <div class="button-row">
@@ -5018,7 +5018,7 @@ function renderScopedIde() {
   const object = state.selectedObject || defaultSelectedObject();
   const summary = scopedObjectSummary(object);
   const scopedSmoke = scopedProjectionSmokeEnabled
-    ? `<div class="panel"><h2>Scoped projection smoke</h2><pre>${escapeHtml(JSON.stringify(state.scopedProjectionSmoke ?? {}, null, 2))}</pre></div>`
+    ? `<div class="card"><h2>Scoped projection smoke</h2><pre>${escapeHtml(JSON.stringify(state.scopedProjectionSmoke ?? {}, null, 2))}</pre></div>`
     : "";
   return `
     <section class="toolbar">
@@ -5027,7 +5027,7 @@ function renderScopedIde() {
       <button data-scoped-object-inspect>Inspect</button>
     </section>
     <section class="split">
-      <div class="panel"><pre>${escapeHtml(JSON.stringify(summary ?? { id: object, loading: Boolean(object) }, null, 2))}</pre></div>
+      <div class="card"><pre>${escapeHtml(JSON.stringify(summary ?? { id: object, loading: Boolean(object) }, null, 2))}</pre></div>
     </section>
     ${scopedSmoke}
   `;

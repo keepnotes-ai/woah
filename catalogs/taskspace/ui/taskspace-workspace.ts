@@ -59,8 +59,8 @@ export class WooTaskspaceWorkspaceElement extends HTMLElement {
         </div>
       </section>
       <section class="space-chat-shell" data-space-chat-shell="${escapeHtml(this.model.space)}">
-        <section class="taskspace-layout has-space-chat" data-space-chat-layout="${escapeHtml(this.model.space)}">
-          <div class="panel tree">
+        <section class="split taskspace-layout has-space-chat" data-space-chat-layout="${escapeHtml(this.model.space)}">
+          <div class="card tree">
             <div class="task-create">
               <input data-new-title placeholder="Root task title" />
               <input data-new-description placeholder="Description" />
@@ -70,7 +70,7 @@ export class WooTaskspaceWorkspaceElement extends HTMLElement {
               ${roots.map((id) => this.renderTaskNode(id, tasks, 0, active)).join("") || `<div class="empty-state">${allTasks.length > 0 ? "No tasks match the selected statuses." : "No tasks yet."}</div>`}
             </div>
           </div>
-          <div class="panel inspector">${selected ? this.renderTaskInspector(selected, tasks) : `<div class="empty-state">Select a task.</div>`}</div>
+          <div class="card inspector">${selected ? this.renderTaskInspector(selected, tasks) : `<div class="empty-state">Select a task.</div>`}</div>
         </section>
         <div data-tool-space-chat></div>
       </section>

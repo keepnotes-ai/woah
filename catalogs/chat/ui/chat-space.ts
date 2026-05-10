@@ -87,8 +87,8 @@ export class WooChatSpaceElement extends HTMLElement {
           ${this.renderRoomTitle(room)}
           <button data-chat-enter ${this.model.canSend ? "" : "disabled"}>Enter</button>
         </section>
-        <section class="chat-layout solo">
-          <div class="panel chat-empty-panel">
+        <section class="split chat-layout solo">
+          <div class="card chat-empty-panel">
             <p>${escapeHtml(this.model.canSend ? this.model.roomDescription || "Enter the room to chat." : "Connecting...")}</p>
           </div>
         </section>
@@ -101,8 +101,8 @@ export class WooChatSpaceElement extends HTMLElement {
       <section class="toolbar">
         ${this.renderRoomTitle(room)}
       </section>
-      <section class="chat-layout">
-        <div class="panel chat-panel">
+      <section class="split split--side-fixed chat-layout">
+        <div class="card chat-panel">
           <div class="chat-feed" aria-live="polite">
             ${this.model.lines.map((line) => renderChatLineHtml(line, (id) => this.actorLabel(id))).join("") || `<div class="chat-empty">${escapeHtml(this.model.roomDescription || "No chat events yet.")}</div>`}
           </div>
@@ -111,7 +111,7 @@ export class WooChatSpaceElement extends HTMLElement {
             <button>Send</button>
           </form>
         </div>
-        <aside class="panel chat-presence">
+        <aside class="card chat-presence">
           <h2>Present</h2>
           <div class="presence-list">
             ${this.model.present.map((id) => `<button data-chat-recipient="${escapeHtml(id)}">${escapeHtml(this.actorLabel(id))}<span>${escapeHtml(id)}</span></button>`).join("") || "<p>No actors present.</p>"}
@@ -217,7 +217,7 @@ export class WooSpaceChatPanelElement extends HTMLElement {
       <div class="space-chat-head">
         <h2>Chat</h2>
         <span>${escapeHtml(spaceName)}</span>
-        <button type="button" class="space-chat-toggle" data-space-chat-toggle aria-label="${toggleLabel}" title="${toggleLabel}" aria-expanded="${this.collapsed ? "false" : "true"}">${toggleGlyph}</button>
+        <button type="button" class="icon-button space-chat-toggle" data-space-chat-toggle aria-label="${toggleLabel}" title="${toggleLabel}" aria-expanded="${this.collapsed ? "false" : "true"}">${toggleGlyph}</button>
       </div>
     `;
     if (this.collapsed) {

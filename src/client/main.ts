@@ -1,11 +1,17 @@
 import "./styles.css";
 import chatManifest from "../../catalogs/chat/manifest.json";
+import demoworldManifest from "../../catalogs/demoworld/manifest.json";
+import dispenserManifest from "../../catalogs/dispenser/manifest.json";
 import dubspaceManifest from "../../catalogs/dubspace/manifest.json";
+import noteManifest from "../../catalogs/note/manifest.json";
 import pinboardManifest from "../../catalogs/pinboard/manifest.json";
 import tasksManifest from "../../catalogs/tasks/manifest.json";
 import weatherManifest from "../../catalogs/weather/manifest.json";
 import * as chatUiModule from "../../catalogs/chat/ui/chat-space";
+import * as demoworldUiModule from "../../catalogs/demoworld/ui/demoworld-chat";
+import * as dispenserUiModule from "../../catalogs/dispenser/ui/dispenser-chat";
 import * as dubspaceUiModule from "../../catalogs/dubspace/ui/dubspace-workspace";
+import * as noteUiModule from "../../catalogs/note/ui/note-chat";
 import * as pinboardUiModule from "../../catalogs/pinboard/ui/pinboard-board";
 import * as tasksUiModule from "../../catalogs/tasks/ui/kanban-board";
 import * as weatherUiModule from "../../catalogs/weather/ui/weather-badge";
@@ -2266,7 +2272,7 @@ function renderLogin() {
   const error = state.loginError ?? "";
   app.innerHTML = `
     <div class="login-shell">
-      <form class="login-card" data-login-form autocomplete="on">
+      <form class="card login-card" data-login-form autocomplete="on">
         <div class="login-brand">
           <h1 class="login-brand-name">Port</h1>
           <p class="login-brand-tagline">Coordination Space</p>
@@ -2286,7 +2292,7 @@ function renderLogin() {
         <button type="submit" class="login-submit" ${pending ? "disabled" : ""}>
           ${pending ? "Signing in..." : "Sign in"}
         </button>
-        ${error ? `<p class="login-error" role="alert">${escapeHtml(error)}</p>` : ""}
+        ${error ? `<p class="alert alert--danger login-error" role="alert">${escapeHtml(error)}</p>` : ""}
       </form>
     </div>
   `;
@@ -2385,10 +2391,10 @@ function renderObservationsPanel() {
       </div>
       ${collapsed ? "" : `
         <div class="event-list">
-          ${state.observations.map((item) => `<pre>${escapeHtml(JSON.stringify(item, null, 2))}</pre>`).join("") || "<p>No observations yet.</p>"}
+          ${state.observations.map((item) => `<pre class="card card--pre">${escapeHtml(JSON.stringify(item, null, 2))}</pre>`).join("") || "<p>No observations yet.</p>"}
         </div>
       `}
-      <button class="events-logout" data-logout aria-label="Log out${state.actor ? ` ${state.actor}` : ""}" title="Log out${state.actor ? ` ${state.actor}` : ""}">
+      <button class="icon-button events-logout" data-logout aria-label="Log out${state.actor ? ` ${state.actor}` : ""}" title="Log out${state.actor ? ` ${state.actor}` : ""}">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
       </button>
     </aside>
@@ -2429,6 +2435,9 @@ async function ensureScopedProjectionReady() {
 function installBundledCatalogUi() {
   const bundled = [
     { alias: "chat", manifest: chatManifest, objects: { "$space": "$space", "$chatroom": "$chatroom" }, modules: { "chat-ui": chatUiModule } },
+    { alias: "note", manifest: noteManifest, objects: {}, modules: { "note-chat": noteUiModule } },
+    { alias: "dispenser", manifest: dispenserManifest, objects: {}, modules: { "dispenser-chat": dispenserUiModule } },
+    { alias: "demoworld", manifest: demoworldManifest, objects: {}, modules: { "demoworld-chat": demoworldUiModule } },
     { alias: "dubspace", manifest: dubspaceManifest, objects: { "$dubspace": "$dubspace" }, modules: { "dubspace-ui": dubspaceUiModule } },
     { alias: "pinboard", manifest: pinboardManifest, objects: { "$pinboard": "$pinboard" }, modules: { "pinboard-ui": pinboardUiModule } },
     { alias: "tasks", manifest: tasksManifest, objects: { "$task_registry": "$task_registry" }, modules: { "tasks-ui": tasksUiModule } },
@@ -2449,7 +2458,7 @@ function installBundledCatalogUi() {
     if (diagnostics.length > 0) throw new Error(`bundled ${item.alias} UI manifest is invalid: ${diagnostics.join("; ")}`);
     installedCatalogUiAliases.add(item.alias);
     for (const [moduleId, mod] of Object.entries(item.modules)) {
-      ui.catalogUi.registerModuleExports(item.alias, moduleId, mod, ui.observations);
+      ui.catalogUi.registerModuleExports(item.alias, moduleId, mod, ui.observations, ui.chatFormatters);
     }
   }
 }
@@ -2459,7 +2468,7 @@ function renderDubspace() {
   if (!tag) {
     return `
       <section class="toolbar"><h1>Dubspace</h1></section>
-      <section class="panel"><p class="empty-state">No dubspace UI is registered for this space.</p></section>
+      <section class="card"><p class="empty-state">No dubspace UI is registered for this space.</p></section>
     `;
   }
   const spaceId = dubspaceSpace();
@@ -2774,42 +2783,7 @@ function enterChat() {
 }
 
 function isChatObservation(observation: any) {
-  return [
-    "said",
-    "text",
-    "said_to",
-    "said_as",
-    "emoted",
-    "posed",
-    "quoted",
-    "self_pointed",
-    "told",
-    "entered",
-    "left",
-    "looked",
-    "who",
-    "blocked_exit",
-    "taken",
-    "dropped",
-    "note_read",
-    "note_dispersed",
-    "huh",
-    "dubspace_activity",
-    "dubspace_entered",
-    "dubspace_left",
-    "pinboard_activity",
-    "pinboard_entered",
-    "pinboard_left",
-    "cockatoo_squawk",
-    "cockatoo_muffled",
-    "cockatoo_taught",
-    "cockatoo_gagged",
-    "cockatoo_ungagged",
-    "cockatoo_fed",
-    "cockatoo_pluck",
-    "cockatoo_shake",
-    "cockatoo_seen"
-  ].includes(String(observation?.type ?? ""));
+  return ui.chatFormatters.isChatType(String(observation?.type ?? ""));
 }
 
 function isDubspaceObservation(observation: any) {
@@ -3019,14 +2993,16 @@ function receiveChatEvent(observation: any, shouldRender = true) {
   // full room fan-out by design), so filter here before they reach the chat
   // pane. Without this, a verb like `:move`'s `:announce_all_but` echoes
   // every recipient's line back to the caller.
+  const type = String(observation?.type ?? "");
   if (
-    String(observation?.type ?? "") === "text"
+    type === "text"
     && typeof observation?.target === "string"
     && state.actor
     && observation.target !== state.actor
   ) return;
   applyScopedChatObservation(observation);
-  const kind = chatLineKind(observation);
+  // Side-effect branches below stay keyed on observation.type, not on the
+  // formatter-supplied kind. The formatter's kind is for rendering only.
   const presentActors = presentActorsFromObservation(observation);
   // Only adopt present_actors as the chat sidebar list when the observation
   // came from the actor's current chat room; a `look at pinboard` from the
@@ -3034,11 +3010,11 @@ function receiveChatEvent(observation: any, shouldRender = true) {
   // pinboard's subscribers.
   const observationRoom = typeof observation.room === "string" ? observation.room : "";
   const fromCurrentRoom = !observationRoom || observationRoom === chatRoom();
-  if ((kind === "looked" || kind === "who") && presentActors.length > 0 && fromCurrentRoom) state.chatPresent = presentActors;
-  if (kind === "entered" && typeof observation.actor === "string" && !state.chatPresent.includes(observation.actor)) {
+  if ((type === "looked" || type === "who") && presentActors.length > 0 && fromCurrentRoom) state.chatPresent = presentActors;
+  if (type === "entered" && typeof observation.actor === "string" && !state.chatPresent.includes(observation.actor)) {
     state.chatPresent = [...state.chatPresent, observation.actor];
   }
-  if (kind === "left" && typeof observation.actor === "string") {
+  if (type === "left" && typeof observation.actor === "string") {
     state.chatPresent = state.chatPresent.filter((id) => id !== observation.actor);
   }
   // `taken` / `dropped` (and `entered` / `left`) are room-broadcasts that the
@@ -3048,29 +3024,22 @@ function receiveChatEvent(observation: any, shouldRender = true) {
   // has to be applied here before the chat line is pushed; the verb's own
   // tell(actor, …) line ("You drop X.") already covers the doer's view.
   if (
-    (kind === "taken" || kind === "dropped" || kind === "entered" || kind === "left")
+    (type === "taken" || type === "dropped" || type === "entered" || type === "left")
     && typeof observation.actor === "string"
     && state.actor
     && observation.actor === state.actor
   ) return;
-  // `note_read` carries the full note body in `observation.text` (per the
-  // $note schema). The reader wants to see the body inline in chat;
-  // bystanders should get a brief "X reads Y." line instead of the entire
-  // body dumped into their feed.
-  let lineText = typeof observation.text === "string" ? observation.text : chatSystemText(observation);
-  if (
-    kind === "note_read"
-    && typeof observation.actor === "string"
-    && (!state.actor || observation.actor !== state.actor)
-  ) {
-    lineText = chatSystemText(observation);
-  }
+  const formatterResult = ui.chatFormatters.format(observation, chatFormatterContext());
+  const lineText = formatterResult?.text !== undefined
+    ? formatterResult.text
+    : (typeof observation.text === "string" ? observation.text : undefined);
+  const kind = formatterResult?.kind ?? type;
   pushChatLine({
     kind,
-    actor: typeof observation.actor === "string" ? observation.actor : undefined,
+    actor: typeof (formatterResult?.actor ?? observation.actor) === "string" ? (formatterResult?.actor ?? observation.actor) : undefined,
     from: typeof observation.from === "string" ? observation.from : undefined,
     to: typeof observation.to === "string" ? observation.to : undefined,
-    style: typeof observation.style === "string" ? observation.style : undefined,
+    style: typeof (formatterResult?.style ?? observation.style) === "string" ? (formatterResult?.style ?? observation.style) : undefined,
     reason: typeof observation.reason === "string" ? observation.reason : undefined,
     source: chatObservationSource(observation),
     text: lineText,
@@ -3165,37 +3134,17 @@ function receiveAppliedFrameErrors(frame: any, observations: any[]) {
   for (const error of errors) (errorHandler ?? receiveChatError)(error);
 }
 
-function chatLineKind(observation: any): ChatLine["kind"] {
-  const type = String(observation?.type ?? "");
-  if (type === "cockatoo_squawk" || type === "cockatoo_muffled" || type === "cockatoo_taught" || type === "cockatoo_gagged" || type === "cockatoo_ungagged" || type === "cockatoo_fed" || type === "cockatoo_pluck" || type === "cockatoo_shake" || type === "cockatoo_seen") return "system";
-  if (type === "dubspace_activity" || type === "dubspace_entered" || type === "dubspace_left") return "system";
-  if (type === "pinboard_activity" || type === "pinboard_entered" || type === "pinboard_left") return "system";
-  return type as ChatLine["kind"];
-}
-
-function chatSystemText(observation: any): string | undefined {
-  const type = String(observation?.type ?? "");
-  if (type === "cockatoo_seen") return `The cockatoo seems ${String(observation.mood ?? "alert")}.`;
-  if (type === "cockatoo_taught") return `The cockatoo learned "${String(observation.phrase ?? "")}".`;
-  if (type === "cockatoo_gagged") return "The cockatoo is gagged.";
-  if (type === "cockatoo_ungagged") return "The cockatoo is ungagged.";
-  if (type === "cockatoo_fed") return `The cockatoo eats ${String(observation.food ?? "something")}.`;
-  if (type === "cockatoo_pluck") return "*EEEEEEK!*";
-  if (type === "cockatoo_shake") return `The cockatoo ${String(observation.reaction ?? "reacts")}.`;
-  if (type === "dubspace_activity" || type === "dubspace_entered" || type === "dubspace_left") return String(observation.text ?? "The dubspace changes.");
-  if (type === "pinboard_activity" || type === "pinboard_entered" || type === "pinboard_left") return String(observation.text ?? "The pinboard changes.");
-  if (type === "blocked_exit") return String(observation.text ?? "You can't go that way.");
-  if (type === "taken") return String(observation.text ?? `${actorLabel(String(observation.actor ?? ""))} takes something.`);
-  if (type === "dropped") return String(observation.text ?? `${actorLabel(String(observation.actor ?? ""))} drops something.`);
-  if (type === "note_read") return `${actorLabel(String(observation.actor ?? ""))} reads ${actorLabel(String(observation.note ?? ""))}.`;
-  if (type === "note_dispersed") return String(observation.text ?? `${actorLabel(String(observation.note ?? ""))} disperses in a puff of smoke.`);
-  return undefined;
-}
-
 function currentChatOutputSpace(): string {
   if (state.tab === "dubspace") return dubspaceSpace();
   if (state.tab === "pinboard") return pinboardSpace();
   return chatRoom();
+}
+
+function chatFormatterContext() {
+  return {
+    label: (id: string | undefined) => actorLabel(id),
+    viewer: state.actor || undefined
+  };
 }
 
 function chatObservationSource(observation: any): string | undefined {
@@ -3379,7 +3328,7 @@ function setCurrentChatRoom(room: string) {
 
 function renderChat() {
   const tag = chatFrameComponentTag();
-  if (!tag) return `<section class="panel"><p class="empty-state">No chat UI is registered for this room.</p></section>`;
+  if (!tag) return `<section class="card"><p class="empty-state">No chat UI is registered for this room.</p></section>`;
   return `<${tag} data-chat-space-host></${tag}>`;
 }
 
@@ -3730,7 +3679,7 @@ function renderPinboard() {
   if (!tag) {
     return `
       <section class="toolbar"><h1>Pinboard</h1></section>
-      <section class="panel"><p class="empty-state">No pinboard UI is registered for this board.</p></section>
+      <section class="card"><p class="empty-state">No pinboard UI is registered for this board.</p></section>
     `;
   }
   const boardId = pinboardSpace();
@@ -3755,12 +3704,12 @@ function renderSpaceChatPanel(space: string) {
   const tag = component?.declaration.tag;
   if (!tag) {
     return `
-      <section class="panel space-chat-panel" data-space-chat-missing="${escapeHtml(space)}" style="height:${height}px">
+      <section class="card space-chat-panel" data-space-chat-missing="${escapeHtml(space)}" style="height:${height}px">
         <p class="chat-empty">No chat UI is registered for this space.</p>
       </section>
     `;
   }
-  return `<${tag} class="panel space-chat-panel" data-space-chat-panel data-space-chat-space="${escapeHtml(space)}" style="height:${height}px"></${tag}>`;
+  return `<${tag} class="card space-chat-panel" data-space-chat-panel data-space-chat-space="${escapeHtml(space)}" style="height:${height}px"></${tag}>`;
 }
 
 function renderPinboardMap(notes: any[], present: string[], width: number, height: number, palette: string[] = pinboardModel()?.palette ?? []) {
@@ -4740,7 +4689,7 @@ function renderIde() {
   const objects = Object.keys(state.world?.objects ?? {}).sort();
   const installTarget = state.selectedObject || defaultSelectedObject();
   const scopedSmoke = scopedProjectionSmokeEnabled
-    ? `<div class="panel"><h2>Scoped projection smoke</h2><pre>${escapeHtml(JSON.stringify(state.scopedProjectionSmoke ?? {}, null, 2))}</pre></div>`
+    ? `<div class="card"><h2>Scoped projection smoke</h2><pre>${escapeHtml(JSON.stringify(state.scopedProjectionSmoke ?? {}, null, 2))}</pre></div>`
     : "";
   return `
     <section class="toolbar">
@@ -4749,8 +4698,8 @@ function renderIde() {
       <button data-refresh-object>Inspect</button>
     </section>
     <section class="split">
-      <div class="panel"><pre>${escapeHtml(JSON.stringify(state.world?.objects?.[state.selectedObject] ?? {}, null, 2))}</pre></div>
-      <div class="panel editor">
+      <div class="card"><pre>${escapeHtml(JSON.stringify(state.world?.objects?.[state.selectedObject] ?? {}, null, 2))}</pre></div>
+      <div class="card editor">
         <input data-verb-name value="set_feedback" />
         <textarea data-source>${escapeHtml(defaultSource())}</textarea>
         <div class="button-row">
@@ -4769,7 +4718,7 @@ function renderScopedIde() {
   const object = state.selectedObject || defaultSelectedObject();
   const summary = scopedObjectSummary(object);
   const scopedSmoke = scopedProjectionSmokeEnabled
-    ? `<div class="panel"><h2>Scoped projection smoke</h2><pre>${escapeHtml(JSON.stringify(state.scopedProjectionSmoke ?? {}, null, 2))}</pre></div>`
+    ? `<div class="card"><h2>Scoped projection smoke</h2><pre>${escapeHtml(JSON.stringify(state.scopedProjectionSmoke ?? {}, null, 2))}</pre></div>`
     : "";
   return `
     <section class="toolbar">
@@ -4778,7 +4727,7 @@ function renderScopedIde() {
       <button data-scoped-object-inspect>Inspect</button>
     </section>
     <section class="split">
-      <div class="panel"><pre>${escapeHtml(JSON.stringify(summary ?? { id: object, loading: Boolean(object) }, null, 2))}</pre></div>
+      <div class="card"><pre>${escapeHtml(JSON.stringify(summary ?? { id: object, loading: Boolean(object) }, null, 2))}</pre></div>
     </section>
     ${scopedSmoke}
   `;

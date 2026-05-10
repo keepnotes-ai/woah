@@ -1,5 +1,6 @@
 import {
   escapeHtml,
+  type ChatFormatterRegistry,
   type ObservationRegistry,
   type WooComponentRegistry,
   type WooContext
@@ -94,7 +95,7 @@ export class WooPinboardBoardElement extends HTMLElement {
     if (!boardId) {
       this.innerHTML = `
         <section class="toolbar"><h1>Pinboard</h1></section>
-        <section class="panel"><p class="empty-state">No pinboard catalog instance is installed.</p></section>
+        <section class="card"><p class="empty-state">No pinboard catalog instance is installed.</p></section>
       `;
       return;
     }
@@ -108,12 +109,12 @@ export class WooPinboardBoardElement extends HTMLElement {
       </section>
     `;
     const layout = `
-      <section class="pinboard-layout ${this.model.inBoard ? "has-space-chat" : ""}" data-space-chat-layout="${escapeHtml(boardId)}">
+      <section class="split split--side-fixed pinboard-layout ${this.model.inBoard ? "has-space-chat" : ""}" data-space-chat-layout="${escapeHtml(boardId)}">
         <div class="pinboard-work">
-          ${this.model.inBoard ? this.renderCreate() : `<div class="panel pinboard-create pinboard-create-placeholder" aria-hidden="true"></div>`}
-          <div class="panel pinboard-stage-panel">
+          ${this.model.inBoard ? this.renderCreate() : `<div class="card pinboard-create pinboard-create-placeholder" aria-hidden="true"></div>`}
+          <div class="card pinboard-stage-panel">
             <div class="pinboard-stage" data-pinboard-stage style="${pinboardStageStyle(width, height, this.model.view)}">
-              <div class="pinboard-zoom-controls" aria-label="Pinboard zoom controls">
+              <div class="card card--pre pinboard-zoom-controls" aria-label="Pinboard zoom controls">
                 <button data-pinboard-zoom="out" aria-label="Zoom out">-</button>
                 <span data-pinboard-zoom-label>${Math.round(this.model.view.scale * 100)}%</span>
                 <button data-pinboard-zoom="in" aria-label="Zoom in">+</button>
@@ -124,7 +125,7 @@ export class WooPinboardBoardElement extends HTMLElement {
             </div>
           </div>
         </div>
-        <aside class="panel pinboard-presence">
+        <aside class="card pinboard-presence">
           <h2>Presence</h2>
           <div data-pinboard-map-shell>${this.renderMap(width, height)}</div>
         </aside>
@@ -139,7 +140,7 @@ export class WooPinboardBoardElement extends HTMLElement {
   private renderCreate(): string {
     const selected = normalizeColor(this.model.newColor, this.model.palette);
     return `
-      <form class="panel pinboard-create" data-pinboard-create>
+      <form class="card pinboard-create" data-pinboard-create>
         <textarea data-pinboard-new-text placeholder="New note">${escapeHtml(this.model.newText)}</textarea>
         <select data-pinboard-new-color>${pinboardPalette(this.model.palette).map((color) => `<option value="${escapeHtml(color)}" ${color === selected ? "selected" : ""}>${escapeHtml(color)}</option>`).join("")}</select>
         <button>Add Note</button>
@@ -481,5 +482,20 @@ export function registerWooObservationHandlers(registry: ObservationRegistry): v
         if (typeof id === "string" && id) draft.clearCatalogState(id, "pinboard_note");
       }
     }
+  });
+}
+
+// Pinboard chat lines are presence/activity events: who entered or left
+// the board, and a generic "the pinboard changes" beat for unspecified
+// activity. The verbs put a fully-formed sentence into observation.text
+// when they have one (e.g. "<actor> joins the pinboard"); the formatter
+// supplies the fallback.
+export function registerWooChatFormatters(registry: ChatFormatterRegistry): void {
+  registry.formatter({
+    types: ["pinboard_entered", "pinboard_left", "pinboard_activity"],
+    format: (observation) => ({
+      kind: "system",
+      text: typeof observation.text === "string" ? observation.text : "The pinboard changes."
+    })
   });
 }

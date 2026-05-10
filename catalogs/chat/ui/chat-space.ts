@@ -1,4 +1,9 @@
-import { escapeHtml, type WooComponentRegistry, type WooContext } from "../../../src/client/framework";
+import {
+  escapeHtml,
+  type ChatFormatterRegistry,
+  type WooComponentRegistry,
+  type WooContext
+} from "../../../src/client/framework";
 
 export type ChatLine = {
   kind: string;
@@ -83,8 +88,8 @@ export class WooChatSpaceElement extends HTMLElement {
           ${this.renderRoomTitle(room)}
           <button data-chat-enter ${this.model.canSend ? "" : "disabled"}>Enter</button>
         </section>
-        <section class="chat-layout solo">
-          <div class="panel chat-empty-panel">
+        <section class="split chat-layout solo">
+          <div class="card chat-empty-panel">
             <p>${escapeHtml(this.model.canSend ? this.model.roomDescription || "Enter the room to chat." : "Connecting...")}</p>
           </div>
         </section>
@@ -97,8 +102,8 @@ export class WooChatSpaceElement extends HTMLElement {
       <section class="toolbar">
         ${this.renderRoomTitle(room)}
       </section>
-      <section class="chat-layout">
-        <div class="panel chat-panel">
+      <section class="split split--side-fixed chat-layout">
+        <div class="card chat-panel">
           <div class="chat-feed" aria-live="polite">
             ${this.model.lines.map((line) => renderChatLineHtml(line, (id) => this.actorLabel(id))).join("") || `<div class="chat-empty">${escapeHtml(this.model.roomDescription || "No chat events yet.")}</div>`}
           </div>
@@ -107,7 +112,7 @@ export class WooChatSpaceElement extends HTMLElement {
             <button>Send</button>
           </form>
         </div>
-        <aside class="panel chat-presence">
+        <aside class="card chat-presence">
           <h2>Present</h2>
           <div class="presence-list">
             ${this.model.present.map((id) => `<button data-chat-recipient="${escapeHtml(id)}">${escapeHtml(this.actorLabel(id))}<span>${escapeHtml(id)}</span></button>`).join("") || "<p>No actors present.</p>"}
@@ -215,7 +220,7 @@ export class WooSpaceChatPanelElement extends HTMLElement {
       <div class="space-chat-head">
         <h2>Chat</h2>
         <span>${escapeHtml(spaceName)}</span>
-        <button type="button" class="space-chat-toggle" data-space-chat-toggle aria-label="${toggleLabel}" title="${toggleLabel}" aria-expanded="${this.collapsed ? "false" : "true"}">${toggleGlyph}</button>
+        <button type="button" class="icon-button space-chat-toggle" data-space-chat-toggle aria-label="${toggleLabel}" title="${toggleLabel}" aria-expanded="${this.collapsed ? "false" : "true"}">${toggleGlyph}</button>
       </div>
     `;
     if (this.collapsed) {
@@ -269,6 +274,51 @@ export class WooSpaceChatPanelElement extends HTMLElement {
 export function registerWooComponents(registry: WooComponentRegistry): void {
   registry.defineTag("woo-chat-space", WooChatSpaceElement);
   registry.defineTag("woo-space-chat-panel", WooSpaceChatPanelElement);
+}
+
+// Speech and room-event types that the chat catalog owns. Each has a
+// dedicated rendering branch in renderChatLineHtml below — keeping the
+// kind equal to the observation type lets the existing branches match.
+const CHAT_PASSTHROUGH_TYPES = [
+  "said",
+  "said_to",
+  "said_as",
+  "emoted",
+  "posed",
+  "quoted",
+  "self_pointed",
+  "told",
+  "text",
+  "entered",
+  "left",
+  "looked",
+  "who",
+  "huh"
+];
+
+// Types where chat owns the line but the verb does not always supply
+// observation.text. These need a synthesized fallback; the formatter
+// produces one rather than the frame.
+const CHAT_FALLBACK_TYPES = ["blocked_exit", "taken", "dropped"];
+
+export function registerWooChatFormatters(registry: ChatFormatterRegistry): void {
+  registry.formatter({
+    types: CHAT_PASSTHROUGH_TYPES,
+    format: (observation) => ({ kind: String(observation.type ?? "") })
+  });
+  registry.formatter({
+    types: CHAT_FALLBACK_TYPES,
+    format: (observation, ctx) => {
+      const type = String(observation.type ?? "");
+      const explicit = typeof observation.text === "string" ? observation.text : undefined;
+      if (explicit !== undefined) return { kind: type, text: explicit };
+      const actorRef = typeof observation.actor === "string" ? observation.actor : undefined;
+      if (type === "blocked_exit") return { kind: type, text: "You can't go that way." };
+      if (type === "taken") return { kind: type, text: `${ctx.label(actorRef)} takes something.` };
+      // dropped
+      return { kind: type, text: `${ctx.label(actorRef)} drops something.` };
+    }
+  });
 }
 
 export function renderChatLineHtml(line: ChatLine, actorLabel: ActorLabeler): string {

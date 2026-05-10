@@ -1,5 +1,6 @@
 import {
   escapeHtml,
+  type ChatFormatterRegistry,
   type ObservationRegistry,
   type WooComponentRegistry,
   type WooContext
@@ -77,7 +78,7 @@ export class WooDubspaceWorkspaceElement extends HTMLElement {
     if (!spaceId) {
       this.innerHTML = `
         <section class="toolbar"><h1>Dubspace</h1></section>
-        <section class="panel"><p class="empty-state">No dubspace catalog instance is installed.</p></section>
+        <section class="card"><p class="empty-state">No dubspace catalog instance is installed.</p></section>
       `;
       return;
     }
@@ -87,8 +88,8 @@ export class WooDubspaceWorkspaceElement extends HTMLElement {
           <h1>${escapeHtml(data.spaceName || "Dubspace")}</h1>
           <button data-dubspace-enter ${data.canSend ? "" : "disabled"}>Enter</button>
         </section>
-        <section class="dubspace-layout">
-          <div class="panel">
+        <section class="split split--side-fixed dubspace-layout">
+          <div class="card">
             <p>${escapeHtml(data.spaceDescription || "Enter the dubspace to work at the controls.")}</p>
           </div>
           ${this.renderPresence()}
@@ -108,22 +109,22 @@ export class WooDubspaceWorkspaceElement extends HTMLElement {
         <button data-recall-scene>Recall Scene</button>
       </section>
       <section class="space-chat-shell" data-space-chat-shell="${escapeHtml(spaceId)}">
-        <section class="dubspace-layout has-space-chat" data-space-chat-layout="${escapeHtml(spaceId)}">
+        <section class="split split--side-fixed dubspace-layout has-space-chat" data-space-chat-layout="${escapeHtml(spaceId)}">
           <div class="dubspace-work">
             <div class="grid">
-              <article class="panel loop-console-panel">
-                <div class="panel-head"><h2>Loops</h2></div>
+              <article class="card loop-console-panel">
+                <div class="card-head"><h2>Loops</h2></div>
                 <div class="loop-console">${data.slots.map((id, index) => this.renderLoopStrip(id, index + 1)).join("")}${this.renderFilterStrip()}</div>
               </article>
-              <article class="panel">
+              <article class="card">
                 <h2>Delay</h2>
                 ${slider(data.delay, "send", numberProp(delay.send, 0.3))}
                 ${slider(data.delay, "time", numberProp(delay.time, 0.25))}
                 ${slider(data.delay, "feedback", numberProp(delay.feedback, 0.35))}
                 ${slider(data.delay, "wet", numberProp(delay.wet, 0.4))}
               </article>
-              <article class="panel sequencer">
-                <div class="panel-head">
+              <article class="card sequencer">
+                <div class="card-head">
                   <h2>Percussion</h2>
                   <button data-transport="${drum.playing ? "stop" : "start"}">${drum.playing ? "Stop" : "Start"}</button>
                 </div>
@@ -145,7 +146,7 @@ export class WooDubspaceWorkspaceElement extends HTMLElement {
   private renderPresence(): string {
     const operators = this.model.operators;
     return `
-      <aside class="panel dubspace-presence">
+      <aside class="card dubspace-presence">
         <h2>At the controls</h2>
         <div class="presence-list">
           ${operators.map((id) => `<button disabled>${escapeHtml(this.actorLabel(id))}<span>${escapeHtml(id)}</span></button>`).join("") || "<p>No one is at the controls.</p>"}
@@ -157,7 +158,7 @@ export class WooDubspaceWorkspaceElement extends HTMLElement {
   private renderFilterStrip(): string {
     const cutoff = numberProp(props(this.model.controls[this.model.filter]).cutoff, 1000);
     return `
-      <div class="filter-strip">
+      <div class="card card--raised filter-strip">
         <div class="loop-strip-head">
           <strong>F</strong>
           <span>Filter</span>
@@ -176,7 +177,7 @@ export class WooDubspaceWorkspaceElement extends HTMLElement {
     const freq = numberProp(slot.freq, defaultLoopFreq(index));
     const pitch = loopPitch(freq);
     return `
-      <div class="loop-strip ${slot.playing ? "playing" : ""} ${cue ? "cue-active" : ""}">
+      <div class="card card--raised loop-strip ${slot.playing ? "playing" : ""} ${cue ? "cue-active" : ""}">
         <div class="loop-strip-head">
           <strong>${index}</strong>
           <span>${escapeHtml(String(this.model.controls[id]?.name ?? id))}</span>
@@ -376,5 +377,18 @@ export function registerWooObservationHandlers(registry: ObservationRegistry): v
         draft.patchObjectProps(target, props as Record<string, unknown>);
       }
     }
+  });
+}
+
+// Dubspace chat lines are presence/activity events, mirroring pinboard's
+// shape. The verbs supply observation.text when they have a sentence
+// ready; the formatter supplies the fallback.
+export function registerWooChatFormatters(registry: ChatFormatterRegistry): void {
+  registry.formatter({
+    types: ["dubspace_entered", "dubspace_left", "dubspace_activity"],
+    format: (observation) => ({
+      kind: "system",
+      text: typeof observation.text === "string" ? observation.text : "The dubspace changes."
+    })
   });
 }

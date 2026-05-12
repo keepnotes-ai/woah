@@ -3,6 +3,7 @@ import { createWorld, createWorldFromSerialized } from "../src/core/bootstrap";
 import {
   createShadowBrowserNode,
   createShadowBrowserRelayShim,
+  emitShadowBrowserLiveEvent,
   executeShadowBrowserTurn,
   openShadowBrowserScope,
   type ShadowBrowserNode
@@ -35,20 +36,21 @@ describe("shadow browser node shim", () => {
     expect(worldFor(browser).getProp("delay_1", "wet")).toBe(0.44);
   });
 
-  it("drives pinboard layout actions through the browser shim", async () => {
-    const { browser, seed: pin } = await browserForScope("the_pinboard", "guest:browser-pinboard", async (anchor, session) => {
-      const frame = await anchor.call("seed-pinboard-note", session.id, "the_pinboard", {
-        actor: session.actor,
-        target: "the_pinboard",
-        verb: "add_note",
-        args: ["seed browser note", "yellow", 20, 30, 210, 120]
-      });
-      return frameObservationObject(frame, "note_added", "pin");
-    });
+  it("drives pinboard create, edit, layout, take, and drop actions through the browser shim", async () => {
+    const { browser, actor } = await browserForScope("the_pinboard", "guest:browser-pinboard");
     await openShadowBrowserScope(browser, { preseed_catalog_pages: true });
 
+    const add = await executeShadowBrowserTurn(browser, {
+      id: "browser-pinboard-add",
+      target: "the_pinboard",
+      verb: "add_note",
+      args: ["v2 browser note", "yellow", 20, 30, 210, 120]
+    });
+    expect(add.result).toMatchObject({ ok: true });
+    if (!add.result.ok) throw new Error(`pinboard add failed: ${add.result.reason}`);
+    const pin = observationObject(add, "note_added", "pin");
     let world = worldFor(browser);
-    expect(world.getProp(pin, "text")).toBe("seed browser note");
+    expect(world.getProp(pin, "text")).toBe("v2 browser note");
     expect(world.getProp(pin, "color")).toBe("yellow");
 
     const move = await executeShadowBrowserTurn(browser, {
@@ -61,21 +63,71 @@ describe("shadow browser node shim", () => {
     world = worldFor(browser);
     const layout = world.getProp("the_pinboard", "layout") as Record<string, WooValue>;
     expect(layout[pin]).toMatchObject({ x: 88, y: 99 });
-    expect(browser.cache.applied_frames).toHaveLength(1);
+
+    const resize = await executeShadowBrowserTurn(browser, {
+      id: "browser-pinboard-resize",
+      target: "the_pinboard",
+      verb: "resize_pin",
+      args: [pin, 300, 180]
+    });
+    expect(resize.result).toMatchObject({ ok: true });
+
+    const recolor = await executeShadowBrowserTurn(browser, {
+      id: "browser-pinboard-recolor",
+      target: pin,
+      verb: "set_color",
+      args: ["green"]
+    });
+    expect(recolor.result).toMatchObject({ ok: true });
+
+    const edit = await executeShadowBrowserTurn(browser, {
+      id: "browser-pinboard-edit",
+      target: pin,
+      verb: "set_text",
+      args: ["browser-edited note"]
+    });
+    expect(edit.result).toMatchObject({ ok: true });
+
+    const take = await executeShadowBrowserTurn(browser, {
+      id: "browser-pinboard-take",
+      target: "the_pinboard",
+      verb: "take",
+      args: [pin]
+    });
+    expect(take.result).toMatchObject({ ok: true });
+    world = worldFor(browser);
+    expect(world.object(pin).location).toBe(actor);
+    expect((world.getProp("the_pinboard", "layout") as Record<string, WooValue>)[pin]).toBeUndefined();
+
+    const drop = await executeShadowBrowserTurn(browser, {
+      id: "browser-pinboard-drop",
+      target: "the_pinboard",
+      verb: "drop",
+      args: ["sticky note"]
+    });
+    expect(drop.result).toMatchObject({ ok: true });
+    world = worldFor(browser);
+    const finalLayout = world.getProp("the_pinboard", "layout") as Record<string, WooValue>;
+    expect(world.object(pin).location).toBe("the_pinboard");
+    expect(world.getProp(pin, "text")).toBe("browser-edited note");
+    expect(world.getProp(pin, "color")).toBe("green");
+    expect(finalLayout[pin]).toMatchObject({ w: 180, h: 110 });
+    expect(browser.cache.applied_frames).toHaveLength(7);
   });
 
-  it("drives taskspace claim and status actions through the browser shim", async () => {
-    const { browser, actor, seed: task } = await browserForScope("the_taskspace", "guest:browser-taskspace", async (anchor, session) => {
-      const frame = await anchor.call("seed-browser-task", session.id, "the_taskspace", {
-        actor: session.actor,
-        target: "the_taskspace",
-        verb: "create_task",
-        args: ["Profile browser shim", "Prove taskspace works through v2."]
-      });
-      return frameObservationObject(frame, "task_created", "task");
-    });
+  it("drives taskspace create, claim, and status actions through the browser shim", async () => {
+    const { browser, actor } = await browserForScope("the_taskspace", "guest:browser-taskspace");
     await openShadowBrowserScope(browser, { preseed_catalog_pages: true });
 
+    const create = await executeShadowBrowserTurn(browser, {
+      id: "browser-task-create",
+      target: "the_taskspace",
+      verb: "create_task",
+      args: ["Profile browser shim", "Prove taskspace works through v2."]
+    });
+    expect(create.result).toMatchObject({ ok: true });
+    if (!create.result.ok) throw new Error(`task create failed: ${create.result.reason}`);
+    const task = observationObject(create, "task_created", "task");
     let world = worldFor(browser);
     expect(world.getProp(task, "text")).toBe("Prove taskspace works through v2.");
     expect(world.getProp(task, "status")).toBe("open");
@@ -97,50 +149,11 @@ describe("shadow browser node shim", () => {
     world = worldFor(browser);
     expect(world.getProp(task, "assignee")).toBe(actor);
     expect(world.getProp(task, "status")).toBe("in_progress");
-    expect(browser.cache.applied_frames).toHaveLength(2);
+    expect(browser.cache.applied_frames).toHaveLength(3);
   });
 
-  it("records current catalog creation gaps through the browser shim", async () => {
-    const { browser: pinboard } = await browserForScope("the_pinboard", "guest:browser-pinboard-create-gap");
-    await openShadowBrowserScope(pinboard, { preseed_catalog_pages: true });
-
-    const add = await executeShadowBrowserTurn(pinboard, {
-      id: "browser-pinboard-add-gap",
-      target: "the_pinboard",
-      verb: "add_note",
-      args: ["v2 browser note", "yellow", 20, 30, 210, 120]
-    });
-    expect(add.result).toMatchObject({
-      ok: false,
-      reason: "commit_rejected",
-      commit: { kind: "woo.commit.conflict.shadow.v1" }
-    });
-    if (add.result.ok || add.result.reason !== "commit_rejected") throw new Error("expected pinboard add to reject as incomplete");
-    expect(add.result.transcript.incompleteReasons).toEqual(expect.arrayContaining(["native:obj_the_pinboard_1:moveto"]));
-
-    const { browser: taskspace } = await browserForScope("the_taskspace", "guest:browser-task-create-gap");
-    await openShadowBrowserScope(taskspace, { preseed_catalog_pages: true });
-    const create = await executeShadowBrowserTurn(taskspace, {
-      id: "browser-task-create-gap",
-      target: "the_taskspace",
-      verb: "create_task",
-      args: ["Creation gap", "Creation validation still blocks v2 commit."]
-    });
-    expect(create.result).toMatchObject({
-      ok: false,
-      reason: "commit_rejected",
-      commit: { kind: "woo.commit.conflict.shadow.v1" }
-    });
-    if (create.result.ok || create.result.reason !== "commit_rejected") throw new Error("expected task create to reject at commit");
-    expect(create.result.transcript.incompleteReasons).toEqual([]);
-    expect(create.result.receipt.errors).toEqual(expect.arrayContaining([
-      "post_state_mismatch create obj_the_taskspace_1: location",
-      "permission_denied: no recorded authority can write obj_the_taskspace_1.name"
-    ]));
-  });
-
-  it("records the current chat take native-completeness gap through the browser shim", async () => {
-    const { browser } = await browserForScope("the_chatroom", "guest:browser-chat");
+  it("drives chat take and drop through the browser shim", async () => {
+    const { browser, actor } = await browserForScope("the_chatroom", "guest:browser-chat");
     await openShadowBrowserScope(browser, { preseed_catalog_pages: true });
 
     const take = await executeShadowBrowserTurn(browser, {
@@ -149,20 +162,75 @@ describe("shadow browser node shim", () => {
       verb: "take",
       args: ["mug"]
     });
-    expect(take.result).toMatchObject({
-      ok: false,
-      reason: "commit_rejected",
-      commit: { kind: "woo.commit.conflict.shadow.v1", reason: "incomplete_transcript" }
+    expect(take.result).toMatchObject({ ok: true });
+    let world = worldFor(browser);
+    expect(world.object("the_mug").location).toBe(actor);
+
+    const drop = await executeShadowBrowserTurn(browser, {
+      id: "browser-chat-drop",
+      target: "the_chatroom",
+      verb: "drop",
+      args: ["mug"]
     });
-    if (take.result.ok || take.result.reason !== "commit_rejected") throw new Error("expected chat take to reject as incomplete");
-    expect(take.result.transcript.incompleteReasons).toEqual(expect.arrayContaining([
-      "native:$match:match_object",
-      "native:the_mug:moveto"
-    ]));
-    expect(browser.cache.conflicts).toHaveLength(1);
-    expect(browser.cache.applied_frames).toHaveLength(0);
-    const world = worldFor(browser);
+    expect(drop.result).toMatchObject({ ok: true });
+    world = worldFor(browser);
     expect(world.object("the_mug").location).toBe("the_chatroom");
+    expect(browser.cache.applied_frames).toHaveLength(2);
+  });
+
+  it("fans out coalesced live events without advancing committed state", async () => {
+    const anchor = createWorld();
+    const firstSession = anchor.auth("guest:browser-live-a");
+    const secondSession = anchor.auth("guest:browser-live-b");
+    await anchor.directCall("browser-live-a-enter", firstSession.actor, "the_dubspace", "enter", [], { sessionId: firstSession.id });
+    await anchor.directCall("browser-live-b-enter", secondSession.actor, "the_dubspace", "enter", [], { sessionId: secondSession.id });
+    const relay = createShadowBrowserRelayShim({
+      node: "browser-live-relay",
+      scope: "the_dubspace",
+      serialized: anchor.exportWorld()
+    });
+    const first = createShadowBrowserNode({
+      node: "browser-live-a",
+      scope: "the_dubspace",
+      actor: firstSession.actor,
+      session: firstSession.id,
+      relay
+    });
+    const second = createShadowBrowserNode({
+      node: "browser-live-b",
+      scope: "the_dubspace",
+      actor: secondSession.actor,
+      session: secondSession.id,
+      relay
+    });
+    await openShadowBrowserScope(first);
+    await openShadowBrowserScope(second);
+
+    const headBefore = structuredClone(relay.commit_scope.head);
+    emitShadowBrowserLiveEvent(first, {
+      id: "browser-live-preview-1",
+      source: "delay_1",
+      observation: { type: "control_preview", source: "delay_1", control: "wet", value: 0.25 },
+      coalesce: "delay_1:wet"
+    });
+    emitShadowBrowserLiveEvent(first, {
+      id: "browser-live-preview-2",
+      source: "delay_1",
+      observation: { type: "control_preview", source: "delay_1", control: "wet", value: 0.5 },
+      coalesce: "delay_1:wet"
+    });
+
+    expect(relay.commit_scope.head).toEqual(headBefore);
+    expect(relay.live_events).toHaveLength(2);
+    expect(first.cache.live_events).toHaveLength(0);
+    expect(second.cache.live_events).toHaveLength(1);
+    expect(second.cache.live_events[0]).toMatchObject({
+      id: "browser-live-preview-2",
+      actor: firstSession.actor,
+      observation: { type: "control_preview", source: "delay_1", control: "wet", value: 0.5 }
+    });
+    expect(first.cache.applied_frames).toHaveLength(0);
+    expect(second.cache.applied_frames).toHaveLength(0);
   });
 });
 
@@ -194,9 +262,9 @@ function worldFor(browser: ShadowBrowserNode): ReturnType<typeof createWorldFrom
   return createWorldFromSerialized(browser.relay.commit_scope.serialized, { persist: false });
 }
 
-function frameObservationObject(frame: { op: string; observations?: Array<Record<string, WooValue> & { type: string }> }, type: string, key: string): ObjRef {
-  const observation = frame.observations?.find((item) => item.type === type);
-  if (!observation) throw new Error(`expected ${type} frame observation`);
+function observationObject(turn: { result: { transcript?: { observations: Array<Record<string, WooValue> & { type: string }> } } }, type: string, key: string): ObjRef {
+  const observation = turn.result.transcript?.observations.find((item) => item.type === type);
+  if (!observation) throw new Error(`expected ${type} observation`);
   const out = observation[key];
   if (typeof out !== "string") throw new Error(`expected ${type}.${key} object ref`);
   return out;

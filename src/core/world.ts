@@ -3017,7 +3017,8 @@ export class WooWorld {
           owner: verb.owner,
           version: verb.version,
           source_hash: verb.source_hash,
-          direct_callable: verb.direct_callable
+          direct_callable: verb.direct_callable,
+          ...(verb.kind === "native" ? { native: verb.native } : {})
         });
         const runCtx: CallContext = {
           ...ctx,
@@ -7897,7 +7898,7 @@ export class WooWorld {
       this.recordUntrackedEffect("remote_contents", { object: objRef });
       return await this.hostBridge.contents(objRef, memo);
     }
-    return Array.from(this.object(objRef).contents);
+    return this.contentsOf(objRef);
   }
 
   private isActorForLook(item: ObjRef, present: ObjRef[]): boolean {
@@ -8898,8 +8899,8 @@ export class WooWorld {
       return { id, names, aliases };
     }
     if (!this.objects.has(id)) return { id, names, aliases };
-    const obj = this.object(id);
-    names.push(obj.name);
+    const name = this.getProp(id, "name");
+    if (typeof name === "string") names.push(name);
     const [title] = await Promise.all([
       this.titleForLook(ctx, ctx.thisObj, id).catch(() => null),
       this.addCatalogMatchNames(ctx, id, names)

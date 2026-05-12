@@ -34,7 +34,7 @@ export type TurnRecorderEvent =
   | { kind: "object_create"; object: ObjRef; parent: ObjRef | null; owner: ObjRef; anchor: ObjRef | null; location: ObjRef | null }
   | { kind: "object_move"; object: ObjRef; from: ObjRef | null; to: ObjRef }
   | { kind: "observe"; observation: Observation }
-  | { kind: "dispatch"; target: ObjRef; verb: string; startAt?: ObjRef | null; definer: ObjRef; implementation: "bytecode" | "native"; owner: ObjRef; version?: number; source_hash?: string; direct_callable?: boolean }
+  | { kind: "dispatch"; target: ObjRef; verb: string; startAt?: ObjRef | null; definer: ObjRef; implementation: "bytecode" | "native"; owner: ObjRef; version?: number; source_hash?: string; direct_callable?: boolean; native?: string }
   | { kind: "logical_input"; name: string; value: WooValue }
   | { kind: "untracked_effect"; name: string; detail?: WooValue };
 

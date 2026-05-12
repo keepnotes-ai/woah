@@ -1045,14 +1045,18 @@ The first runtime slice now exists as a shadow recorder, not a network feature:
   accepted frames, conflicts, transfers, and transcript tail. It connects to a
   local relay/commit-scope shim, preloads catalog object pages, executes
   tentative actor-local turns, asks the in-process network for missing state,
-  and applies accepted/conflicted frames back into the browser cache.
+  and applies accepted/conflicted frames back into the browser cache. The same
+  shim now has a minimal live plane: opening a scope subscribes the browser node
+  to relay fan-out, live events are delivered best-effort to matching
+  subscribers, coalesced previews replace older cache entries, and no live
+  event advances the commit-scope head.
 - `tests/shadow-browser-node.test.ts` now drives real bundled catalog actions
-  through that browser shim: `the_dubspace:set_control`, seeded
-  `the_pinboard:move_pin`, and seeded `$task:claim`/`:set_status` commit
-  successfully. The same coverage records current parity gaps for
-  `the_pinboard:add_note`, `the_taskspace:create_task`, and chat `:take`, so
-  catalog coverage distinguishes committed v2-compatible actions from known
-  transcript/validation blockers.
+  through that browser shim: `the_dubspace:set_control`, pinboard
+  `:add_note`/`:move_pin`/`:resize_pin`/pin `:set_color`/`:set_text`/
+  `:take`/`:drop`, taskspace `:create_task`/task `:claim`/`:set_status`, and
+  chat `:take`/`:drop` all commit successfully after missing-state transfer.
+  It also covers dubspace-style live preview fan-out as non-durable,
+  coalesced browser-cache traffic.
 
 This is still a shadow prototype. It now has a real in-process
 execute/commit/state-transfer loop, but it is not yet the production protocol
@@ -1113,13 +1117,19 @@ Implementation learning:
   partial serialized world used by the VM, not only retained in the page cache;
   otherwise a turn can have the bytes for `$pin` or `$task` but still fail
   object lookup during local execution.
-- Existing-object catalog actions are already a useful parity target:
-  dubspace control writes, pinboard layout changes, and task claim/status all
-  commit through the browser shim after granular state transfer. Creation-style
-  catalog actions remain blocked: `add_note` still hits a native `moveto`
-  incompleteness path, while `create_task` is complete but the commit validator
-  does not yet treat same-turn object creation as authority for initializing
-  and moving the created object.
+- Same-turn creation needs first-class validation semantics. The shadow
+  validator now treats a successful `create` as authority to initialize the
+  created object's properties and move it during the same turn, and validates
+  created-object reads against same-turn writes/create facts instead of the
+  pre-turn world. Post-state validation now checks the final write per cell, so
+  composite verbs such as `add_note` can update layout once in `enterfunc` and
+  again in the outer verb without falsely requiring both values to be final.
+- Deterministic native helpers can be admitted only by handler identity, not by
+  the broad fact that a verb is native. Dispatch recording now includes the
+  native handler name; the shadow transcript currently treats `$thing:moveto`
+  (`thing_moveto`) and `$match:match_object` as tracked deterministic helpers.
+  The matcher became safe enough for this by recording local contents reads and
+  using ordinary recorded property reads for local candidate names.
 - Hash-checking inline object pages plus the shadow anchor MAC is a useful
   minimum integrity boundary, but it is not enough for production: the receiver
   still needs a real signed proof tying page hashes to a scope head/receipt
@@ -1156,9 +1166,10 @@ The local commit model has a first implementation:
 The remaining work in that layer is to remove the executor `serialized_after`
 crutch by applying transcript writes directly in the commit scope, strengthen
 write authority from coarse recorded-owner checks into exact VM-frame authority,
-make remote bridge/sub-transcript behavior explicit, and close the catalog
-creation gaps by making object-create authority and native/default `moveto`
-recording exact enough for commit validation.
+make remote bridge/sub-transcript behavior explicit, and replace the small
+tracked-native allowlist with a declarative primitive contract that states
+which native helpers are deterministic, which state they read, and which
+effects they may emit.
 
 The next state-plane implementation step is page/cell closure transfer:
 

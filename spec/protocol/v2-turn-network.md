@@ -365,9 +365,9 @@ by a later milestone once a `ScopeHead`, accepted VM/catalog hashes, and
 pre/post state hashes are available.
 
 Dispatch reads SHOULD contribute to `vm.verb_hashes`. The shadow recorder
-currently records the resolved definer, owner, version, `source_hash`, and
-direct-callability on each dispatch event; production transcripts fold that data
-into both the read set and the `vm` block.
+currently records the resolved definer, owner, version, `source_hash`,
+direct-callability, and native handler name when the verb is native; production
+transcripts fold that data into both the read set and the `vm` block.
 
 Transcript values MAY be omitted when the receiver already has the matching
 content-addressed state page. Validation still needs either the value or a
@@ -867,9 +867,11 @@ worker -> UI: confirm, patch-forward, or report conflict
 Shadow implementation status: the in-process prototype includes a
 browser-shaped node/relay shim with an object-page cache, scope projection
 cache, pending-turn table, accepted/conflict frame queues, and transfer
-tracking. It does not use Web Workers, IndexedDB, or WebSocket transport yet,
-but it exercises the same local-execution/missing-state/commit-reconcile loop
-that the browser worker is expected to expose.
+tracking. It also includes scope subscriptions and best-effort live-event
+fan-out with coalescing, without advancing the commit-scope head. It does not
+use Web Workers, IndexedDB, or WebSocket transport yet, but it exercises the
+same local-execution/missing-state/commit-reconcile and live-preview loops that
+the browser worker is expected to expose.
 
 Browser-node dubspace preview flow:
 
@@ -912,11 +914,13 @@ scenarios for the existing bundled workloads.
 - board mini-chat remains live-only unless a durable chat feature is installed;
 - large boards can be opened through projection before full closure transfer.
 
-Prototype status: browser-shim coverage currently commits layout changes
-against seeded pins and claim/status changes against seeded tasks. Composite
-creation verbs are intentionally covered as commit-rejected gaps until
-object-create authority and native/default movement recording are exact enough
-for validation.
+Prototype status: browser-shim coverage currently commits pinboard
+`add_note`, `move_pin`, `resize_pin`, pin `set_color`, `set_text`, `take`,
+and `drop`, plus taskspace `create_task`, task `claim`, and task
+`set_status`. Same-turn object creation is validated against transcript
+create/write facts rather than the pre-turn world. Deterministic native helpers
+are still admitted by a small shadow allowlist; production v2 needs this to
+become an explicit primitive contract rather than an implementation-side list.
 
 ### Dubspace
 

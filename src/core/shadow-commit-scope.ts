@@ -174,7 +174,8 @@ function shadowCommitEnvelopeErrors(scope: ShadowCommitScope, submit: ShadowComm
 
 function validateShadowPostState(serializedAfter: SerializedWorld, transcript: EffectTranscript): string[] {
   const errors: string[] = [];
-  for (const write of transcript.writes) {
+  const finalWrites = finalWritesByCell(transcript);
+  for (const write of finalWrites) {
     const actual = readTranscriptCellFromSerializedWorld(serializedAfter, write.cell);
     if (!actual.ok) {
       errors.push(`post_state_mismatch ${cellLabel(write.cell)}: ${actual.error}`);
@@ -194,10 +195,11 @@ function validateShadowPostState(serializedAfter: SerializedWorld, transcript: E
       errors.push(`post_state_mismatch create ${create.object}: object missing`);
       continue;
     }
+    const expectedLocation = lastMoveForObject(transcript, create.object)?.to ?? create.location;
     if (obj.parent !== create.parent) errors.push(`post_state_mismatch create ${create.object}: parent`);
     if (obj.owner !== create.owner) errors.push(`post_state_mismatch create ${create.object}: owner`);
     if (obj.anchor !== create.anchor) errors.push(`post_state_mismatch create ${create.object}: anchor`);
-    if (obj.location !== create.location) errors.push(`post_state_mismatch create ${create.object}: location`);
+    if (obj.location !== expectedLocation) errors.push(`post_state_mismatch create ${create.object}: location`);
   }
 
   for (const move of transcript.moves) {
@@ -209,12 +211,19 @@ function validateShadowPostState(serializedAfter: SerializedWorld, transcript: E
   return errors;
 }
 
+function finalWritesByCell(transcript: EffectTranscript): TranscriptWrite[] {
+  const byCell = new Map<string, TranscriptWrite>();
+  for (const write of transcript.writes) byCell.set(cellKey(write.cell), write);
+  return Array.from(byCell.values());
+}
+
 function validateShadowWriteAuthority(serializedBefore: SerializedWorld, transcript: EffectTranscript): string[] {
   const errors: string[] = [];
   // The transcript does not yet attach each write to a VM frame/progr. Use the
   // call actor plus recorded dispatch owners as a conservative shadow stand-in
   // until frame-level authority is carried in the transcript.
   const candidates = shadowWriterCandidates(transcript);
+  const authorizedCreates = new Set<ObjRef>();
   if (transcript.session) {
     const session = serializedBefore.sessions.find((item) => item.id === transcript.session);
     if (!session) errors.push(`permission_denied: session not found ${transcript.session}`);
@@ -224,18 +233,18 @@ function validateShadowWriteAuthority(serializedBefore: SerializedWorld, transcr
     errors.push(`permission_denied: actor not found ${transcript.call.actor}`);
   }
 
-  for (const write of transcript.writes) {
-    if (write.cell.kind === "prop" && !canAnyCandidateWriteProperty(serializedBefore, candidates, write.cell.object, write.cell.name)) {
-      errors.push(`permission_denied: no recorded authority can write ${cellLabel(write.cell)}`);
-    }
-    if (write.cell.kind === "location" && !canAnyCandidateControlObject(serializedBefore, candidates, write.cell.object)) {
-      errors.push(`permission_denied: no recorded authority can move ${write.cell.object}`);
-    }
+  for (const create of transcript.creates) {
+    if (canAnyCandidateCreateObject(serializedBefore, candidates, create.parent, create.owner)) authorizedCreates.add(create.object);
+    else errors.push(`permission_denied: no recorded authority can create ${create.object}`);
   }
 
-  for (const create of transcript.creates) {
-    if (!canAnyCandidateCreateObject(serializedBefore, candidates, create.parent, create.owner)) {
-      errors.push(`permission_denied: no recorded authority can create ${create.object}`);
+  for (const write of transcript.writes) {
+    const writesCreatedObject = authorizedCreates.has(write.cell.object);
+    if (write.cell.kind === "prop" && !writesCreatedObject && !canAnyCandidateWriteProperty(serializedBefore, candidates, write.cell.object, write.cell.name)) {
+      errors.push(`permission_denied: no recorded authority can write ${cellLabel(write.cell)}`);
+    }
+    if (write.cell.kind === "location" && !writesCreatedObject && !canAnyCandidateControlObject(serializedBefore, candidates, write.cell.object)) {
+      errors.push(`permission_denied: no recorded authority can move ${write.cell.object}`);
     }
   }
   return errors;
@@ -245,11 +254,21 @@ function mergeShadowCommittedState(current: SerializedWorld, executorAfter: Seri
   const next = structuredClone(current) as SerializedWorld;
   const currentObjects = new Map<ObjRef, SerializedObject>(next.objects.map((obj) => [obj.id, obj]));
   const executorObjects = new Map<ObjRef, SerializedObject>(executorAfter.objects.map((obj) => [obj.id, obj]));
-  // Object records are the current transfer granularity, so a touched object is
-  // the smallest post-state unit the commit scope can safely merge today.
-  for (const id of touchedObjectIds(transcript)) {
-    const obj = executorObjects.get(id);
-    if (obj) currentObjects.set(id, structuredClone(obj) as SerializedObject);
+
+  // Object records remain the shadow transfer unit, but accepted commits must
+  // merge at cell granularity. A partial executor can hold stale unrelated
+  // cells on an object; copying the whole object record would clobber
+  // concurrent accepted cells that the transcript never wrote.
+  for (const create of transcript.creates) {
+    const obj = executorObjects.get(create.object);
+    if (!obj) continue;
+    const cloned = structuredClone(obj) as SerializedObject;
+    currentObjects.set(create.object, cloned);
+    if (cloned.parent) addUniqueObjectRef(currentObjects.get(cloned.parent)?.children, cloned.id);
+    if (cloned.location) addUniqueObjectRef(currentObjects.get(cloned.location)?.contents, cloned.id);
+  }
+  for (const write of finalWritesByCell(transcript)) {
+    applyTranscriptWrite(currentObjects, executorObjects, write);
   }
   next.objects = Array.from(currentObjects.values()).sort((a, b) => a.id.localeCompare(b.id));
 
@@ -280,16 +299,71 @@ function mergeShadowCommittedState(current: SerializedWorld, executorAfter: Seri
   return next;
 }
 
-function touchedObjectIds(transcript: EffectTranscript): Set<ObjRef> {
-  const ids = new Set<ObjRef>();
-  for (const write of transcript.writes) ids.add(write.cell.object);
-  for (const create of transcript.creates) ids.add(create.object);
-  for (const move of transcript.moves) {
-    ids.add(move.object);
-    if (move.from) ids.add(move.from);
-    ids.add(move.to);
+function applyTranscriptWrite(
+  currentObjects: Map<ObjRef, SerializedObject>,
+  executorObjects: Map<ObjRef, SerializedObject>,
+  write: TranscriptWrite
+): void {
+  const target = currentObjects.get(write.cell.object);
+  if (!target) return;
+  switch (write.cell.kind) {
+    case "prop":
+      applyPropWrite(target, write);
+      return;
+    case "location":
+      if (typeof write.value === "string" || write.value === null) target.location = write.value;
+      return;
+    case "contents":
+      if (Array.isArray(write.value)) target.contents = write.value.filter((item): item is ObjRef => typeof item === "string");
+      return;
+    case "lifecycle": {
+      if (write.op === "create") {
+        const created = executorObjects.get(write.cell.object);
+        if (created) currentObjects.set(write.cell.object, structuredClone(created) as SerializedObject);
+      }
+      return;
+    }
+    case "verb":
+      // The shadow recorder currently observes verb reads, not verb writes.
+      return;
   }
-  return ids;
+}
+
+function applyPropWrite(target: SerializedObject, write: TranscriptWrite): void {
+  if (write.cell.kind !== "prop") return;
+  const propName = write.cell.name;
+  if (write.op === "remove") {
+    target.properties = target.properties.filter(([name]) => name !== propName);
+    target.propertyVersions = target.propertyVersions.filter(([name]) => name !== propName);
+    return;
+  }
+  const value = structuredClone(write.value) as WooValue;
+  setSerializedProperty(target, propName, value);
+  setSerializedPropertyVersion(target, propName, write.next);
+}
+
+function setSerializedProperty(target: SerializedObject, name: string, value: WooValue): void {
+  const index = target.properties.findIndex(([prop]) => prop === name);
+  if (index >= 0) target.properties[index] = [name, value];
+  else target.properties.push([name, value]);
+  target.properties.sort(([a], [b]) => a.localeCompare(b));
+}
+
+function setSerializedPropertyVersion(target: SerializedObject, name: string, version: string | undefined): void {
+  const parsed = version === undefined ? null : Number(version);
+  const nextVersion: number = parsed !== null && Number.isInteger(parsed) && parsed >= 0
+    ? parsed
+    : (target.propertyVersions.find(([prop]) => prop === name)?.[1] ?? 0) + 1;
+  const index = target.propertyVersions.findIndex(([prop]) => prop === name);
+  if (index >= 0) target.propertyVersions[index] = [name, nextVersion];
+  else target.propertyVersions.push([name, nextVersion]);
+  target.propertyVersions.sort(([a], [b]) => a.localeCompare(b));
+}
+
+function addUniqueObjectRef(list: ObjRef[] | undefined, id: ObjRef): void {
+  if (!list || list.includes(id)) return;
+  list.push(id);
+  list.sort();
 }
 
 function shadowWriterCandidates(transcript: EffectTranscript): Set<ObjRef> {
@@ -359,6 +433,14 @@ function writeValueMatchesPostState(write: TranscriptWrite, actual: WooValue): b
   return stableShadowJson(write.value) === stableShadowJson(actual);
 }
 
+function lastMoveForObject(transcript: EffectTranscript, object: ObjRef): { object: ObjRef; from: ObjRef | null; to: ObjRef } | undefined {
+  for (let i = transcript.moves.length - 1; i >= 0; i--) {
+    const move = transcript.moves[i];
+    if (move.object === object) return move;
+  }
+  return undefined;
+}
+
 function shadowConflictReason(errors: string[]): ShadowCommitConflict["reason"] {
   if (errors.some((error) => error.startsWith("stale_head"))) return "stale_head";
   if (errors.some((error) => error.startsWith("scope_mismatch"))) return "scope_mismatch";
@@ -386,4 +468,8 @@ function cellLabel(cell: TranscriptCell): string {
     case "lifecycle":
       return `${cell.object}.lifecycle`;
   }
+}
+
+function cellKey(cell: TranscriptCell): string {
+  return stableShadowJson(cell as unknown as WooValue);
 }

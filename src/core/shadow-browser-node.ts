@@ -13,7 +13,35 @@ import { runShadowTurnCall, type ShadowTurnCall } from "./shadow-turn-call";
 import { buildShadowTurnExecAd, executeShadowTurnCallAcrossInProcessNetwork, type ShadowInProcessNetworkResult } from "./shadow-turn-network";
 import { shadowTurnKeyFromTranscript, type ShadowTurnKey } from "./turn-key";
 import type { EffectTranscript } from "./effect-transcript";
-import type { ObjRef, WooValue } from "./types";
+import type { ObjRef, Observation, WooValue } from "./types";
+
+export type ShadowLiveAudience = {
+  actors?: ObjRef[];
+  sessions?: string[];
+  scope?: ObjRef;
+};
+
+export type ShadowLiveEvent = {
+  kind: "woo.live.event.shadow.v1";
+  id: string;
+  source: ObjRef;
+  actor?: ObjRef;
+  scope?: ObjRef;
+  audience?: ShadowLiveAudience;
+  observation: Observation;
+  coalesce?: string;
+};
+
+export type ShadowBrowserLiveInput = {
+  id?: string;
+  source: ObjRef;
+  actor?: ObjRef;
+  scope?: ObjRef;
+  audience?: ShadowLiveAudience;
+  observation: Observation;
+  coalesce?: string;
+  deliver_to_self?: boolean;
+};
 
 export type ShadowBrowserNodeCache = {
   kind: "woo.browser_cache.shadow.v1";
@@ -25,6 +53,7 @@ export type ShadowBrowserNodeCache = {
   applied_frames: ShadowCommitAccepted[];
   conflicts: ShadowCommitConflict[];
   transfers: ShadowStateTransfer[];
+  live_events: ShadowLiveEvent[];
 };
 
 export type ShadowBrowserPendingTurn = {
@@ -39,6 +68,9 @@ export type ShadowBrowserRelayShim = {
   node: string;
   commit_scope: ShadowCommitScope;
   executors: ShadowExecutionNode[];
+  subscriptions: Map<ObjRef, Set<string>>;
+  browsers: Map<string, ShadowBrowserNode>;
+  live_events: ShadowLiveEvent[];
 };
 
 export type ShadowBrowserNode = {
@@ -51,6 +83,7 @@ export type ShadowBrowserNode = {
   relay: ShadowBrowserRelayShim;
   cache: ShadowBrowserNodeCache;
   next_turn: number;
+  next_live: number;
 };
 
 export type ShadowBrowserOpenScopeResult = {
@@ -91,7 +124,10 @@ export function createShadowBrowserRelayShim(input: {
       scope: input.scope,
       serialized: input.serialized
     }),
-    executors: input.executors ?? []
+    executors: input.executors ?? [],
+    subscriptions: new Map(),
+    browsers: new Map(),
+    live_events: []
   };
 }
 
@@ -119,7 +155,8 @@ export function createShadowBrowserNode(input: {
     execution_node: executionNode,
     relay: input.relay,
     cache,
-    next_turn: 1
+    next_turn: 1,
+    next_live: 1
   };
 }
 
@@ -133,7 +170,8 @@ export function createShadowBrowserNodeCache(): ShadowBrowserNodeCache {
     pending_turns: new Map(),
     applied_frames: [],
     conflicts: [],
-    transfers: []
+    transfers: [],
+    live_events: []
   };
 }
 
@@ -155,10 +193,79 @@ export async function openShadowBrowserScope(
   }
   const projection = shadowScopeProjection(serialized, browser.scope);
   browser.cache.projections.set(browser.scope, projection);
+  subscribeShadowBrowserNode(browser, browser.scope);
   return {
     projection,
     preseeded_objects: preseed.length
   };
+}
+
+export function subscribeShadowBrowserNode(browser: ShadowBrowserNode, scope: ObjRef = browser.scope): void {
+  browser.relay.browsers.set(browser.node, browser);
+  let subscribers = browser.relay.subscriptions.get(scope);
+  if (!subscribers) {
+    subscribers = new Set();
+    browser.relay.subscriptions.set(scope, subscribers);
+  }
+  subscribers.add(browser.node);
+}
+
+export function unsubscribeShadowBrowserNode(browser: ShadowBrowserNode, scope: ObjRef = browser.scope): void {
+  browser.relay.subscriptions.get(scope)?.delete(browser.node);
+}
+
+export function emitShadowBrowserLiveEvent(browser: ShadowBrowserNode, input: ShadowBrowserLiveInput): ShadowLiveEvent {
+  const event: ShadowLiveEvent = {
+    kind: "woo.live.event.shadow.v1",
+    id: input.id ?? `${browser.node}:live:${browser.next_live++}`,
+    source: input.source,
+    actor: input.actor ?? browser.actor,
+    scope: input.scope ?? browser.scope,
+    audience: input.audience,
+    observation: input.observation,
+    coalesce: input.coalesce
+  };
+  publishShadowBrowserLiveEvent(browser.relay, event, {
+    except: input.deliver_to_self === true ? null : browser.node
+  });
+  return event;
+}
+
+export function publishShadowBrowserLiveEvent(
+  relay: ShadowBrowserRelayShim,
+  event: ShadowLiveEvent,
+  options: { except?: string | null } = {}
+): void {
+  relay.live_events.push(structuredClone(event) as ShadowLiveEvent);
+  for (const browser of relay.browsers.values()) {
+    if (options.except && browser.node === options.except) continue;
+    if (!shadowLiveEventMatchesBrowser(relay, browser, event)) continue;
+    receiveShadowBrowserLiveEvent(browser, event);
+  }
+}
+
+function receiveShadowBrowserLiveEvent(browser: ShadowBrowserNode, event: ShadowLiveEvent): void {
+  const cloned = structuredClone(event) as ShadowLiveEvent;
+  if (event.coalesce) {
+    const index = browser.cache.live_events.findIndex((item) => item.coalesce === event.coalesce);
+    if (index >= 0) {
+      browser.cache.live_events[index] = cloned;
+      return;
+    }
+  }
+  browser.cache.live_events.push(cloned);
+}
+
+function shadowLiveEventMatchesBrowser(
+  relay: ShadowBrowserRelayShim,
+  browser: ShadowBrowserNode,
+  event: ShadowLiveEvent
+): boolean {
+  const audience = event.audience;
+  if (audience?.sessions?.includes(browser.session ?? "")) return true;
+  if (audience?.actors?.includes(browser.actor)) return true;
+  const scope = audience?.scope ?? event.scope;
+  return typeof scope === "string" && relay.subscriptions.get(scope)?.has(browser.node) === true;
 }
 
 export async function executeShadowBrowserTurn(

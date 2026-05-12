@@ -3,7 +3,7 @@ import { installVerb } from "../src/core/authoring";
 import { createWorld, createWorldFromSerialized } from "../src/core/bootstrap";
 import { capabilityAdProbablyCoversTurn } from "../src/core/capability-ad";
 import { effectTranscriptFromRecordedTurn } from "../src/core/effect-transcript";
-import { createShadowCommitScope } from "../src/core/shadow-commit-scope";
+import { createShadowCommitScope, submitShadowCommit } from "../src/core/shadow-commit-scope";
 import {
   buildShadowClosureTransfer,
   buildShadowObjectRecordTransfer,
@@ -282,6 +282,76 @@ describe("shadow turn execution", () => {
     expect(createWorldFromSerialized(staleNode.serialized!, { persist: false }).getProp("delay_1", "wet")).not.toBe(0.59);
   });
 
+  it("merges accepted commit state at cell granularity", async () => {
+    const anchor = createWorld();
+    const session = anchor.auth("guest:shadow-cell-merge");
+    const actor = session.actor;
+    anchor.createObject({ id: "merge_box", name: "Merge Box", parent: "$thing", owner: actor });
+    anchor.defineProperty("merge_box", { name: "wet", defaultValue: 0, owner: actor, perms: "rw", typeHint: "num" });
+    anchor.defineProperty("merge_box", { name: "feedback", defaultValue: 0, owner: actor, perms: "rw", typeHint: "num" });
+    expect(installVerb(anchor, "merge_box", "set_wet", `verb :set_wet(value) rxd {
+      this.wet = value;
+      return this.wet;
+    }`, null).ok).toBe(true);
+    expect(installVerb(anchor, "merge_box", "set_feedback", `verb :set_feedback(value) rxd {
+      this.feedback = value;
+      return this.feedback;
+    }`, null).ok).toBe(true);
+
+    const wetCall: ShadowTurnCall = {
+      kind: "woo.turn_call.shadow.v1",
+      id: "shadow-cell-merge-wet",
+      route: "direct",
+      scope: "merge_box",
+      session: session.id,
+      actor,
+      target: "merge_box",
+      verb: "set_wet",
+      args: [0.44]
+    };
+    const serializedBefore = anchor.exportWorld();
+    const wetRun = await runShadowTurnCall(serializedBefore, wetCall);
+    const commitScopeRef = wetRun.transcript.scope;
+    const commitScope = createShadowCommitScope({ node: "stable-anchor", scope: commitScopeRef, serialized: serializedBefore });
+    const wetAccepted = submitShadowCommit(commitScope, {
+      kind: "woo.commit.submit.shadow.v1",
+      id: "shadow-cell-merge-wet",
+      scope: commitScopeRef,
+      expected: structuredClone(commitScope.head),
+      transcript: wetRun.transcript,
+      serialized_after: wetRun.serializedAfter
+    });
+    expect(wetAccepted.kind).toBe("woo.commit.accepted.shadow.v1");
+    expect(createWorldFromSerialized(commitScope.serialized, { persist: false }).getProp("merge_box", "wet")).toBe(0.44);
+
+    const feedbackCall: ShadowTurnCall = {
+      kind: "woo.turn_call.shadow.v1",
+      id: "shadow-cell-merge-feedback",
+      route: "direct",
+      scope: "merge_box",
+      session: session.id,
+      actor,
+      target: "merge_box",
+      verb: "set_feedback",
+      args: [0.37]
+    };
+    const staleFeedbackRun = await runShadowTurnCall(serializedBefore, feedbackCall);
+    expect(staleFeedbackRun.transcript.scope).toBe(commitScopeRef);
+    const feedbackAccepted = submitShadowCommit(commitScope, {
+      kind: "woo.commit.submit.shadow.v1",
+      id: "shadow-cell-merge-feedback",
+      scope: commitScopeRef,
+      expected: structuredClone(commitScope.head),
+      transcript: staleFeedbackRun.transcript,
+      serialized_after: staleFeedbackRun.serializedAfter
+    });
+
+    expect(feedbackAccepted.kind).toBe("woo.commit.accepted.shadow.v1");
+    const committed = createWorldFromSerialized(commitScope.serialized, { persist: false });
+    expect(committed.getProp("merge_box", "wet")).toBe(0.44);
+    expect(committed.getProp("merge_box", "feedback")).toBe(0.37);
+  });
+
   it("uses cached object pages so a second real dubspace turn transfers no lineage records", async () => {
     const anchor = createWorld();
     const session = anchor.auth("guest:shadow-page-cache");
@@ -410,6 +480,35 @@ describe("shadow turn execution", () => {
     if (!routed.result.ok) throw new Error(`catalog-cached retry failed: ${routed.result.reason}`);
     expect(routed.result.transcript.hash).toBe(planned.transcript.hash);
     expect(createWorldFromSerialized(routed.result.serializedAfter, { persist: false }).getProp("delay_1", "wet")).toBe(0.49);
+  });
+
+  it("includes feature object lineage in object-record transfers", async () => {
+    const anchor = createWorld();
+    const session = anchor.auth("guest:shadow-feature-transfer");
+    const actor = session.actor;
+    await anchor.directCall("shadow-feature-transfer-enter", actor, "the_chatroom", "enter", [], { sessionId: session.id });
+
+    const serializedBefore = anchor.exportWorld();
+    const call: ShadowTurnCall = {
+      kind: "woo.turn_call.shadow.v1",
+      id: "shadow-feature-transfer-take",
+      route: "sequenced",
+      scope: "the_chatroom",
+      session: session.id,
+      actor,
+      target: "the_chatroom",
+      verb: "take",
+      args: ["mug"]
+    };
+    const key = shadowTurnKeyFromTranscript((await runShadowTurnCall(serializedBefore, call)).transcript);
+    const transfer = buildShadowObjectRecordTransfer({
+      serialized: serializedBefore,
+      key,
+      atom_hashes: key.atom_hashes,
+      session: session.id
+    });
+
+    expect(transfer.object_pages.map((page) => page.id)).toContain("$conversational");
   });
 
   it("rejects an inline object page whose content hash does not match", async () => {

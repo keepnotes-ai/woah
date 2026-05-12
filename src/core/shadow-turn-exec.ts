@@ -660,9 +660,11 @@ function objectClosureForPreimages(serialized: SerializedWorld, preimages: strin
       const obj = byId.get(current);
       if (!obj) return;
       objectIds.add(current);
-      // Object-record closure includes parent lineage so verb and property
-      // walks can execute against the partial shard. Owner refs remain metadata
-      // unless the turn explicitly touches the owner object or owner cell.
+      // Object-record closure includes parent and feature lineage so verb and
+      // property walks can execute against the partial shard. Owner refs remain
+      // metadata unless the turn explicitly touches the owner object or owner
+      // cell.
+      for (const feature of serializedFeatureRefs(obj)) addWithLineage(feature);
       current = obj.parent;
     }
   };
@@ -672,6 +674,12 @@ function objectClosureForPreimages(serialized: SerializedWorld, preimages: strin
     if (object) addWithLineage(object);
   }
   return objectIds;
+}
+
+function serializedFeatureRefs(obj: SerializedObject): ObjRef[] {
+  const value = obj.properties.find(([name]) => name === "features")?.[1];
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is ObjRef => typeof item === "string");
 }
 
 function objectRefFromTurnKeyPreimage(preimage: string): ObjRef | null {

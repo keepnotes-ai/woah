@@ -145,10 +145,13 @@ export function effectTranscriptFromRecordedTurn(turn: RecordedTurn): EffectTran
             owner: event.owner,
             source_hash: event.source_hash ?? null,
             direct_callable: event.direct_callable === true,
+            native: event.native ?? null,
             version: event.version ?? null
           }
         });
-        if (event.implementation === "native") incompleteReasons.add(`native:${event.target}:${event.verb}`);
+        if (event.implementation === "native" && !isDeterministicTrackedNative(event.native)) {
+          incompleteReasons.add(`native:${event.target}:${event.verb}`);
+        }
         break;
       case "untracked_effect":
         incompleteReasons.add(event.name);
@@ -198,16 +201,14 @@ export function validateTranscriptAgainstSerializedWorld(serializedBefore: Seria
   const errors: string[] = [];
 
   for (const read of transcript.reads) {
+    const sameTurn = sameTurnRead(transcript, read);
+    if (sameTurn.ok) continue;
     const actual = actualReadCell(serializedBefore, world, read.cell);
     if (!actual.ok) {
       errors.push(actual.error);
       continue;
     }
-    const readMatchesOwnWrite = transcript.writes.some((write) =>
-      sameCell(write.cell, read.cell) &&
-      (write.next === undefined || write.next === read.version) &&
-      stableJson(write.value) === stableJson(read.value)
-    );
+    const readMatchesOwnWrite = sameTurn.reason === "own_write_mismatch" ? false : sameTurnReadMatchesOwnWrite(transcript, read);
     if (!readMatchesOwnWrite && read.version !== actual.version) {
       errors.push(`read version mismatch ${cellLabel(read.cell)}: transcript=${read.version ?? "none"} actual=${actual.version ?? "none"}`);
     }
@@ -220,6 +221,7 @@ export function validateTranscriptAgainstSerializedWorld(serializedBefore: Seria
     const write = transcript.writes[i];
     if (write.prior === undefined) continue;
     if (transcript.writes.slice(0, i).some((prior) => sameCell(prior.cell, write.cell))) continue;
+    if (transcript.creates.some((create) => create.object === write.cell.object)) continue;
     const actual = actualReadCell(serializedBefore, world, write.cell);
     if (!actual.ok) {
       if (write.cell.kind !== "lifecycle" || write.op !== "create") errors.push(actual.error);
@@ -231,6 +233,45 @@ export function validateTranscriptAgainstSerializedWorld(serializedBefore: Seria
   }
 
   return { ok: errors.length === 0, errors };
+}
+
+function sameTurnRead(transcript: EffectTranscript, read: TranscriptRead): { ok: true } | { ok: false; reason?: "own_write_mismatch" } {
+  if (sameTurnReadMatchesOwnWrite(transcript, read)) return { ok: true };
+  const create = transcript.creates.find((item) => item.object === read.cell.object);
+  if (!create) return { ok: false };
+  switch (read.cell.kind) {
+    case "prop":
+      if (read.cell.name === "owner" && read.value === create.owner) return { ok: true };
+      return { ok: false, reason: "own_write_mismatch" };
+    case "location": {
+      const moved = lastMoveForObject(transcript, read.cell.object);
+      if (stableJson(create.location) === stableJson(read.value)) return { ok: true };
+      if (moved && stableJson(moved.to) === stableJson(read.value)) return { ok: true };
+      return { ok: false, reason: "own_write_mismatch" };
+    }
+    case "lifecycle":
+      return read.value === "created" || read.value === "present" ? { ok: true } : { ok: false, reason: "own_write_mismatch" };
+    case "contents":
+      return { ok: false, reason: "own_write_mismatch" };
+    case "verb":
+      return { ok: false };
+  }
+}
+
+function sameTurnReadMatchesOwnWrite(transcript: EffectTranscript, read: TranscriptRead): boolean {
+  return transcript.writes.some((write) =>
+    sameCell(write.cell, read.cell) &&
+    (write.next === undefined || write.next === read.version) &&
+    stableJson(write.value) === stableJson(read.value)
+  );
+}
+
+function lastMoveForObject(transcript: EffectTranscript, object: ObjRef): TranscriptMove | undefined {
+  for (let i = transcript.moves.length - 1; i >= 0; i--) {
+    const move = transcript.moves[i];
+    if (move.object === object) return move;
+  }
+  return undefined;
 }
 
 export function transcriptTouchedStateHash(serialized: SerializedWorld, transcript: EffectTranscript): string {
@@ -272,6 +313,7 @@ function actualReadCell(serialized: SerializedWorld, world: ReturnType<typeof cr
             owner: verb.owner,
             source_hash: verb.source_hash,
             direct_callable: verb.direct_callable === true,
+            native: verb.kind === "native" ? verb.native : null,
             version: verb.version
           }
         };
@@ -352,4 +394,8 @@ function cellKey(cell: TranscriptCell): string {
 
 function stableJson(value: WooValue): string {
   return stableShadowJson(value);
+}
+
+function isDeterministicTrackedNative(native: string | undefined): boolean {
+  return native === "thing_moveto" || native === "match_object";
 }

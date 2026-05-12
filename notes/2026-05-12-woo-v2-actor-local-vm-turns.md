@@ -10,6 +10,9 @@ Durable Object architecture. The goal is to test a different distribution
 strategy for a very large Woo network while keeping the user-visible behavior
 close to the MOO-shaped object/verb world.
 
+The first build-facing protocol draft from this exploration is
+[spec/protocol/v2-turn-network.md](../spec/protocol/v2-turn-network.md).
+
 ## Thesis
 
 Woo v2 should not make object placement the semantic authority boundary.
@@ -928,6 +931,63 @@ This can be tested without replacing the whole runtime:
 
 The first milestone is not distribution. It is proving that Woo VM turns can be
 captured, replayed, validated, and retried as deterministic units.
+
+## Prototype slice landed
+
+The first runtime slice now exists as a shadow recorder, not a network feature:
+
+- `src/core/turn-recorder.ts` defines `TurnRecorder`, `ActiveTurnRecorder`,
+  event shapes, and an `InMemoryTurnRecorder` test implementation.
+- `WooWorld` can install a recorder with `setTurnRecorder(...)`.
+- Direct calls and sequenced `$space:call` applications open a recorded turn at
+  the verb-execution boundary.
+- The central recorder events currently include dispatch, property reads,
+  property writes, object creation, object movement, observations, and logical
+  inputs for VM `now()`, VM `random(n)`, `idle_seconds`, and substrate `tell()`
+  timestamps.
+- `tests/turn-recorder.test.ts` covers one direct bytecode mutator and one
+  sequenced dubspace control mutation.
+- `src/core/turn-replay.ts` can replay a recorded turn against a serialized
+  pre-turn world and return the fresh recording. Replay feeds recorded logical
+  inputs back into the cloned world, so `now()` / `random(n)` sites can replay
+  with the same values.
+- `src/core/effect-transcript.ts` normalizes recorder events into a first
+  in-memory shadow `EffectTranscript`: cell reads/writes, creates, moves,
+  observations, logical inputs, result/error, completeness flag, and stable
+  transcript hash. The replay test compares both recorder event arrays and
+  normalized transcripts. It also includes a first read/prior-write version
+  validator against a serialized pre-turn world.
+
+This is intentionally diagnostic. It now produces a shadow transcript and has a
+small replay/diff foothold, but it is not yet a semantic verifier.
+
+Implementation learning:
+
+- The current host task queue makes a world-local active recorder workable for
+  a first shadow mode. The `HostOperationMemo.turnRecorder` field is also in
+  place so future distributed paths can carry recorder state explicitly.
+- The central funnels are good enough for a first pass, but native handlers
+  remain the correctness risk. Many native handlers call the same instrumented
+  helpers and will be partially captured, but the recorder does not yet prove
+  that a native handler avoided direct mutation or host nondeterminism.
+- Behavior-failure observations currently come from the surrounding
+  `$space:call` failure path rather than `ctx.observe`, so the next transcript
+  layer must capture result/error and synthetic `$error` observations as one
+  outcome record.
+- The current recorder records property values and local property-version
+  counters. That is enough to start shaping read/write validation, but inherited
+  defaults, object lifecycle, verb metadata, and contents/location indexes still
+  need explicit version rules.
+
+The next implementation step is to make the shadow `EffectTranscript`
+load-bearing:
+
+- include result/error and synthetic failure observations in one outcome record;
+- compute pre/post state hash;
+- reject or mark transcripts that include native dispatch without a completeness
+  proof;
+- expand validation from property versions to write permissions, lifecycle,
+  location/contents, verb metadata, and inherited defaults.
 
 ## Transport/protocol readiness
 

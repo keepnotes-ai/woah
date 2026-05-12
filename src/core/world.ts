@@ -29,6 +29,7 @@ import { installCatalogManifest, updateCatalogManifest, type CatalogManifest, ty
 import { normalizeVerbPerms } from "./verb-perms";
 import { analyzeBytecodePurity, combineVerbPurity, compileVerb, propagateVerbPurity } from "./authoring";
 import { hashSource, randomHex, constantTimeEqual } from "./source-hash";
+import { shadowOwnerCellVersion, shadowStructuralCellVersion, type ShadowStructuralCellKind } from "./shadow-cell-version";
 import { objectCreateEvent, type ActiveTurnRecorder, type TurnRecorder, type TurnStart } from "./turn-recorder";
 
 export type NativeHandler = (ctx: CallContext, args: WooValue[]) => WooValue | Promise<WooValue>;
@@ -454,14 +455,24 @@ export class WooWorld {
     this.activeTurnRecorder?.event(event);
   }
 
-  private propertyVersionForRecording(objRef: ObjRef, name: string): number | undefined {
-    if (name === "owner") return undefined;
-    return this.objects.get(objRef)?.propertyVersions.get(name) ?? 0;
+  private propertyVersionForRecording(objRef: ObjRef, name: string): number | string | undefined {
+    const obj = this.objects.get(objRef);
+    if (!obj) return undefined;
+    if (name === "owner") return shadowOwnerCellVersion(objRef, obj.owner);
+    return obj.propertyVersions.get(name) ?? 0;
   }
 
-  private objectVersionForRecording(objRef: ObjRef): string | undefined {
-    const modified = this.objects.get(objRef)?.modified;
-    return modified === undefined ? undefined : String(modified);
+  private structuralVersionForRecording(kind: ShadowStructuralCellKind, objRef: ObjRef): string | undefined {
+    const obj = this.objects.get(objRef);
+    return obj ? shadowStructuralCellVersion(kind, obj) : undefined;
+  }
+
+  private recordUntrackedEffect(name: string, detail?: Record<string, WooValue>): void {
+    this.recordTurnEvent({
+      kind: "untracked_effect",
+      name,
+      ...(detail ? { detail } : {})
+    });
   }
 
   setLogicalInputsForReplay(inputs: Array<{ name: string; value: WooValue }>): void {
@@ -1230,6 +1241,7 @@ export class WooWorld {
   async getPropChecked(progr: ObjRef, objRef: ObjRef, name: string, memo?: HostOperationMemo): Promise<WooValue> {
     if (await this.remoteHostForObject(objRef, memo)) {
       if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+      this.recordUntrackedEffect("remote_get_prop", { progr, object: objRef, property: name });
       return await this.hostBridge.getPropChecked(progr, objRef, name, memo);
     }
     if (!this.canReadProperty(progr, objRef, name)) {
@@ -1250,6 +1262,7 @@ export class WooWorld {
   async setPropChecked(progr: ObjRef, objRef: ObjRef, name: string, value: WooValue, memo?: HostOperationMemo): Promise<void> {
     if (await this.remoteHostForObject(objRef, memo)) {
       if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+      this.recordUntrackedEffect("remote_set_prop", { progr, object: objRef, property: name });
       await this.hostBridge.setPropChecked(progr, objRef, name, value, memo);
       return;
     }
@@ -2983,6 +2996,7 @@ export class WooWorld {
     let result: WooValue;
     if (await this.remoteHostForObject(target, ctx.hostMemo) || (startAt ? await this.remoteHostForObject(startAt, ctx.hostMemo) : false)) {
       if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+      this.recordUntrackedEffect("remote_dispatch", { target, verb: verbName, start_at: startAt ?? null });
       result = await this.hostBridge.dispatch(ctx, target, verbName, args, startAt);
     } else {
       if (this.callDepth >= MAX_CALL_DEPTH) throw wooError("E_CALL_DEPTH", "maximum verb call depth exceeded");
@@ -4735,6 +4749,7 @@ export class WooWorld {
   async moveObjectChecked(objRef: ObjRef, targetRef: ObjRef, options: { suppressMirrorHost?: string | null } = {}): Promise<MoveObjectResult> {
     if (await this.remoteHostForObject(objRef)) {
       if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+      this.recordUntrackedEffect("remote_move", { object: objRef, target: targetRef });
       return await this.hostBridge.moveObject(objRef, targetRef, options);
     }
     return await this.moveObjectOwned(objRef, targetRef, options);
@@ -4746,7 +4761,7 @@ export class WooWorld {
     this.recordTurnEvent({
       kind: "cell_read",
       cell: { kind: "contents", object: objRef },
-      version: this.objectVersionForRecording(objRef),
+      version: this.structuralVersionForRecording("contents", objRef),
       value
     });
     return value;
@@ -4762,7 +4777,7 @@ export class WooWorld {
    */
   mirrorContents(containerRef: ObjRef, objRef: ObjRef, present: boolean): void {
     const container = this.object(containerRef);
-    const prior = this.objectVersionForRecording(containerRef);
+    const prior = this.structuralVersionForRecording("contents", containerRef);
     if (present) container.contents.add(objRef);
     else container.contents.delete(objRef);
     container.modified = Date.now();
@@ -4784,7 +4799,7 @@ export class WooWorld {
     // hot, maintain a local contents reverse index instead.
     for (const obj of this.objects.values()) {
       if (!obj.contents.delete(objRef)) continue;
-      const prior = String(obj.modified);
+      const prior = this.structuralVersionForRecording("contents", obj.id);
       obj.modified = Date.now();
       this.recordTurnEvent({
         kind: "cell_write",
@@ -4799,7 +4814,7 @@ export class WooWorld {
     if (this.objects.has(targetRef)) {
       const target = this.object(targetRef);
       if (!target.contents.has(objRef)) {
-        const prior = this.objectVersionForRecording(targetRef);
+        const prior = this.structuralVersionForRecording("contents", targetRef);
         target.contents.add(objRef);
         target.modified = Date.now();
         this.recordTurnEvent({
@@ -4854,12 +4869,13 @@ export class WooWorld {
       this.recordTurnEvent({
         kind: "cell_read",
         cell: { kind: "location", object: objRef },
-        version: this.objectVersionForRecording(objRef),
+        version: this.structuralVersionForRecording("location", objRef),
         value: obj.location
       });
       return obj.location;
     }
     if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+    this.recordUntrackedEffect("remote_location", { object: objRef });
     return await this.hostBridge.location(objRef, memo);
   }
 
@@ -6346,17 +6362,17 @@ export class WooWorld {
     const obj = this.object(objRef);
     this.object(targetRef);
     const oldLocation = obj.location;
-    const locationPrior = this.objectVersionForRecording(objRef);
+    const locationPrior = this.structuralVersionForRecording("location", objRef);
     let oldContentsPrior: string | undefined;
     if (oldLocation && this.objects.has(oldLocation)) {
       const oldContainer = this.object(oldLocation);
-      oldContentsPrior = this.objectVersionForRecording(oldLocation);
+      oldContentsPrior = this.structuralVersionForRecording("contents", oldLocation);
       oldContainer.contents.delete(objRef);
       oldContainer.modified = Date.now();
     }
     obj.location = targetRef;
     const target = this.object(targetRef);
-    const targetContentsPrior = this.objectVersionForRecording(targetRef);
+    const targetContentsPrior = this.structuralVersionForRecording("contents", targetRef);
     target.contents.add(objRef);
     target.modified = Date.now();
     obj.modified = Date.now();
@@ -6394,7 +6410,7 @@ export class WooWorld {
     const targetRemote = await this.remoteHostForObject(targetRef);
     if (!targetRemote) this.object(targetRef);
     const oldLocation = obj.location;
-    const locationPrior = this.objectVersionForRecording(objRef);
+    const locationPrior = this.structuralVersionForRecording("location", objRef);
     obj.location = targetRef;
     obj.modified = Date.now();
     this.persistObject(objRef);
@@ -6421,6 +6437,7 @@ export class WooWorld {
     if (remote) {
       if (options.suppressMirrorHost && remote === options.suppressMirrorHost) return;
       if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+      this.recordUntrackedEffect("remote_mirror_contents", { container: containerRef, object: objRef, present });
       await this.hostBridge.mirrorContents(containerRef, objRef, present);
       return;
     }
@@ -7877,6 +7894,7 @@ export class WooWorld {
   private async objectContents(objRef: ObjRef, memo?: HostOperationMemo): Promise<ObjRef[]> {
     if (await this.remoteHostForObject(objRef, memo)) {
       if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+      this.recordUntrackedEffect("remote_contents", { object: objRef });
       return await this.hostBridge.contents(objRef, memo);
     }
     return Array.from(this.object(objRef).contents);

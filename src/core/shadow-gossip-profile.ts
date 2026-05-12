@@ -1,15 +1,17 @@
 import type { SerializedWorld } from "./repository";
 import { buildShadowCapabilityAd, rankCapabilityAdsForTurn } from "./capability-ad";
 import {
-  buildShadowClosureTransfer,
+  buildShadowObjectRecordTransfer,
   createShadowExecutionNode,
-  executeShadowRecordedTurnOrNeedState,
+  executeShadowTurnCallOrNeedState,
   installShadowStateTransfer,
   type ShadowMissingAtom,
+  type ShadowStateTransfer,
+  type ShadowTurnExecRequest,
   type ShadowTurnExecutionResult
 } from "./shadow-turn-exec";
+import type { ShadowTurnCall } from "./shadow-turn-call";
 import type { ShadowCommitReceipt } from "./turn-commit";
-import type { RecordedTurn } from "./turn-recorder";
 import type { ShadowTurnKey } from "./turn-key";
 
 export type ShadowNetworkShape =
@@ -57,7 +59,7 @@ const DEFAULT_OPTIONS: Required<ShadowProfileOptions> = {
 
 export async function profileShadowTurnAcrossNetworkShapes(input: {
   serializedBefore: SerializedWorld;
-  turn: RecordedTurn;
+  call: ShadowTurnCall;
   key: ShadowTurnKey;
   shapes?: ShadowNetworkShape[];
   options?: ShadowProfileOptions;
@@ -70,8 +72,13 @@ export async function profileShadowTurnAcrossNetworkShapes(input: {
     "stale_ad_anchor_fallback"
   ];
   const profiles: ShadowNetworkProfile[] = [];
+  const request: ShadowTurnExecRequest = {
+    kind: "woo.turn_exec_request.shadow.v1",
+    call: input.call,
+    key: input.key
+  };
   for (const shape of shapes) {
-    profiles.push(await profileShape(shape, input.serializedBefore, input.turn, input.key, options));
+    profiles.push(await profileShape(shape, input.serializedBefore, request, options));
   }
   return profiles;
 }
@@ -79,30 +86,29 @@ export async function profileShadowTurnAcrossNetworkShapes(input: {
 async function profileShape(
   shape: ShadowNetworkShape,
   serializedBefore: SerializedWorld,
-  turn: RecordedTurn,
-  key: ShadowTurnKey,
+  request: ShadowTurnExecRequest,
   options: Required<ShadowProfileOptions>
 ): Promise<ShadowNetworkProfile> {
   switch (shape) {
     case "warm_actor_local":
-      return await profileWarmActor(serializedBefore, turn, key, options);
+      return await profileWarmActor(serializedBefore, request, options);
     case "cold_actor_anchor_transfer":
-      return await profileColdAnchorTransfer(serializedBefore, turn, key, options);
+      return await profileColdAnchorTransfer(serializedBefore, request, options);
     case "near_executor_remote":
-      return await profileNearExecutor(serializedBefore, turn, key, options);
+      return await profileNearExecutor(serializedBefore, request, options);
     case "stale_ad_anchor_fallback":
-      return await profileStaleAdFallback(serializedBefore, turn, key, options);
+      return await profileStaleAdFallback(serializedBefore, request, options);
   }
 }
 
 async function profileWarmActor(
   serializedBefore: SerializedWorld,
-  turn: RecordedTurn,
-  key: ShadowTurnKey,
+  request: ShadowTurnExecRequest,
   options: Required<ShadowProfileOptions>
 ): Promise<ShadowNetworkProfile> {
+  const key = request.key;
   const actorNode = createShadowExecutionNode({ node: "actor", scope: key.scope, atom_hashes: key.atom_hashes, serialized: serializedBefore });
-  const executed = await executeShadowRecordedTurnOrNeedState(actorNode, turn, key);
+  const executed = await executeShadowTurnCallOrNeedState(actorNode, request);
   if (!executed.ok) return rejectedProfile("warm_actor_local", options.local_exec_ms, [{ kind: executed.reason, node: "actor", latency_ms: options.local_exec_ms }]);
   return {
     shape: "warm_actor_local",
@@ -118,21 +124,28 @@ async function profileWarmActor(
 
 async function profileColdAnchorTransfer(
   serializedBefore: SerializedWorld,
-  turn: RecordedTurn,
-  key: ShadowTurnKey,
+  request: ShadowTurnExecRequest,
   options: Required<ShadowProfileOptions>
 ): Promise<ShadowNetworkProfile> {
+  const key = request.key;
   const actorNode = createShadowExecutionNode({ node: "actor", scope: key.scope });
-  const first = await executeShadowRecordedTurnOrNeedState(actorNode, turn, key);
+  const first = await executeShadowTurnCallOrNeedState(actorNode, request);
   const missing = missingAtomsFromExecutionResult(first);
-  const transfer = buildShadowClosureTransfer({ serialized: serializedBefore, key, atom_hashes: missing.map((atom) => atom.hash) });
-  const transferBytes = estimateShadowTransferBytes(transfer.serialized);
+  const transfer = buildShadowObjectRecordTransfer({
+    serialized: serializedBefore,
+    key,
+    missing_atoms: missing,
+    known_object_hashes: actorNode.object_hashes,
+    session: request.call.session,
+    recipient: actorNode.node
+  });
+  const transferBytes = estimateShadowStateTransferBytes(transfer);
   installShadowStateTransfer(actorNode, transfer);
-  const retry = await executeShadowRecordedTurnOrNeedState(actorNode, turn, key);
+  const retry = await executeShadowTurnCallOrNeedState(actorNode, request);
   const transferLatency = transferLatencyMs(options.actor_anchor_rtt_ms, transferBytes, options);
   const steps: ShadowProfileStep[] = [
     { kind: "local_missing_state", node: "actor", latency_ms: 0, missing_atoms: missing.length },
-    { kind: "anchor_closure_transfer", node: "anchor", latency_ms: transferLatency, bytes: transferBytes },
+    { kind: "anchor_object_record_transfer", node: "anchor", latency_ms: transferLatency, bytes: transferBytes },
     { kind: "local_retry_execute", node: "actor", latency_ms: options.local_exec_ms }
   ];
   if (!retry.ok) return rejectedProfile("cold_actor_anchor_transfer", sumLatency(steps), steps);
@@ -141,19 +154,22 @@ async function profileColdAnchorTransfer(
 
 async function profileNearExecutor(
   serializedBefore: SerializedWorld,
-  turn: RecordedTurn,
-  key: ShadowTurnKey,
+  request: ShadowTurnExecRequest,
   options: Required<ShadowProfileOptions>
 ): Promise<ShadowNetworkProfile> {
+  const key = request.key;
   const ad = buildShadowCapabilityAd({ node: "near-executor", scope: key.scope, atom_hashes: key.atom_hashes, factor: 0.9 });
   const selected = rankCapabilityAdsForTurn([ad], key)[0];
   const executor = createShadowExecutionNode({ node: selected.node, scope: key.scope, atom_hashes: key.atom_hashes, serialized: serializedBefore });
-  const executed = await executeShadowRecordedTurnOrNeedState(executor, turn, key);
-  const transferBytes = executed.ok ? estimateShadowTransferBytes(executed.serializedAfter) : 0;
+  const executed = await executeShadowTurnCallOrNeedState(executor, request);
+  const transfer = executed.ok
+    ? buildShadowObjectRecordTransfer({ serialized: executed.serializedAfter, key, atom_hashes: key.atom_hashes, session: request.call.session })
+    : null;
+  const transferBytes = transfer ? estimateShadowStateTransferBytes(transfer) : 0;
   const remoteLatency = options.actor_executor_rtt_ms + options.remote_exec_ms + transferBytes / options.transfer_bandwidth_bytes_per_ms;
   const steps: ShadowProfileStep[] = [
     { kind: "ad_rank_selected", node: selected.node, latency_ms: 0 },
-    { kind: "remote_execute_and_transfer", node: selected.node, latency_ms: remoteLatency, bytes: transferBytes }
+    { kind: "remote_execute_and_object_record_transfer", node: selected.node, latency_ms: remoteLatency, bytes: transferBytes }
   ];
   if (!executed.ok) return rejectedProfile("near_executor_remote", sumLatency(steps), steps);
   return acceptedProfile("near_executor_remote", executed.receipt, executed.transcript.hash, transferBytes, 1, steps);
@@ -161,27 +177,34 @@ async function profileNearExecutor(
 
 async function profileStaleAdFallback(
   serializedBefore: SerializedWorld,
-  turn: RecordedTurn,
-  key: ShadowTurnKey,
+  request: ShadowTurnExecRequest,
   options: Required<ShadowProfileOptions>
 ): Promise<ShadowNetworkProfile> {
+  const key = request.key;
   // The ad claims coverage, but the node's atom cache is empty. This models a
   // stale ad or Bloom false positive; correctness comes from retry, not gossip.
   const staleAd = buildShadowCapabilityAd({ node: "stale-executor", scope: key.scope, atom_hashes: key.atom_hashes, factor: 0.95 });
   const selected = rankCapabilityAdsForTurn([staleAd], key)[0];
   const staleNode = createShadowExecutionNode({ node: selected.node, scope: key.scope });
-  const staleAttempt = await executeShadowRecordedTurnOrNeedState(staleNode, turn, key);
+  const staleAttempt = await executeShadowTurnCallOrNeedState(staleNode, request);
   const actorNode = createShadowExecutionNode({ node: "actor", scope: key.scope });
   const missing = missingAtomsFromExecutionResult(staleAttempt);
-  const transfer = buildShadowClosureTransfer({ serialized: serializedBefore, key, atom_hashes: key.atom_hashes });
-  const transferBytes = estimateShadowTransferBytes(transfer.serialized);
+  const transfer = buildShadowObjectRecordTransfer({
+    serialized: serializedBefore,
+    key,
+    missing_atoms: missing,
+    known_object_hashes: actorNode.object_hashes,
+    session: request.call.session,
+    recipient: actorNode.node
+  });
+  const transferBytes = estimateShadowStateTransferBytes(transfer);
   installShadowStateTransfer(actorNode, transfer);
-  const retry = await executeShadowRecordedTurnOrNeedState(actorNode, turn, key);
+  const retry = await executeShadowTurnCallOrNeedState(actorNode, request);
   const transferLatency = transferLatencyMs(options.actor_anchor_rtt_ms, transferBytes, options);
   const steps: ShadowProfileStep[] = [
     { kind: "ad_rank_selected", node: selected.node, latency_ms: 0 },
     { kind: "remote_missing_state", node: selected.node, latency_ms: options.stale_executor_rtt_ms, missing_atoms: missing.length },
-    { kind: "anchor_closure_transfer", node: "anchor", latency_ms: transferLatency, bytes: transferBytes },
+    { kind: "anchor_object_record_transfer", node: "anchor", latency_ms: transferLatency, bytes: transferBytes },
     { kind: "local_retry_execute", node: "actor", latency_ms: options.local_exec_ms }
   ];
   if (!retry.ok) return rejectedProfile("stale_ad_anchor_fallback", sumLatency(steps), steps);
@@ -221,6 +244,10 @@ function rejectedProfile(shape: ShadowNetworkShape, totalLatencyMs: number, step
 
 export function estimateShadowTransferBytes(serialized: SerializedWorld): number {
   return Buffer.byteLength(JSON.stringify(serialized), "utf8");
+}
+
+export function estimateShadowStateTransferBytes(transfer: ShadowStateTransfer): number {
+  return Buffer.byteLength(JSON.stringify(transfer), "utf8");
 }
 
 function missingAtomsFromExecutionResult(result: ShadowTurnExecutionResult): ShadowMissingAtom[] {

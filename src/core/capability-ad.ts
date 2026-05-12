@@ -14,6 +14,7 @@ export type ShadowCapabilityAd = {
   scope: ObjRef;
   epoch: string;
   covers: ShadowBloomFilter;
+  accepts: ShadowBloomFilter;
   effects: number;
   factor: number;
 };
@@ -23,6 +24,7 @@ export function buildShadowCapabilityAd(input: {
   scope: ObjRef;
   epoch?: string;
   atom_hashes: string[];
+  accepts_atom_hashes?: string[];
   effects?: number;
   factor?: number;
   m?: number;
@@ -30,16 +32,15 @@ export function buildShadowCapabilityAd(input: {
 }): ShadowCapabilityAd {
   const m = input.m ?? 512;
   const k = input.k ?? 4;
-  const bytes = new Uint8Array(Math.ceil(m / 8));
-  for (const atomHash of input.atom_hashes) {
-    for (const index of bloomIndexes(atomHash, m, k)) setBit(bytes, index);
-  }
+  const covers = buildBloom(input.atom_hashes, m, k);
+  const accepts = buildBloom(input.accepts_atom_hashes ?? input.atom_hashes, m, k);
   return {
     kind: "woo.exec_capability_ad.shadow.v1",
     node: input.node,
     scope: input.scope,
     epoch: input.epoch ?? "shadow",
-    covers: { m, k, bits_hex: bytesToHex(bytes) },
+    covers,
+    accepts,
     effects: input.effects ?? 0,
     factor: input.factor ?? 1
   };
@@ -47,16 +48,28 @@ export function buildShadowCapabilityAd(input: {
 
 export function capabilityAdProbablyCoversTurn(ad: ShadowCapabilityAd, key: ShadowTurnKey): boolean {
   if (ad.scope !== key.scope) return false;
-  const bytes = hexToBytes(ad.covers.bits_hex);
-  return key.atom_hashes.every((atomHash) =>
-    bloomIndexes(atomHash, ad.covers.m, ad.covers.k).every((index) => getBit(bytes, index))
-  );
+  return bloomContainsAll(ad.covers, key.atom_hashes) && bloomContainsAll(ad.accepts, key.accept_atom_hashes);
 }
 
 export function rankCapabilityAdsForTurn(ads: ShadowCapabilityAd[], key: ShadowTurnKey): ShadowCapabilityAd[] {
   return ads
     .filter((ad) => capabilityAdProbablyCoversTurn(ad, key))
-    .sort((a, b) => b.factor - a.factor || a.node.localeCompare(b.node));
+    .sort((a, b) => a.factor - b.factor || a.node.localeCompare(b.node));
+}
+
+function buildBloom(atomHashes: string[], m: number, k: number): ShadowBloomFilter {
+  const bytes = new Uint8Array(Math.ceil(m / 8));
+  for (const atomHash of atomHashes) {
+    for (const index of bloomIndexes(atomHash, m, k)) setBit(bytes, index);
+  }
+  return { m, k, bits_hex: bytesToHex(bytes) };
+}
+
+function bloomContainsAll(filter: ShadowBloomFilter, atomHashes: string[]): boolean {
+  const bytes = hexToBytes(filter.bits_hex);
+  return atomHashes.every((atomHash) =>
+    bloomIndexes(atomHash, filter.m, filter.k).every((index) => getBit(bytes, index))
+  );
 }
 
 function bloomIndexes(atomHash: string, m: number, k: number): number[] {

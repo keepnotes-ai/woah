@@ -7,6 +7,7 @@ import { shadowCommitReceipt } from "../src/core/turn-commit";
 import { shadowTurnKeyFromTranscript } from "../src/core/turn-key";
 import { comparableTurnEvents, replayRecordedTurn } from "../src/core/turn-replay";
 import { InMemoryTurnRecorder } from "../src/core/turn-recorder";
+import type { HostBridge } from "../src/core/world";
 import { message } from "./core-support";
 
 describe("turn recorder", () => {
@@ -71,13 +72,19 @@ describe("turn recorder", () => {
     ]));
     expect(turnKey.atom_hashes).toHaveLength(turnKey.preimages.length);
     expect(turnKey.atom_hashes.every((hash) => /^[a-f0-9]{64}$/.test(hash))).toBe(true);
+    expect(turnKey.write_preimages).toContain("write:cell:prop:rec_box.counter");
+    expect(turnKey.write_atom_hashes).toHaveLength(turnKey.write_preimages.length);
+    expect(turnKey.accept_preimages).toEqual(expect.arrayContaining(["call:rec_box:bump", "scope:#-1", "target:rec_box"]));
     const ad = buildShadowCapabilityAd({ node: "node-a", scope: turnKey.scope, atom_hashes: turnKey.atom_hashes, factor: 0.75 });
     expect(ad).toMatchObject({ kind: "woo.exec_capability_ad.shadow.v1", node: "node-a", scope: "#-1", factor: 0.75 });
     expect(ad.covers.bits_hex).toMatch(/^[a-f0-9]+$/);
+    expect(ad.accepts.bits_hex).toMatch(/^[a-f0-9]+$/);
     expect(capabilityAdProbablyCoversTurn(ad, turnKey)).toBe(true);
     expect(capabilityAdProbablyCoversTurn(buildShadowCapabilityAd({ node: "empty", scope: turnKey.scope, atom_hashes: [] }), turnKey)).toBe(false);
-    const stronger = buildShadowCapabilityAd({ node: "node-b", scope: turnKey.scope, atom_hashes: turnKey.atom_hashes, factor: 0.9 });
-    expect(rankCapabilityAdsForTurn([ad, stronger], turnKey).map((item) => item.node)).toEqual(["node-b", "node-a"]);
+    const readOnly = buildShadowCapabilityAd({ node: "read-only", scope: turnKey.scope, atom_hashes: turnKey.atom_hashes, accepts_atom_hashes: [] });
+    expect(capabilityAdProbablyCoversTurn(readOnly, turnKey)).toBe(false);
+    const cheaper = buildShadowCapabilityAd({ node: "node-b", scope: turnKey.scope, atom_hashes: turnKey.atom_hashes, factor: 0.5 });
+    expect(rankCapabilityAdsForTurn([ad, cheaper], turnKey).map((item) => item.node)).toEqual(["node-b", "node-a"]);
   });
 
   it("records sequenced turns at the applied-call boundary", async () => {
@@ -179,6 +186,39 @@ describe("turn recorder", () => {
     expect(receipt.errors).toContain("incomplete:native:native_box:describe");
   });
 
+  it("marks cross-host dispatch as incomplete until remote transcripts are merged", async () => {
+    const world = createWorld();
+    const session = world.auth("guest:turn-recorder-remote");
+    const actor = session.actor;
+
+    world.createObject({ id: "remote_box", name: "Remote Box", parent: "$thing", owner: actor });
+    const installed = installVerb(
+      world,
+      "remote_box",
+      "ping",
+      `verb :ping() rxd {
+        return 0;
+      }`,
+      null
+    );
+    expect(installed.ok).toBe(true);
+    world.setHostBridge({
+      localHost: "local",
+      hostForObject: (id: string) => id === "remote_box" ? "remote" : null,
+      isDescendantOf: async () => false,
+      dispatch: async () => 7
+    } as unknown as HostBridge);
+    const recorder = new InMemoryTurnRecorder();
+    world.setTurnRecorder(recorder);
+
+    const result = await world.directCall("remote-ping", actor, "remote_box", "ping", []);
+
+    expect(result).toMatchObject({ op: "result", result: 7 });
+    const transcript = effectTranscriptFromRecordedTurn(recorder.turns[0]);
+    expect(transcript.complete).toBe(false);
+    expect(transcript.incompleteReasons).toContain("remote_dispatch");
+  });
+
   it("records placement writes for authored moves", async () => {
     const world = createWorld();
     const actor = "$wiz";
@@ -213,6 +253,14 @@ describe("turn recorder", () => {
     expect(transcript.writes).toContainEqual(expect.objectContaining({ cell: { kind: "contents", object: "move_b" }, value: ["move_item"], op: "add" }));
     expect(transcript.reads).toContainEqual(expect.objectContaining({ cell: { kind: "location", object: "move_item" }, value: "move_b" }));
     expect(validateTranscriptAgainstSerializedWorld(before, transcript)).toEqual({ ok: true, errors: [] });
+    const replayA = await replayRecordedTurn(before, recorder.turns[0]);
+    const replayB = await replayRecordedTurn(before, recorder.turns[0]);
+    expect(effectTranscriptFromRecordedTurn(replayA.recorded)).toEqual(transcript);
+    expect(effectTranscriptFromRecordedTurn(replayB.recorded)).toEqual(transcript);
+    const receiptA = shadowCommitReceipt(before, replayA.serializedAfter, transcript);
+    const receiptB = shadowCommitReceipt(before, replayB.serializedAfter, transcript);
+    expect(receiptA.accepted).toBe(true);
+    expect(receiptA.post_state_hash).toBe(receiptB.post_state_hash);
   });
 
   it("reports read and write-prior validation errors against stale state", async () => {
@@ -249,6 +297,46 @@ describe("turn recorder", () => {
       "read version mismatch stale_box.counter: transcript=1 actual=2",
       "read value mismatch stale_box.counter",
       "write prior mismatch stale_box.counter: transcript=1 actual=2"
+    ]));
+  });
+
+  it("validates owner reads with deterministic owner cell versions", async () => {
+    const world = createWorld();
+    const session = world.auth("guest:turn-recorder-owner");
+    const actor = session.actor;
+
+    world.createObject({ id: "owner_box", name: "Owner Box", parent: "$thing", owner: actor });
+    const installed = installVerb(
+      world,
+      "owner_box",
+      "read_owner",
+      `verb :read_owner() rxd {
+        return this.owner;
+      }`,
+      null
+    );
+    expect(installed.ok).toBe(true);
+
+    const before = world.exportWorld();
+    const recorder = new InMemoryTurnRecorder();
+    world.setTurnRecorder(recorder);
+    const result = await world.directCall("owner-read", actor, "owner_box", "read_owner", []);
+    expect(result).toMatchObject({ op: "result", result: actor });
+
+    const transcript = effectTranscriptFromRecordedTurn(recorder.turns[0]);
+    const ownerRead = transcript.reads.find((read) => read.cell.kind === "prop" && read.cell.object === "owner_box" && read.cell.name === "owner");
+    expect(ownerRead?.version).toMatch(/^[a-f0-9]{64}$/);
+    expect(validateTranscriptAgainstSerializedWorld(before, transcript)).toEqual({ ok: true, errors: [] });
+
+    const stale = structuredClone(before);
+    const staleObject = stale.objects.find((obj) => obj.id === "owner_box");
+    expect(staleObject).toBeDefined();
+    staleObject!.owner = "$wiz";
+    const validation = validateTranscriptAgainstSerializedWorld(stale, transcript);
+    expect(validation.ok).toBe(false);
+    expect(validation.errors).toEqual(expect.arrayContaining([
+      expect.stringMatching(/^read version mismatch owner_box\.owner:/),
+      "read value mismatch owner_box.owner"
     ]));
   });
 

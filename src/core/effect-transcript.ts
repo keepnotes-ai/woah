@@ -1,5 +1,6 @@
 import { createWorldFromSerialized } from "./bootstrap";
 import type { SerializedWorld } from "./repository";
+import { shadowOwnerCellVersion, shadowStructuralCellVersion, stableShadowJson } from "./shadow-cell-version";
 import { hashSource } from "./source-hash";
 import type { ErrorValue, ObjRef, Observation, WooValue } from "./types";
 import type { RecordedCell, RecordedCellWriteOp, RecordedTurn, TurnStart } from "./turn-recorder";
@@ -274,17 +275,17 @@ function actualReadCell(serialized: SerializedWorld, world: ReturnType<typeof cr
       case "location": {
         const obj = serializedObject(serialized, cell.object);
         if (!obj) return { ok: false, error: `read unavailable ${cellLabel(cell)}: object not found` };
-        return { ok: true, version: versionString(obj.modified), value: obj.location };
+        return { ok: true, version: shadowStructuralCellVersion("location", obj), value: obj.location };
       }
       case "contents": {
         const obj = serializedObject(serialized, cell.object);
         if (!obj) return { ok: false, error: `read unavailable ${cellLabel(cell)}: object not found` };
-        return { ok: true, version: versionString(obj.modified), value: obj.contents };
+        return { ok: true, version: shadowStructuralCellVersion("contents", obj), value: obj.contents };
       }
       case "lifecycle": {
         const obj = serializedObject(serialized, cell.object);
         if (!obj) return { ok: false, error: `read unavailable ${cellLabel(cell)}: object not found` };
-        return { ok: true, version: versionString(obj.modified), value: "present" };
+        return { ok: true, version: shadowStructuralCellVersion("lifecycle", obj), value: "present" };
       }
     }
   } catch (err) {
@@ -292,10 +293,10 @@ function actualReadCell(serialized: SerializedWorld, world: ReturnType<typeof cr
   }
 }
 
-function propVersion(serialized: SerializedWorld, object: ObjRef, name: string): number | undefined {
-  if (name === "owner") return undefined;
+function propVersion(serialized: SerializedWorld, object: ObjRef, name: string): number | string | undefined {
   const obj = serialized.objects.find((item) => item.id === object);
   if (!obj) return undefined;
+  if (name === "owner") return shadowOwnerCellVersion(object, obj.owner);
   return obj.propertyVersions.find(([prop]) => prop === name)?.[1] ?? 0;
 }
 
@@ -322,7 +323,7 @@ function sameCell(a: TranscriptCell, b: TranscriptCell): boolean {
   return a.object === b.object;
 }
 
-function versionString(version: number | undefined): string | undefined {
+function versionString(version: number | string | undefined): string | undefined {
   return version === undefined ? undefined : String(version);
 }
 
@@ -346,11 +347,5 @@ function cellKey(cell: TranscriptCell): string {
 }
 
 function stableJson(value: WooValue): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map((item) => stableJson(item)).join(",")}]`;
-  return `{${Object.keys(value)
-    .sort()
-    .filter((key) => value[key] !== undefined)
-    .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
-    .join(",")}}`;
+  return stableShadowJson(value);
 }

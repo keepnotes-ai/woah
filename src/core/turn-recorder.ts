@@ -29,8 +29,8 @@ export type TurnRecorderEvent =
   | { kind: "turn_finish"; ok: false; error: ErrorValue }
   | { kind: "cell_read"; cell: RecordedCell; value: WooValue; version?: string }
   | { kind: "cell_write"; cell: RecordedCell; value: WooValue; op: RecordedCellWriteOp; prior?: string; next?: string }
-  | { kind: "prop_read"; object: ObjRef; name: string; value: WooValue; version?: number }
-  | { kind: "prop_write"; object: ObjRef; name: string; hadValue: boolean; before?: WooValue; after: WooValue; changed: boolean; beforeVersion?: number; afterVersion?: number }
+  | { kind: "prop_read"; object: ObjRef; name: string; value: WooValue; version?: number | string }
+  | { kind: "prop_write"; object: ObjRef; name: string; hadValue: boolean; before?: WooValue; after: WooValue; changed: boolean; beforeVersion?: number | string; afterVersion?: number | string }
   | { kind: "object_create"; object: ObjRef; parent: ObjRef | null; owner: ObjRef; anchor: ObjRef | null; location: ObjRef | null }
   | { kind: "object_move"; object: ObjRef; from: ObjRef | null; to: ObjRef }
   | { kind: "observe"; observation: Observation }

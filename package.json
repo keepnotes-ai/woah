@@ -17,7 +17,7 @@
     "storage:profile": "tsx scripts/profile-storage-writes.ts",
     "v2:profile": "tsx scripts/profile-shadow-turn-network.ts",
     "pretest": "npm run catalog:index && npm run guard:object-names && npm run guard:catalog-migrations",
-    "test": "vitest run",
+    "test": "vitest run --reporter=dot",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
     "pretypecheck": "npm run catalog:index && npm run guard:object-names && npm run guard:catalog-migrations",

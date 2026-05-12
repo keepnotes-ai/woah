@@ -952,10 +952,14 @@ The first runtime slice now exists as a shadow recorder, not a network feature:
 - Native dispatch is now visible as resolved verb metadata and marks the
   transcript incomplete. That keeps the dispatch dependency auditable without
   pretending the native handler's internals have been proven deterministic.
+- Cross-host runtime bridge calls currently mark the shadow transcript
+  incomplete, because this slice does not yet merge a remote transcript into the
+  caller's transcript.
 - `tests/turn-recorder.test.ts` covers one direct bytecode mutator, one
   sequenced dubspace control mutation, bytecode verb/location/contents reads,
-  native dispatch incompleteness, placement writes for an authored move, and
-  replay of a deterministic recorded turn.
+  native and remote-dispatch incompleteness, owner-read validation, placement
+  writes for an authored move, move replay stability, and replay of a
+  deterministic recorded turn.
 - `src/core/turn-replay.ts` can replay a recorded turn against a serialized
   pre-turn world and return the fresh recording. Replay feeds recorded logical
   inputs back into the cloned world, so `now()` / `random(n)` sites can replay
@@ -968,34 +972,65 @@ The first runtime slice now exists as a shadow recorder, not a network feature:
   validator against a serialized pre-turn world. It can also compute a shadow
   touched-state hash from the transcript's read/write cells against any
   serialized world, giving tests a pre/post hash bridge toward commit receipts.
+  Shadow versions for owner, location, contents, and lifecycle cells are
+  deterministic content-derived hashes, not wall-clock `object.modified`
+  timestamps.
 - `src/core/turn-commit.ts` adds a local shadow commit receipt: transcript hash,
   pre/post touched-state hashes, validation errors, and an `accepted` bit.
   Incomplete native transcripts now produce a concrete refused receipt shape.
 - `src/core/turn-key.ts` derives a shadow `TurnKey` from the transcript's call,
-  read, and write surface. The test shape keeps debug preimages while also
-  producing compact 64-hex atom hashes, matching the future capability-gossip
-  and Bloom-filter path.
+  read, write, and accept surfaces. The test shape keeps debug preimages while
+  also producing compact 64-hex atom hashes, including explicit read/write atom
+  subsets and scope/target/call accept atoms for capability gossip.
 - `src/core/capability-ad.ts` adds a shadow `ExecCapabilityAd` with a concrete
-  Bloom-style `covers` filter over TurnKey atom hashes. This gives local tests a
-  real "probably covers this turn" predicate and a factor-based ranking helper
+  Bloom-style `covers` filter over TurnKey atom hashes plus an `accepts` filter
+  over turn-shape atoms. This gives local tests a real "probably covers and
+  accepts this turn" predicate and a lower-is-better factor ranking helper
   before any network transport exists.
-- `src/core/shadow-turn-exec.ts` adds the first missing-state retry simulator.
-  A shadow execution node refuses before VM replay when its atom cache does not
-  cover the predicted TurnKey, returns `missing_state`, installs a closure
-  transfer, then retries the whole recorded turn. The current transfer carries a
-  full serialized pre-turn world; it is deliberately a diagnostic stand-in for
-  future page-level closure export.
+- `src/core/shadow-turn-call.ts` adds fresh shadow `TurnCall` execution against
+  a serialized pre-state. It records the actual VM turn, normalizes an effect
+  transcript, and returns the post-turn serialized state without requiring an
+  existing `RecordedTurn`.
+- `src/core/shadow-turn-exec.ts` adds missing-state retry simulators for both
+  recorded-turn replay and fresh `TurnCall` execution. A shadow execution node
+  refuses before execution when its atom cache does not cover the predicted
+  TurnKey, returns `missing_state`, installs state transfer, then retries. The
+  fresh-call path now defaults to object-record transfer selected by missing
+  atom preimages. Object records are named by content hash so warmed nodes can
+  omit already-cached lineage/class pages; full-world closure transfer remains
+  only as a diagnostic replay baseline.
+- `src/core/shadow-turn-call.ts` now has a shadow state guard around fresh
+  execution. Dispatch, property, and structural cell recording events are
+  checked against the node's materialized atom set; touching an unmaterialized
+  cell raises `E_NEED_STATE`, aborts the turn without updating the node, and
+  returns the missing atom preimage for transfer.
+- `src/core/shadow-turn-network.ts` adds the first in-process routing harness:
+  rank concrete `covers`/`accepts` ads, select a registered execution node,
+  request object-record transfer from an anchor on miss, merge it into the
+  selected node's partial inventory, and retry the fresh call.
 - `tests/shadow-turn-exec.test.ts` covers the high-latency path: actor node
   starts cold, refuses without attempting execution, receives closure transfer,
-  retries, accepts the receipt, and ends with warmed state.
+  retries, accepts the receipt, and ends with warmed state. It now also drives a
+  fresh `TurnCall` through the in-process network from the existing
+  `the_dubspace:set_control` catalog action, including a partial-inventory
+  stale-ad case where only the missing `delay_1.wet` write atom is transferred.
+  It also proves a two-turn warmup: after the first real control write installs
+  object pages, a second real control write to `delay_1.feedback` transfers no
+  inline object records. A separate catalog-cache case preloads `$...` class
+  object pages and executes the first real control write with only live object
+  records inlined.
+  Inline object records are now checked against their advertised page hash
+  before install, and transfers carry a shadow MAC proof scoped to the anchor
+  authority and recipient node.
 - `src/core/shadow-gossip-profile.ts` adds a deterministic profiling harness
-  over the shadow executor. It runs the same recorded turn through four network
+  over the shadow executor. It runs the same fresh dubspace `TurnCall` through
+  four network
   shapes: warm actor-local execution, cold actor-to-anchor transfer, near remote
   executor, and stale-ad fallback. The harness executes the turn and computes
   latency from explicit link/transfer costs, so different shapes can be compared
   repeatably.
 - `scripts/profile-shadow-turn-network.ts` exposes the first CLI profile via
-  `npm run v2:profile`.
+  `npm run v2:profile`, including a transfer-warmup table.
 
 This is intentionally diagnostic. It now produces a shadow transcript and has a
 small replay/diff foothold, but it is not yet a semantic verifier.
@@ -1014,13 +1049,13 @@ Implementation learning:
   layer must capture result/error and synthetic `$error` observations as one
   outcome record.
 - The current recorder records property values and local property-version
-  counters. Validation now also checks verb metadata plus local
-  location/contents cells against a serialized pre-turn world.
-- `object.modified` is a usable shadow version for location and contents, but
-  it is too coarse for the real protocol. It can false-conflict when unrelated
-  object metadata changes, and it relies on every placement writer bumping the
-  container object. A network implementation should give location and contents
-  their own per-cell versions.
+  counters. Validation now also checks owner reads, verb metadata, and local
+  location/contents/lifecycle cells against a serialized pre-turn world.
+- `object.modified` is not acceptable as a shadow structural version: it is
+  wall-clock state and breaks replay reproducibility for moves and creates. The
+  prototype now uses deterministic content-derived structural versions. A real
+  commit protocol should still assign explicit per-cell next versions at commit
+  time rather than treating content hashes as the final version model.
 - Dispatch as a verb-metadata read is a helpful pressure test: the commit
   validator must know not just which object properties were read, but which
   executable definition, owner, source hash, direct-callability, and version the
@@ -1029,43 +1064,63 @@ Implementation learning:
   a read that matches a same-turn write even when the write has no deterministic
   `next` version. That is adequate for diagnostics, but a real commit protocol
   should assign deterministic per-cell next versions at commit time.
-- The missing-state path is now explicit at the TurnKey/atom layer, but not yet
-  at the VM read layer. Today the shadow executor refuses before replay if the
-  predicted atoms are absent. The harder production behavior is detecting a
-  previously unpredicted missing cell during VM execution, aborting without
-  commit, and returning enough cell identity for transfer.
-- Full-world shadow transfer is useful for proving retry control flow, but it
-  does not test compactness or authorization filtering. The next state-plane
-  slice should export per-cell or page-level closures and install them into a
-  small serialized shard.
-- The first profile run makes the cost of full-world shadow transfer visible:
-  even a tiny turn transfers the entire bootstrapped world, so cold anchor and
-  remote-executor shapes are dominated by transfer bytes. That is useful as a
-  baseline, but the next meaningful profile must compare it with bounded
-  closure pages.
+- The missing-state path is now explicit at both the TurnKey preflight layer
+  and the fresh-execution event layer. If a predicted atom is absent, the node
+  refuses before running. If the VM touches an unpredicted cell during a real
+  catalog action, the guard raises `E_NEED_STATE`; the network transfer loop can
+  request that newly discovered atom and retry successfully.
+- Object-record shadow transfer is enough to prove compact state fill in
+  response to actual inventory gaps. For the current dubspace control turn, the
+  full pre-turn world is about 1.8 MiB while the executable object-record
+  transfer is about 253 KiB and 13 object records. That is still too large for
+  browser/mobile hot paths because class bytecode dominates the parent lineage,
+  but it is no longer copying unrelated room contents or the whole catalog.
+- Content-addressed object pages produce the expected warmup curve. In the CLI
+  profile, the first `the_dubspace:set_control` turn transfers 13 inline object
+  records, while the second turn against another control on the same object has
+  one missing atom, five cached page refs, zero inline object records, and about
+  1.5 KiB transferred.
+- A browser-like node with catalog/class object pages preseeded reduces the
+  first dubspace control transfer from about 253 KiB and 13 inline object
+  records to about 4.8 KiB and three inline live records (`the_dubspace`,
+  `delay_1`, and the actor). This is the strongest evidence so far that an
+  in-browser node should ship with or quickly acquire immutable catalog pages.
+- Hash-checking inline object pages plus the shadow anchor MAC is a useful
+  minimum integrity boundary, but it is not enough for production: the receiver
+  still needs a real signed proof tying page hashes to a scope head/receipt
+  before trusting transferred state from an untrusted peer.
+- Owner lineage should not be pulled into executable closure by default. The
+  first granular transfer accidentally followed owner parent chains and pulled
+  in programmer/builder authoring verbs, inflating the dubspace transfer from
+  about 252 KiB to about 859 KiB. Owner refs are metadata unless a turn
+  explicitly reads the owner object or owner cell.
 - Stale ads are not catastrophic when the retry path is cheap and bounded, but
   they add at least one failed RTT before fallback. This supports keeping ads
   advisory and investing in short TTLs, returned better-ads, and failure
   penalties rather than making gossip authoritative.
 
-The next implementation step is to make the shadow `EffectTranscript`
-load-bearing:
+The next implementation step is to move from diagnostic replay toward a
+load-bearing local commit model:
 
-- include result/error and synthetic failure observations in one outcome record;
-- promote touched-state hashes into explicit pre/post receipt fields;
+- turn the fresh `TurnCall` helper into a real execution-plane request/reply
+  boundary with explicit auth, selected-ad, and transfer policy fields;
+- decide how remote sub-transcripts are merged, or keep cross-host bridge calls
+  explicitly incomplete until the execution plane is in place;
 - replace the shadow receipt with a real commit-submit/accept/conflict path;
-- reject or mark transcripts that include native dispatch without a completeness
-  proof;
 - expand validation from read-set consistency to write permissions, lifecycle,
-  inherited defaults, and post-state checks.
+  inherited defaults, and post-state checks;
+- add VM read-level `missing_state` aborts for cells missed by predicted
+  TurnKeys.
 
-The next state-plane implementation step is compact closure transfer:
+The next state-plane implementation step is page/cell closure transfer:
 
-- map TurnKey atom preimages back to the cells and objects they require;
-- export a bounded closure instead of a full serialized world;
-- install the closure into a small actor shard;
-- run the retry against that shard, not against the full anchor snapshot;
-- add an actual `E_NEED_STATE` VM/read guard for cells the prediction missed.
+- split large class/object records below object granularity so reusable bytecode
+  and parent-lineage metadata do not dominate every first transfer;
+- decide when inherited class bytecode can be named by hash instead of inlined;
+- replace the shadow MAC with real signatures/proofs over a scope head or
+  accepted receipt;
+- apply object/property-level authorization filtering before exposing transfer
+  data to browser or mobile actor nodes.
 
 The next profiling step is to add shape families rather than hard-coded cases:
 

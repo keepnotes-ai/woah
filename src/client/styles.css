@@ -2549,10 +2549,14 @@ input[type="range"] {
   min-height: 0;
   height: 100%;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(18rem, 24rem);
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.75rem;
   padding: 0.85rem;
   overflow: hidden;
+}
+
+.woo-tasks-admin.has-editor {
+  grid-template-columns: minmax(0, 1fr) minmax(18rem, 24rem);
 }
 
 .woo-tasks-admin-main,
@@ -2668,6 +2672,7 @@ input[type="range"] {
 
 .woo-tasks-admin-table {
   width: 100%;
+  min-width: 100%;
   border-collapse: collapse;
   font-size: 0.8rem;
 }
@@ -2691,11 +2696,9 @@ input[type="range"] {
 }
 
 .woo-tasks-admin-table td {
-  max-width: 18rem;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .woo-tasks-admin-table tbody tr {
@@ -2728,6 +2731,31 @@ input[type="range"] {
 .woo-tasks-admin-form select,
 .woo-tasks-admin-form button {
   min-width: 0;
+}
+
+.woo-tasks-policy-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.woo-tasks-policy-order {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.woo-tasks-policy-order li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.45rem;
+  padding: 0.35rem 0.45rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface-2);
+  cursor: grab;
 }
 
 .woo-tasks-admin-view {

@@ -2498,6 +2498,10 @@ function mountToolSpaceChat(element: HTMLElement, space: string) {
       height: Math.round(spaceChatHeight(space)),
       collapsed: state.spaceChatCollapsed
     });
+    // Tasks rerenders keep/move the same chat panel node, so rebind panel
+    // hooks here too (resize handle, submit, collapse), matching the
+    // pinboard/dubspace binding behavior after updates.
+    bindSpaceChatPanels();
     return;
   }
   if (existing) existing.remove();

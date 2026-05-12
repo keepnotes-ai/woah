@@ -96,11 +96,11 @@ export type KanbanData = {
 
 type StateColumnId = "ready" | "waiting" | "in_flight" | "done" | "dropped";
 type CreateDraft = { kind: string; name: string; text: string; labels: string };
-type AdminPanelMode = "view" | "edit" | "new";
+type AdminPanelMode = "edit" | "new";
 type AdminDrafts = {
   role: { name: string; description: string; owners: string };
   obligation: { key: string; role: string; criterion: string };
-  policy: { kind: string; keys: string };
+  policy: { kind: string; keys: string[] };
 };
 type AdminSection = keyof AdminDrafts;
 type AdminStatus = { state: "idle" | "pending" | "success" | "error"; message: string };
@@ -170,7 +170,7 @@ const STATE_COLUMN_LABELS: Record<StateColumnId, string> = {
   waiting: "Blocked",
   in_flight: "Active",
   done: "Done",
-  dropped: "Dropped"
+  dropped: "Canceled"
 };
 
 const STATE_COLUMN_ORDER: StateColumnId[] = ["ready", "waiting", "in_flight", "done", "dropped"];
@@ -441,6 +441,13 @@ function readDetail(row: unknown): TaskDetail | null {
   };
 }
 
+function formatLogOutcome(outcome: string): string {
+  if (outcome === "passed") return "completed step";
+  if (outcome === "dropped") return "canceled task";
+  if (outcome === "waited") return "marked blocked";
+  return outcome.replaceAll("_", " ");
+}
+
 function readActionRow(row: unknown): KanbanAction | null {
   if (!row || typeof row !== "object") return null;
   const r = row as Record<string, unknown>;
@@ -534,8 +541,9 @@ export class WooTasksKanbanElement extends HTMLElement {
   private adminDrafts: AdminDrafts = {
     role: { name: "", description: "", owners: "" },
     obligation: { key: "", role: "", criterion: "" },
-    policy: { kind: "", keys: "" }
+    policy: { kind: "", keys: [] }
   };
+  private policyDragIndex: number | null = null;
   private adminStatus: Record<AdminSection, AdminStatus> = {
     role: { state: "idle", message: "" },
     obligation: { state: "idle", message: "" },
@@ -548,6 +556,7 @@ export class WooTasksKanbanElement extends HTMLElement {
   private boundInput = false;
   private boundFocus = false;
   private renderDeferredForFocus = false;
+  private refreshRetryTimer: number | null = null;
   private filterText = "";
   private filterLabels = new Set<string>();
   private visibleStateColumns = new Set<StateColumnId>(DEFAULT_VISIBLE_STATE_COLUMNS);
@@ -590,6 +599,9 @@ export class WooTasksKanbanElement extends HTMLElement {
       this.addEventListener("focusout", this.handleFocusOut);
       this.boundFocus = true;
     }
+    this.addEventListener("dragstart", this.handleDragStart);
+    this.addEventListener("dragover", this.handleDragOver);
+    this.addEventListener("drop", this.handleDrop);
     if (this.woo) this.scheduleRefresh();
     if (typeof window !== "undefined") {
       window.addEventListener(TASKS_REFRESH_EVENT, this.handleTasksRefresh);
@@ -620,11 +632,18 @@ export class WooTasksKanbanElement extends HTMLElement {
       this.removeEventListener("focusout", this.handleFocusOut);
       this.boundFocus = false;
     }
+    this.removeEventListener("dragstart", this.handleDragStart);
+    this.removeEventListener("dragover", this.handleDragOver);
+    this.removeEventListener("drop", this.handleDrop);
     if (typeof window !== "undefined") {
       window.removeEventListener(TASKS_REFRESH_EVENT, this.handleTasksRefresh);
     }
     if (typeof document !== "undefined") {
       document.removeEventListener("keydown", this.handleKeydown);
+    }
+    if (this.refreshRetryTimer !== null && typeof window !== "undefined") {
+      window.clearTimeout(this.refreshRetryTimer);
+      this.refreshRetryTimer = null;
     }
   }
 
@@ -681,7 +700,10 @@ export class WooTasksKanbanElement extends HTMLElement {
   async refresh(): Promise<void> {
     const woo = this.woo;
     const subject = this.subject ?? this.model.registryId;
-    if (!woo || !subject) return;
+    if (!woo || !subject) {
+      this.scheduleRefreshRetry(400);
+      return;
+    }
     const projected = woo.observe(subject);
     const registryName = projected?.name ?? this.model.registryName ?? subject;
     const actor = woo.actor ?? this.model.actor;
@@ -690,9 +712,13 @@ export class WooTasksKanbanElement extends HTMLElement {
     try {
       listing = await woo.directCall(subject, "listing", []);
     } catch {
+      this.scheduleRefreshRetry(700);
       return;
     }
-    if (!Array.isArray(listing)) return;
+    if (!Array.isArray(listing)) {
+      this.scheduleRefreshRetry(700);
+      return;
+    }
     const tasks = listing.flatMap((row) => {
       const parsed = readListingRow(row);
       return parsed ? [parsed] : [];
@@ -713,17 +739,23 @@ export class WooTasksKanbanElement extends HTMLElement {
       }));
     }
     const props = (projected?.props ?? {}) as Record<string, unknown>;
+    // Preserve the last known-good policy/role/step metadata when projection
+    // props are transiently missing. Dropping to empty made Admin/New buttons
+    // flicker "randomly" between refreshes.
+    const policiesMap: Record<string, string[]> = { ...this.model.policiesMap };
     const rawPolicies = props.policies;
-    const policiesMap: Record<string, string[]> = {};
     if (rawPolicies && typeof rawPolicies === "object" && !Array.isArray(rawPolicies)) {
+      const next: Record<string, string[]> = {};
       for (const [kind, keys] of Object.entries(rawPolicies as Record<string, unknown>)) {
-        if (Array.isArray(keys)) policiesMap[kind] = keys.filter((k): k is string => typeof k === "string");
+        if (Array.isArray(keys)) next[kind] = keys.filter((k): k is string => typeof k === "string");
       }
+      for (const key of Object.keys(policiesMap)) delete policiesMap[key];
+      Object.assign(policiesMap, next);
     }
-    const policies = Object.keys(policiesMap);
+    const roles: RegistryRole[] = [...this.model.roles];
     const rawRoles = props.roles;
-    const roles: RegistryRole[] = [];
     if (rawRoles && typeof rawRoles === "object" && !Array.isArray(rawRoles)) {
+      roles.length = 0;
       for (const [name, info] of Object.entries(rawRoles as Record<string, unknown>)) {
         const i = info && typeof info === "object" && !Array.isArray(info) ? info as Record<string, unknown> : {};
         roles.push({
@@ -733,9 +765,10 @@ export class WooTasksKanbanElement extends HTMLElement {
         });
       }
     }
+    const obligations: RegistryObligation[] = [...this.model.obligations];
     const rawObs = props.obligations;
-    const obligations: RegistryObligation[] = [];
     if (rawObs && typeof rawObs === "object" && !Array.isArray(rawObs)) {
+      obligations.length = 0;
       for (const [key, info] of Object.entries(rawObs as Record<string, unknown>)) {
         const i = info && typeof info === "object" && !Array.isArray(info) ? info as Record<string, unknown> : {};
         obligations.push({
@@ -745,6 +778,7 @@ export class WooTasksKanbanElement extends HTMLElement {
         });
       }
     }
+    const policies = Object.keys(policiesMap);
     const ownerRef = typeof projected?.owner === "string" ? projected.owner : null;
     // Heuristic gate: show admin CTAs to the registry owner or $wiz. The
     // verb's own permission check is the truth — this just hides the button
@@ -762,6 +796,20 @@ export class WooTasksKanbanElement extends HTMLElement {
       obligations,
       policiesMap
     };
+    if (this.refreshRetryTimer !== null && typeof window !== "undefined") {
+      window.clearTimeout(this.refreshRetryTimer);
+      this.refreshRetryTimer = null;
+    }
+  }
+
+  private scheduleRefreshRetry(delayMs: number): void {
+    if (typeof window === "undefined") return;
+    if (this.refreshRetryTimer !== null) return;
+    this.refreshRetryTimer = window.setTimeout(() => {
+      this.refreshRetryTimer = null;
+      if (!this.isConnected || !this.woo) return;
+      this.scheduleRefresh();
+    }, delayMs);
   }
 
   private collectActorNames(woo: WooContext, projected: ReturnType<WooContext["observe"]>): Record<string, string> {
@@ -832,6 +880,7 @@ export class WooTasksKanbanElement extends HTMLElement {
     if (adminTab) {
       event.preventDefault();
       const section = adminTab.dataset.tasksAdminTab;
+      if ((section === "obligation" || section === "policy") && this.model.roles.length === 0) return;
       if (section === "role" || section === "obligation" || section === "policy") {
         this.adminSection = section;
         this.adminEditing = null;
@@ -843,9 +892,30 @@ export class WooTasksKanbanElement extends HTMLElement {
     if (adminNew) {
       event.preventDefault();
       const section = adminNew.dataset.tasksAdminNew;
+      if ((section === "obligation" || section === "policy") && this.model.roles.length === 0) return;
       if (section === "role" || section === "obligation" || section === "policy") {
         this.adminSection = section;
         this.prepareAdminEditor(section, null, "new");
+      }
+      return;
+    }
+    const policyAdd = target.closest<HTMLButtonElement>("[data-tasks-policy-add-step]");
+    if (policyAdd) {
+      event.preventDefault();
+      const key = policyAdd.dataset.tasksPolicyAddStep ?? "";
+      if (key && !this.adminDrafts.policy.keys.includes(key)) {
+        this.adminDrafts.policy.keys = [...this.adminDrafts.policy.keys, key];
+        this.render();
+      }
+      return;
+    }
+    const policyRemove = target.closest<HTMLButtonElement>("[data-tasks-policy-remove-step]");
+    if (policyRemove) {
+      event.preventDefault();
+      const index = Number(policyRemove.dataset.tasksPolicyRemoveStep ?? "-1");
+      if (Number.isInteger(index) && index >= 0 && index < this.adminDrafts.policy.keys.length) {
+        this.adminDrafts.policy.keys = this.adminDrafts.policy.keys.filter((_, i) => i !== index);
+        this.render();
       }
       return;
     }
@@ -856,7 +926,7 @@ export class WooTasksKanbanElement extends HTMLElement {
       const key = adminRow.dataset.key ?? "";
       if (section === "role" || section === "obligation" || section === "policy") {
         this.adminSection = section;
-        this.prepareAdminEditor(section, key || null, "view");
+        this.prepareAdminEditor(section, key || null, "edit");
       }
       return;
     }
@@ -951,16 +1021,14 @@ export class WooTasksKanbanElement extends HTMLElement {
     const taskId = button.dataset.taskId ?? "";
     const verb = button.dataset.tasksAction ?? "";
     if (!taskId || !verb) return;
-    const action = this.model.tasks
-      .find((task) => task.id === taskId)?.actions
-      .find((entry) => entry.verb === verb);
+    const action = this.findAction(taskId, verb);
     if (!action) return;
     event.preventDefault();
     this.dispatchEvent(new CustomEvent("woo-tasks-action", {
       bubbles: true,
       detail: { taskId, verb: action.verb, label: action.label, args: action.args }
     }));
-    if (action.args.some((arg) => arg.required)) {
+    if (action.args.some((arg) => arg.required) || action.verb === "write") {
       this.openPromptFor(taskId, action.verb);
       return;
     }
@@ -1054,7 +1122,7 @@ export class WooTasksKanbanElement extends HTMLElement {
     }
     if (formKind === "policy") {
       const name = target.name as keyof AdminDrafts["policy"];
-      if (name === "kind" || name === "keys") this.adminDrafts.policy[name] = target.value;
+      if (name === "kind") this.adminDrafts.policy.kind = target.value;
     }
   }
 
@@ -1072,8 +1140,8 @@ export class WooTasksKanbanElement extends HTMLElement {
     } else {
       const keys = key ? this.model.policiesMap[key] ?? [] : [];
       this.adminDrafts.policy = key
-        ? { kind: key, keys: keys.join(", ") }
-        : { kind: "", keys: "" };
+        ? { kind: key, keys: [...keys] }
+        : { kind: "", keys: [] };
     }
     this.adminEditing = { section, key, mode };
     this.render();
@@ -1110,18 +1178,49 @@ export class WooTasksKanbanElement extends HTMLElement {
     const verb = form.dataset.verb ?? "";
     if (!taskId || !verb) return;
     event.preventDefault();
-    const action = this.model.tasks
-      .find((task) => task.id === taskId)?.actions
-      .find((entry) => entry.verb === verb);
+    const action = this.findAction(taskId, verb);
     if (!action) return;
-    const args = action.args.map((arg) => {
-      const input = form.querySelector<HTMLInputElement | HTMLTextAreaElement>(`[name="${cssEscape(arg.name)}"]`);
-      const raw = input?.value ?? "";
-      return coerceArg(raw, arg.type);
-    });
+    let args: unknown[] = [];
+    if (action.verb === "reject") {
+      const indexRaw = form.querySelector<HTMLSelectElement>('select[name="reject_index"]')?.value ?? "";
+      const why = (form.querySelector<HTMLTextAreaElement>('textarea[name="why"]')?.value ?? "").trim();
+      args = [Number(indexRaw), why];
+    } else if (action.verb === "wait") {
+      const kind = (form.querySelector<HTMLSelectElement>('select[name="wait_kind"]')?.value ?? "").trim();
+      const note = (form.querySelector<HTMLTextAreaElement>('textarea[name="wait_note"]')?.value ?? "").trim();
+      const waitTask = (form.querySelector<HTMLInputElement>('input[name="wait_task"]')?.value ?? "").trim();
+      const cond: Record<string, unknown> = { kind };
+      if (note) cond.note = note;
+      if (waitTask) cond.task = waitTask;
+      args = [cond];
+    } else if (action.verb === "write") {
+      const text = (form.querySelector<HTMLTextAreaElement>('textarea[name="line"]')?.value ?? "").trim();
+      args = [text];
+    } else {
+      args = action.args.map((arg) => {
+        const input = form.querySelector<HTMLInputElement | HTMLTextAreaElement>(`[name="${cssEscape(arg.name)}"]`);
+        const raw = input?.value ?? "";
+        return coerceArg(raw, arg.type);
+      });
+    }
     this.closePrompt();
     void this.invokeAction(taskId, action, args);
   };
+
+  private findAction(taskId: string, verb: string): KanbanAction | null {
+    const action = this.model.tasks
+      .find((task) => task.id === taskId)?.actions
+      .find((entry) => entry.verb === verb);
+    if (action) return action;
+    if (verb === "write") {
+      return {
+        verb: "write",
+        label: "Add comment",
+        args: [{ name: "line", type: "str", required: true }]
+      };
+    }
+    return null;
+  }
 
   private async createTask(kind: string, name: string, text: string, labels: string[]): Promise<void> {
     const woo = this.woo;
@@ -1148,62 +1247,57 @@ export class WooTasksKanbanElement extends HTMLElement {
     const kind = form.dataset.tasksAdminForm ?? "";
     if (kind === "role") {
       const name = (form.querySelector<HTMLInputElement>('input[name="name"]')?.value ?? "").trim();
-      const description = (form.querySelector<HTMLInputElement>('input[name="description"]')?.value ?? "").trim();
+      const description = (form.querySelector<HTMLTextAreaElement>('textarea[name="description"]')?.value ?? "").trim();
       const ownersRaw = (form.querySelector<HTMLInputElement>('input[name="owners"]')?.value ?? "").trim();
       this.adminDrafts.role = { name, description, owners: ownersRaw };
       const owners = ownersRaw.split(",").map((s) => s.trim()).filter(Boolean);
       if (!name) return;
-      // Optimistic patch + reset draft to "new" mode so the form's ready for
-      // the next entry while the server confirms in the background.
-      const wasNew = this.adminEditing?.section === "role" && this.adminEditing.mode === "new";
-      const existingIdx = this.model.roles.findIndex((r) => r.name === name);
-      if (existingIdx >= 0) this.model.roles[existingIdx] = { name, description, owners };
-      else this.model.roles.push({ name, description, owners });
-      if (wasNew) this.adminDrafts.role = { name: "", description: "", owners: "" };
-      else this.adminDrafts.role = { name, description, owners: ownersRaw };
-      if (this.adminEditing?.section === "role") this.adminEditing = { section: "role", key: name, mode: "edit" };
-      this.setAdminStatus("role", "success", `Saved role "${name}".`);
+      const mode = this.adminEditing?.section === "role" ? this.adminEditing.mode : "new";
+      const action = mode === "new" ? "add" : "update";
       try {
         await woo.directCall(subject, "set_role", [name, { description, owners }]);
+        this.adminEditing = null;
+        this.adminDrafts.role = { name: "", description: "", owners: "" };
+        this.setAdminStatus("role", "success", `${action === "add" ? "Added" : "Updated"} role "${name}".`);
+        this.render();
       } catch (err) {
-        this.setAdminStatus("role", "error", `Could not save role "${name}": ${errorMessage(err)}`);
+        this.setAdminStatus("role", "error", `Could not ${action} role "${name}": ${errorMessage(err)}`);
       }
       void this.refresh();
       return;
     }
     if (kind === "obligation") {
-      const key = (form.querySelector<HTMLInputElement>('input[name="key"]')?.value ?? "").trim();
+      const editor = this.adminEditing?.section === "obligation" ? this.adminEditing : null;
+      const keyInput = (form.querySelector<HTMLInputElement>('input[name="key"]')?.value ?? "").trim();
+      const key = editor?.mode === "edit" && editor.key ? editor.key : keyInput;
       const role = (form.querySelector<HTMLSelectElement>('select[name="role"]')?.value ?? "").trim();
-      const criterion = (form.querySelector<HTMLInputElement>('input[name="criterion"]')?.value ?? "").trim();
+      const criterion = (form.querySelector<HTMLTextAreaElement>('textarea[name="criterion"]')?.value ?? "").trim();
       this.adminDrafts.obligation = { key, role, criterion };
       if (!key || !role || !criterion) return;
-      const wasNew = this.adminEditing?.section === "obligation" && this.adminEditing.mode === "new";
-      const existingIdx = this.model.obligations.findIndex((o) => o.key === key);
-      if (existingIdx >= 0) this.model.obligations[existingIdx] = { key, role, criterion };
-      else this.model.obligations.push({ key, role, criterion });
-      if (wasNew) this.adminDrafts.obligation = { key: "", role: this.model.roles[0]?.name ?? "", criterion: "" };
-      else this.adminDrafts.obligation = { key, role, criterion };
-      if (this.adminEditing?.section === "obligation") this.adminEditing = { section: "obligation", key, mode: "edit" };
-      this.setAdminStatus("obligation", "success", `Saved obligation "${key}".`);
+      const mode = this.adminEditing?.section === "obligation" ? this.adminEditing.mode : "new";
+      const action = mode === "new" ? "add" : "update";
       try {
         await woo.directCall(subject, "set_obligation", [key, { role, criterion }]);
+        this.adminEditing = null;
+        this.adminDrafts.obligation = { key: "", role: this.model.roles[0]?.name ?? "", criterion: "" };
+        this.setAdminStatus("obligation", "success", `${action === "add" ? "Added" : "Updated"} step "${key}".`);
+        this.render();
       } catch (err) {
-        this.setAdminStatus("obligation", "error", `Could not save obligation "${key}": ${errorMessage(err)}`);
+        this.setAdminStatus("obligation", "error", `Could not ${action} step "${key}": ${errorMessage(err)}`);
       }
       void this.refresh();
       return;
     }
     if (kind === "policy") {
       const policyKind = (form.querySelector<HTMLInputElement>('input[name="kind"]')?.value ?? "").trim();
-      const keysRaw = (form.querySelector<HTMLInputElement>('input[name="keys"]')?.value ?? "").trim();
-      this.adminDrafts.policy = { kind: policyKind, keys: keysRaw };
-      const keys = keysRaw.split(",").map((s) => s.trim()).filter(Boolean);
+      const keys = [...this.adminDrafts.policy.keys];
+      this.adminDrafts.policy = { kind: policyKind, keys };
       if (!policyKind || keys.length === 0) return;
       const wasNew = this.adminEditing?.section === "policy" && this.adminEditing.mode === "new";
       this.model.policiesMap[policyKind] = keys;
       if (!this.model.policies.includes(policyKind)) this.model.policies = [...this.model.policies, policyKind];
-      if (wasNew) this.adminDrafts.policy = { kind: "", keys: "" };
-      else this.adminDrafts.policy = { kind: policyKind, keys: keysRaw };
+      if (wasNew) this.adminDrafts.policy = { kind: "", keys: [] };
+      else this.adminDrafts.policy = { kind: policyKind, keys };
       if (this.adminEditing?.section === "policy") this.adminEditing = { section: "policy", key: policyKind, mode: "edit" };
       this.setAdminStatus("policy", "success", `Saved policy "${policyKind}".`);
       try {
@@ -1215,6 +1309,40 @@ export class WooTasksKanbanElement extends HTMLElement {
       return;
     }
   }
+
+  private handleDragStart = (event: DragEvent): void => {
+    const target = event.target as HTMLElement | null;
+    const item = target?.closest<HTMLElement>("[data-tasks-policy-order-item]");
+    if (!item) return;
+    const index = Number(item.dataset.tasksPolicyOrderItem ?? "-1");
+    if (!Number.isInteger(index) || index < 0) return;
+    this.policyDragIndex = index;
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+  };
+
+  private handleDragOver = (event: DragEvent): void => {
+    const target = event.target as HTMLElement | null;
+    if (!target?.closest("[data-tasks-policy-order-item]")) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+  };
+
+  private handleDrop = (event: DragEvent): void => {
+    const target = event.target as HTMLElement | null;
+    const item = target?.closest<HTMLElement>("[data-tasks-policy-order-item]");
+    if (!item) return;
+    event.preventDefault();
+    const from = this.policyDragIndex;
+    this.policyDragIndex = null;
+    const to = Number(item.dataset.tasksPolicyOrderItem ?? "-1");
+    if (from === null || !Number.isInteger(to) || from < 0 || to < 0 || from === to) return;
+    const keys = [...this.adminDrafts.policy.keys];
+    const [moved] = keys.splice(from, 1);
+    if (!moved) return;
+    keys.splice(to, 0, moved);
+    this.adminDrafts.policy.keys = keys;
+    this.render();
+  };
 
   private confirmAdminRemove(kind: string, key: string): boolean {
     const label = kind === "role" ? "role" : kind === "obligation" ? "obligation" : kind === "policy" ? "policy" : "entry";
@@ -1502,7 +1630,7 @@ export class WooTasksKanbanElement extends HTMLElement {
       : detailComplete
         ? "complete"
         : detailTerminal
-          ? "dropped"
+          ? "canceled"
           : detailLocation && detailLocation !== this.model.registryId
             ? `with ${actorDisplay(detailLocation, actorNames)}`
             : "ready";
@@ -1591,7 +1719,7 @@ export class WooTasksKanbanElement extends HTMLElement {
           return `<li class="woo-tasks-detail-log-entry">
             <span class="woo-tasks-detail-log-ts">${escapeHtml(ts)}</span>
             <span class="woo-tasks-detail-log-actor">${escapeHtml(actorLabel)}</span>
-            <span class="woo-tasks-detail-log-outcome">${escapeHtml(entry.outcome)}</span>
+            <span class="woo-tasks-detail-log-outcome">${escapeHtml(formatLogOutcome(entry.outcome))}</span>
             ${detailParts}
           </li>`;
         }).join("")}</ul>`;
@@ -1658,7 +1786,7 @@ export class WooTasksKanbanElement extends HTMLElement {
             const helpAttr = help ? ` title="${escapeHtml(help)}" aria-label="${escapeHtml(label)} — ${escapeHtml(help)}"` : "";
             return `<button type="button" class="woo-tasks-action" data-tasks-action="${escapeHtml(action.verb)}" data-task-id="${escapeHtml(viewingTask.id)}"${flag}${helpAttr}>${escapeHtml(label)}${needsArgs ? "…" : ""}</button>`;
           }).join("")
-        }</div>`
+        }<button type="button" class="woo-tasks-action" data-tasks-action="write" data-task-id="${escapeHtml(viewingTask.id)}">Add comment…</button></div>`
       : "";
     const prompt = (viewingTask && this.openPrompt && this.openPrompt.taskId === viewingTask.id)
       ? this.renderPrompt(viewingTask, this.openPrompt.verb)
@@ -1735,8 +1863,8 @@ export class WooTasksKanbanElement extends HTMLElement {
         ${statusNav}
         <input type="search" data-tasks-filter-text placeholder="Search tasks…" value="${escapeHtml(this.filterText)}" autocomplete="off">
         <label class="woo-tasks-kanban-groupby">
-          Group by
-          <select data-tasks-group-by aria-label="Group tasks by">${groupOptions}</select>
+          Organize cards by
+          <select data-tasks-group-by aria-label="Organize cards by">${groupOptions}</select>
         </label>
         <div class="woo-tasks-filter-chips" data-tasks-filter-chips>${chips}</div>
         ${clear}
@@ -1759,6 +1887,7 @@ export class WooTasksKanbanElement extends HTMLElement {
       { key: "obligation", label: "Steps", count: obligations.length },
       { key: "policy", label: "Workflows", count: Object.keys(policiesMap).length }
     ];
+    const rolesReady = roleNames.length > 0;
     // Each section's help leads with what *this* section is for, then
     // briefly frames how it fits with the other two — so the user gets
     // the full mental model from any tab without a separate overview block.
@@ -1802,12 +1931,12 @@ export class WooTasksKanbanElement extends HTMLElement {
                 </tr>`).join("")}</tbody>
             </table>`;
     return `
-      <section class="woo-tasks-admin">
+      <section class="woo-tasks-admin${this.adminEditing?.section === section ? " has-editor" : ""}">
         <div class="woo-tasks-admin-main">
           <div class="woo-tasks-admin-head">
             <div class="woo-tasks-admin-tabs" role="tablist" aria-label="Admin sections">
               ${tabs.map((tab) => `
-                <button type="button" role="tab" data-tasks-admin-tab="${escapeHtml(tab.key)}" class="${tab.key === section ? "active" : ""}" aria-selected="${tab.key === section ? "true" : "false"}" title="${escapeHtml(tab.label)}">
+                <button type="button" role="tab" data-tasks-admin-tab="${escapeHtml(tab.key)}" class="${tab.key === section ? "active" : ""}" aria-selected="${tab.key === section ? "true" : "false"}" title="${escapeHtml(tab.label)}"${!rolesReady && tab.key !== "role" ? " disabled" : ""}>
                   <span>${escapeHtml(tab.label)}</span>
                   <strong>${tab.count}</strong>
                 </button>
@@ -1817,7 +1946,7 @@ export class WooTasksKanbanElement extends HTMLElement {
           </div>
           <div class="woo-tasks-admin-listhead">
             <h3>${escapeHtml(tabs.find((tab) => tab.key === section)?.label ?? "Admin")}</h3>
-            <button type="button" class="woo-tasks-action" data-tasks-admin-new="${escapeHtml(section)}">New</button>
+            <button type="button" class="woo-tasks-action" data-tasks-admin-new="${escapeHtml(section)}"${!rolesReady && section !== "role" ? " disabled" : ""}>New</button>
           </div>
           <p class="woo-tasks-admin-section-help">${escapeHtml(sectionHelp)}</p>
           ${this.renderAdminStatus(section)}
@@ -1839,78 +1968,55 @@ export class WooTasksKanbanElement extends HTMLElement {
       policy: "workflow"
     };
     const noun = sectionNoun[editing.section];
-    const title = editing.key
-      ? editing.mode === "view"
-        ? `View ${noun}`
-        : `Edit ${noun}`
-      : `New ${noun}`;
+    const title = editing.key ? `Edit ${noun}` : `New ${noun}`;
     const remove = editing.key
       ? `<button type="button" class="woo-tasks-danger-action" data-tasks-admin-remove="${escapeHtml(editing.section)}" data-key="${escapeHtml(editing.key)}">Remove</button>`
       : "";
-    const body = editing.mode === "view"
-      ? editing.section === "role"
-        ? `<section class="woo-tasks-admin-view">
-            <p class="woo-tasks-admin-form-help">A role groups people who can claim and finish the steps it owns.</p>
-            <label class="woo-tasks-admin-view-field"><span>Name</span><strong>${escapeHtml(this.adminDrafts.role.name || "—")}</strong></label>
-            <label class="woo-tasks-admin-view-field"><span>Description</span><p>${escapeHtml(this.adminDrafts.role.description || "—")}</p></label>
-            <label class="woo-tasks-admin-view-field"><span>Members</span><p>${escapeHtml(this.adminDrafts.role.owners || "—")}</p></label>
-            <div class="woo-tasks-admin-form-actions">
-              <button type="button" class="woo-tasks-action" data-tasks-admin-edit="${escapeHtml(editing.section)}" data-key="${escapeHtml(editing.key)}">Edit</button>
-              ${remove}
-            </div>
-          </section>`
-        : editing.section === "obligation"
-          ? `<section class="woo-tasks-admin-view">
-              <p class="woo-tasks-admin-form-help">A step is a named gate a task moves through. Only people in the listed role can claim it and mark it done.</p>
-              <label class="woo-tasks-admin-view-field"><span>Name</span><strong>${escapeHtml(this.adminDrafts.obligation.key || "—")}</strong></label>
-              <label class="woo-tasks-admin-view-field"><span>Role</span><p>${escapeHtml(this.adminDrafts.obligation.role || "—")}</p></label>
-              <label class="woo-tasks-admin-view-field"><span>Conditions of satisfaction</span><p>${escapeHtml(this.adminDrafts.obligation.criterion || "—")}</p></label>
-              <div class="woo-tasks-admin-form-actions">
-                <button type="button" class="woo-tasks-action" data-tasks-admin-edit="${escapeHtml(editing.section)}" data-key="${escapeHtml(editing.key)}">Edit</button>
-                ${remove}
-              </div>
-            </section>`
-          : `<section class="woo-tasks-admin-view">
-              <p class="woo-tasks-admin-form-help">A workflow is the ordered checklist of steps a task moves through. Tasks pick a workflow when they're created.</p>
-              <label class="woo-tasks-admin-view-field"><span>Workflow</span><strong>${escapeHtml(this.adminDrafts.policy.kind || "—")}</strong></label>
-              <label class="woo-tasks-admin-view-field"><span>Steps (in order)</span><p>${escapeHtml(this.adminDrafts.policy.keys || "—")}</p></label>
-              <div class="woo-tasks-admin-form-actions">
-                <button type="button" class="woo-tasks-action" data-tasks-admin-edit="${escapeHtml(editing.section)}" data-key="${escapeHtml(editing.key)}">Edit</button>
-                ${remove}
-              </div>
-            </section>`
-      : editing.section === "role"
+    const body = editing.section === "role"
         ? `<form class="woo-tasks-admin-form" data-tasks-admin-form="role">
           <p class="woo-tasks-admin-form-help">A role groups people who can claim and finish the steps it owns. Add owner ids (people, wizards, or teams) below.</p>
-          <label>Name<input type="text" name="name" value="${escapeHtml(this.adminDrafts.role.name)}" required autocomplete="off" placeholder="e.g. doer"></label>
-          <label>Description <span class="woo-tasks-form-hint">(optional, shown in lists)</span><input type="text" name="description" value="${escapeHtml(this.adminDrafts.role.description)}" autocomplete="off"></label>
+          <label>Name<input type="text" name="name" value="${escapeHtml(this.adminDrafts.role.name)}" required autocomplete="off" placeholder="e.g. doer"${editing.mode === "edit" ? " readonly" : ""}></label>
+          <label>Description <span class="woo-tasks-form-hint">(optional, shown in lists)</span><textarea name="description" rows="4" autocomplete="off">${escapeHtml(this.adminDrafts.role.description)}</textarea></label>
           <label>Members <span class="woo-tasks-form-hint">(comma-separated ids of actors who have this role, e.g. <code>$wiz, guest_1</code>)</span><input type="text" name="owners" value="${escapeHtml(this.adminDrafts.role.owners)}" autocomplete="off"></label>
           <div class="woo-tasks-admin-form-actions">
             ${remove}
             <button type="button" data-tasks-admin-edit-cancel class="woo-tasks-action">Cancel</button>
-            <button type="submit" class="woo-tasks-action">Add / update</button>
+            <button type="submit" class="woo-tasks-action">${editing.mode === "new" ? "Add role" : "Update role"}</button>
           </div>
         </form>`
         : editing.section === "obligation"
           ? `<form class="woo-tasks-admin-form" data-tasks-admin-form="obligation">
             <p class="woo-tasks-admin-form-help">A step is a named gate. Tasks move through it in workflow order; only people in the listed role can claim it and mark it done.</p>
-            <label>Name <span class="woo-tasks-form-hint">(short id, e.g. <code>do:it</code> or <code>review</code>)</span><input type="text" name="key" value="${escapeHtml(this.adminDrafts.obligation.key)}" required autocomplete="off"></label>
+            <label>Name <span class="woo-tasks-form-hint">(short id, e.g. <code>do:it</code> or <code>review</code>)</span><input type="text" name="key" value="${escapeHtml(this.adminDrafts.obligation.key)}" required autocomplete="off"${editing.mode === "edit" ? " readonly" : ""}></label>
             <label>Role <span class="woo-tasks-form-hint">(who can claim and finish this step — must already exist)</span><select name="role" required>${roleNames.length === 0 ? `<option value="" disabled selected>no roles yet</option>` : roleNames.map((n) => `<option value="${escapeHtml(n)}"${n === (this.adminDrafts.obligation.role || roleNames[0] || "") ? " selected" : ""}>${escapeHtml(n)}</option>`).join("")}</select></label>
-            <label>Conditions of satisfaction <span class="woo-tasks-form-hint">(what 'done' looks like — shown to whoever takes the step)</span><input type="text" name="criterion" value="${escapeHtml(this.adminDrafts.obligation.criterion)}" required autocomplete="off" placeholder="e.g. Code reviewed and merged"></label>
+            <label>Conditions of satisfaction <span class="woo-tasks-form-hint">(what 'done' looks like — shown to whoever takes the step)</span><textarea name="criterion" rows="4" required autocomplete="off" placeholder="e.g. Code reviewed and merged">${escapeHtml(this.adminDrafts.obligation.criterion)}</textarea></label>
             <div class="woo-tasks-admin-form-actions">
               ${remove}
               <button type="button" data-tasks-admin-edit-cancel class="woo-tasks-action">Cancel</button>
-              <button type="submit" class="woo-tasks-action"${roleNames.length === 0 ? " disabled" : ""}>Add / update</button>
+              <button type="submit" class="woo-tasks-action"${roleNames.length === 0 ? " disabled" : ""}>${editing.mode === "new" ? "Add step" : "Update step"}</button>
             </div>
           </form>`
           : `<form class="woo-tasks-admin-form" data-tasks-admin-form="policy">
             <p class="woo-tasks-admin-form-help">A workflow is the ordered checklist of steps a task moves through. Tasks pick a workflow by name when they're created.</p>
             <label>Workflow name <span class="woo-tasks-form-hint">(short name tasks use to pick this workflow, e.g. <code>bug</code> or <code>feature</code>)</span><input type="text" name="kind" value="${escapeHtml(this.adminDrafts.policy.kind)}" required autocomplete="off"></label>
-            <label>Steps (in order) <span class="woo-tasks-form-hint">(comma-separated step names, in the order tasks should pass them)</span><input type="text" name="keys" placeholder="${obligationKeys.length ? `e.g. ${escapeHtml(obligationKeys.join(", "))}` : ""}" value="${escapeHtml(this.adminDrafts.policy.keys)}" required autocomplete="off"></label>
+            <label>Available steps <span class="woo-tasks-form-hint">(pick one or more)</span>
+              <div class="woo-tasks-policy-picker">
+                ${obligationKeys.length === 0
+                  ? `<p class="woo-tasks-admin-empty">No steps available.</p>`
+                  : obligationKeys.map((k) => `<button type="button" class="woo-tasks-action"${this.adminDrafts.policy.keys.includes(k) ? " disabled" : ""} data-tasks-policy-add-step="${escapeHtml(k)}">${escapeHtml(k)}</button>`).join("")}
+              </div>
+            </label>
+            <label>Selected steps (drag to reorder) <span class="woo-tasks-form-hint">(this order defines the workflow)</span>
+              <ol class="woo-tasks-policy-order">
+                ${this.adminDrafts.policy.keys.length === 0
+                  ? `<li class="woo-tasks-admin-empty">No steps selected.</li>`
+                  : this.adminDrafts.policy.keys.map((k, i) => `<li draggable="true" data-tasks-policy-order-item="${i}"><span>${escapeHtml(k)}</span><button type="button" class="woo-tasks-danger-action" data-tasks-policy-remove-step="${i}">Remove</button></li>`).join("")}
+              </ol>
+            </label>
             <div class="woo-tasks-admin-form-actions">
               ${remove}
             <button type="button" data-tasks-admin-edit-cancel class="woo-tasks-action">Cancel</button>
-            <button type="submit" class="woo-tasks-action"${obligationKeys.length === 0 ? " disabled" : ""}>Add / update</button>
+            <button type="submit" class="woo-tasks-action"${this.adminDrafts.policy.keys.length === 0 ? " disabled" : ""}>${editing.mode === "new" ? "Add workflow" : "Update workflow"}</button>
             </div>
             </form>`;
     return `
@@ -1965,9 +2071,48 @@ export class WooTasksKanbanElement extends HTMLElement {
   }
 
   private renderPrompt(task: KanbanTask, verb: string): string {
-    const action = task.actions.find((entry) => entry.verb === verb);
+    const action = this.findAction(task.id, verb);
     if (!action) return "";
-    const fields = action.args.map((arg) => {
+    const detail = this.openDetail?.taskId === task.id ? this.openDetail.detail : null;
+    const completedSteps = detail?.obligations
+      .map((o, index) => ({ o, index: index + 1 }))
+      .filter((entry) => entry.o.met) ?? [];
+    const fields = action.verb === "reject"
+      ? `
+        <label class="woo-tasks-prompt-field">
+          <span class="woo-tasks-prompt-label">Step to reopen</span>
+          <select name="reject_index" required>
+            ${completedSteps.length === 0
+              ? `<option value="" disabled selected>No completed steps yet</option>`
+              : completedSteps.map((entry) => `<option value="${entry.index}">${escapeHtml(entry.o.key)}</option>`).join("")}
+          </select>
+        </label>
+        <label class="woo-tasks-prompt-field">
+          <span class="woo-tasks-prompt-label">Why</span>
+          <textarea name="why" required></textarea>
+        </label>
+      `
+      : action.verb === "wait"
+        ? `
+          <label class="woo-tasks-prompt-field">
+            <span class="woo-tasks-prompt-label">Blocked by</span>
+            <select name="wait_kind" required>
+              <option value="dependency">Dependency</option>
+              <option value="review">Review/approval</option>
+              <option value="external">External blocker</option>
+              <option value="information">Missing information</option>
+            </select>
+          </label>
+          <label class="woo-tasks-prompt-field">
+            <span class="woo-tasks-prompt-label">Details</span>
+            <textarea name="wait_note" placeholder="What needs to happen before this can continue?"></textarea>
+          </label>
+          <label class="woo-tasks-prompt-field">
+            <span class="woo-tasks-prompt-label">Blocking task id (optional)</span>
+            <input type="text" name="wait_task" placeholder="task id">
+          </label>
+        `
+        : action.args.map((arg) => {
       const required = arg.required ? " required" : "";
       const placeholder = arg.type === "map" || arg.type === "list" ? "JSON literal" : arg.type;
       return `
@@ -1980,13 +2125,14 @@ export class WooTasksKanbanElement extends HTMLElement {
       `;
     }).join("");
     const { label: promptLabel, help: promptHelp } = actionPresentation(action.verb, action.label);
+    const disabled = action.verb === "reject" && completedSteps.length === 0 ? " disabled" : "";
     return `
       <form class="woo-tasks-prompt" data-tasks-prompt data-task-id="${escapeHtml(task.id)}" data-verb="${escapeHtml(action.verb)}">
         <div class="woo-tasks-prompt-header">${escapeHtml(promptLabel)}</div>
         ${promptHelp ? `<p class="woo-tasks-prompt-help">${escapeHtml(promptHelp)}</p>` : ""}
         ${fields}
         <div class="woo-tasks-prompt-actions">
-          <button type="submit" data-tasks-prompt-submit class="woo-tasks-action">Submit</button>
+          <button type="submit" data-tasks-prompt-submit class="woo-tasks-action"${disabled}>Submit</button>
           <button type="button" data-tasks-prompt-cancel class="woo-tasks-action">Cancel</button>
         </div>
       </form>

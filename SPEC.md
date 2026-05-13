@@ -98,7 +98,7 @@ Host-facing interfaces for runtime execution, transport, and client bootstrap ac
 - [browser-host.md](spec/protocol/browser-host.md) — transient host bootstrap (§18)
 - [routing.md](spec/protocol/routing.md) — `/objects/<id>` URL form, class-driven renderer dispatch, browser navigation vs MCP focus, `:locate()` / `:open_in_<view>()` verb conventions (AR1–AR13)
 - [ui-component-model.md](spec/protocol/ui-component-model.md) — client UI framework: catalog-owned browser modules, Web Component ABI, declarative frames, scoped neighborhoods, frame composition, consistent client projection, and observation normalization (UCM1–UCM30, **draft**)
-- [v2-turn-network.md](spec/protocol/v2-turn-network.md) — draft v2 node-network protocol: deterministic VM turns, commit scopes, execution capability gossip, state transfer, live events, in-browser nodes, and scope-local scheduled turns (VTN1–VTN18, **draft**)
+- [v2-turn-network.md](spec/protocol/v2-turn-network.md) — archived v2 node-network design note; prototype substrate was rolled back pending redesign
 
 ### Reference (Cloudflare)
 
@@ -125,7 +125,7 @@ Trust and actor-governance contracts for authentication, teams, capabilities, an
 
 - [auth.md](spec/identity/auth.md) — credentialed auth, account vs actor, multi-character, recovery, service accounts (A1–A11)
 - [teams.md](spec/identity/teams.md) — team membership, role-based gating, team quotas, service accounts (TM1–TM10)
-- [provisioning.md](spec/identity/provisioning.md) — actor creation, class assignment, capability granting, directory sync (AP1–AP7) — **placeholder**
+- [provisioning.md](spec/identity/provisioning.md) — human signup with humanness gate, in-world agent provisioning with per-account quota, Hermes deep-link onboarding, audited `$system` primitives (AP1–AP10)
 
 ### Discovery
 

@@ -61,6 +61,7 @@ export interface Env {
   ASSETS?: Fetcher;
   WOO_INITIAL_WIZARD_TOKEN?: string;
   WOO_INTERNAL_SECRET?: string;
+  TURNSTILE_SECRET_KEY?: string;
   WOO_AUTO_INSTALL_CATALOGS?: string;
   WOO_HOST_READ_TIMEOUT_MS?: string;
   WOO_HOST_WRITE_TIMEOUT_MS?: string;
@@ -307,6 +308,7 @@ export class PersistentObjectDO {
         world,
         authenticateToken: (token) => this.authenticateToken(world, token),
         requireSession: () => this.requireRestSession(world, request),
+        verifyTurnstile: (token, protocolRequest) => this.verifyTurnstile(token, protocolRequest),
         onAuthenticated: (session) => this.registerSessionRoute(session),
         onSessionEnded: (session) => this.unregisterSessionRoute(session.id),
         onSessionsEnded: async (sessions) => {
@@ -561,7 +563,7 @@ export class PersistentObjectDO {
     }
   }
 
-  private getMcpGateway(world: WooWorld): McpGateway {
+    private getMcpGateway(world: WooWorld): McpGateway {
     if (!this.mcpGateway) {
       const initStart = Date.now();
       this.mcpGateway = new McpGateway(world, {
@@ -595,9 +597,26 @@ export class PersistentObjectDO {
       world.recordMetric({ kind: "init", phase: "mcp_gateway", ms: Date.now() - initStart });
     }
     return this.mcpGateway;
-  }
+    }
 
-  private async getWorld(hostKey = this.durableHostKey()): Promise<WooWorld> {
+    private async verifyTurnstile(token: string, request: RestProtocolRequest): Promise<boolean> {
+      const secret = this.env.TURNSTILE_SECRET_KEY;
+      if (!secret) throw wooError("E_PERM", "TURNSTILE_SECRET_KEY is required for signup");
+      const body = new FormData();
+      body.set("secret", secret);
+      body.set("response", token);
+      const remoteIp = request.header("cf-connecting-ip") ?? request.header("x-forwarded-for")?.split(",")[0]?.trim();
+      if (remoteIp) body.set("remoteip", remoteIp);
+      const response = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+        method: "POST",
+        body
+      });
+      if (!response.ok) return false;
+      const parsed = await response.json().catch(() => null);
+      return !!(parsed && typeof parsed === "object" && !Array.isArray(parsed) && (parsed as { success?: unknown }).success === true);
+    }
+
+    private async getWorld(hostKey = this.durableHostKey()): Promise<WooWorld> {
     if (this.world) {
       if (hostKey === WORLD_HOST) await this.registerObjectRoutes(this.world);
       return this.world;

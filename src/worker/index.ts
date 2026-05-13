@@ -21,6 +21,7 @@ function isApiPath(pathname: string): boolean {
     pathname === "/healthz" ||
     pathname === "/ws" ||
     pathname === "/mcp" ||
+    pathname === "/connect" ||
     pathname.startsWith("/api/")
   );
 }

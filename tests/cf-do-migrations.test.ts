@@ -27,7 +27,7 @@ class_name = "AuditDO"
 
     expect(result.changed).toBe(true);
     expect(result.errors).toEqual([]);
-    expect(result.text).toContain('tag = "cf-do-0007"');
+    expect(result.text).toContain('tag = "cf-do-0004"');
     expect(result.text).toContain('new_sqlite_classes = [ "AuditDO" ]');
     expect(analyzeDoMigrations(result.text).ok).toBe(true);
   });

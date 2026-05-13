@@ -127,6 +127,18 @@ npx wrangler secret put WOO_INTERNAL_SECRET
 
 Unsigned or tampered internal requests are rejected before forwarded actor, session, or `progr` fields are trusted.
 
+### `TURNSTILE_SECRET_KEY`
+
+Required when self-service signup is enabled. The Worker verifies `/api/signup`
+tokens against Cloudflare Turnstile before creating pending accounts:
+
+```sh
+npx wrangler secret put TURNSTILE_SECRET_KEY
+```
+
+Deployments that do not expose signup can leave it unset; signup requests fail
+closed until the secret is configured.
+
 ### Future deterministic ID seed
 
 The v1 Worker does **not** read a seed phrase or salt object-id allocation. Seeded deterministic ULID allocation is deferred until the runtime has a real allocator for newly-created persistent objects. For now, deployed worlds rely on persisted object IDs plus catalog/core manifest IDs; `WOO_SEED_PHRASE` is not a deploy requirement.

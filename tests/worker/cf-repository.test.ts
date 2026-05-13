@@ -678,7 +678,7 @@ describe("CFObjectRepository production-shape coverage", () => {
         expect.objectContaining({ kind: "startup_storage", phase: "cf_repository_load", host_key: "world", stored: false }),
         expect.objectContaining({ kind: "startup_storage", phase: "cf_repository_save", host_key: "world" }),
         expect.objectContaining({ kind: "startup_storage", phase: "directory_schema", host_key: "directory" }),
-        expect.objectContaining({ kind: "startup_storage", phase: "directory_register_objects", host_key: "directory", writes: 20 })
+        expect.objectContaining({ kind: "startup_storage", phase: "directory_register_objects", host_key: "directory", writes: 23 })
       ]));
 
       logs.length = 0;
@@ -700,7 +700,7 @@ describe("CFObjectRepository production-shape coverage", () => {
       // the observable signal; the absence of a register_objects metric
       // is the actual win (no signed fetch, no Directory transaction).
       expect(restartMetrics).toEqual(expect.arrayContaining([
-        expect.objectContaining({ kind: "startup_storage", phase: "directory_register_objects_skip", host_key: "world", routes: 20 })
+        expect.objectContaining({ kind: "startup_storage", phase: "directory_register_objects_skip", host_key: "world", routes: 23 })
       ]));
       expect(restartMetrics).not.toEqual(expect.arrayContaining([
         expect.objectContaining({ kind: "startup_storage", phase: "directory_register_objects" })

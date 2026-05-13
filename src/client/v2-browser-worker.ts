@@ -3,12 +3,14 @@ import type { EffectTranscript } from "../core/effect-transcript";
 import type { ShadowCommitAccepted, ShadowScopeHead } from "../core/shadow-commit-scope";
 import { isShadowScopeHead } from "../core/shadow-scope-head";
 import { v2BrowserCacheMutationsForEnvelope, type V2BrowserCacheMutation } from "./v2-browser-cache";
+import { v2ProjectionMessageFromRow } from "./v2-browser-messages";
 import { v2BrowserWebSocketUrl } from "./v2-browser-url";
 
 type V2WorkerCommand =
   | { kind: "connect"; token: string; node?: string; scope?: string }
   | { kind: "disconnect" }
   | { kind: "send"; envelope: ShadowEnvelope }
+  | { kind: "get_projection"; scope?: string }
   | { kind: "cache_status" };
 
 type PendingEnvelope = {
@@ -65,6 +67,7 @@ async function handleCommand(command: V2WorkerCommand): Promise<void> {
         node: command.node ?? await browserNodeId(),
         scope: command.scope ?? ""
       };
+      await postCachedProjection(current.scope);
       await connect();
       break;
     case "disconnect":
@@ -89,6 +92,9 @@ async function handleCommand(command: V2WorkerCommand): Promise<void> {
       postStatus();
       break;
     }
+    case "get_projection":
+      await postCachedProjection(command.scope ?? current?.scope ?? "");
+      break;
     case "cache_status":
       postStatus();
       break;
@@ -142,7 +148,10 @@ async function receiveFrame(encoded: string): Promise<void> {
   // mutation so the browser worker rejects the same malformed envelopes as the
   // relay and in-process tests.
   const envelope = decodeEnvelope(encoded);
-  for (const mutation of v2BrowserCacheMutationsForEnvelope(envelope)) await applyCacheMutation(mutation);
+  for (const mutation of v2BrowserCacheMutationsForEnvelope(envelope)) {
+    await applyCacheMutation(mutation);
+    if (mutation.kind === "projection") postProjection(mutation.scope, mutation.head, mutation.projection);
+  }
   postMessage({ kind: "frame", envelope });
   postStatus();
 }
@@ -262,6 +271,21 @@ async function applyCacheMutation(mutation: V2BrowserCacheMutation): Promise<voi
 
 async function putProjection(scope: string, head: unknown, projection: unknown): Promise<void> {
   await tx(PROJECTION_STORE, "readwrite", (store) => store.put({ scope, head, projection, updated_at: Date.now() }));
+}
+
+async function getProjection(scope: string): Promise<unknown | undefined> {
+  if (!scope) return undefined;
+  return await tx<unknown | undefined>(PROJECTION_STORE, "readonly", (store) => store.get(scope));
+}
+
+async function postCachedProjection(scope: string): Promise<void> {
+  const message = v2ProjectionMessageFromRow(await getProjection(scope), { cached: true });
+  if (message) postMessage(message);
+}
+
+function postProjection(scope: string, head: ShadowScopeHead, projection: unknown): void {
+  const message = v2ProjectionMessageFromRow({ scope, head, projection });
+  if (message) postMessage(message);
 }
 
 async function putAppliedFrame(frame: ShadowCommitAccepted): Promise<void> {

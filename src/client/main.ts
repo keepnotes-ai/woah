@@ -18,6 +18,7 @@ import * as weatherUiModule from "../../catalogs/weather/ui/weather-badge";
 import { appliedFrameErrorObservations, chatErrorText } from "./chat-errors";
 import { createWooClientFramework, escapeHtml, liveProjectionKey, ProjectionFieldFiller, type CatalogUiPackage, type ProjectionCallOptions, type ProjectionPatch, type WooContext, type WooElement } from "./framework";
 import { advanceProjectionCursor, idsFromRefsOrSummaries, presentActorsFromObservation, scopedHerePresentActors, scopedModelWithMoveResult, type ScopedProjectionStateModel } from "./scoped-projection";
+import type { V2ProjectionMessage } from "./v2-browser-messages";
 import type { ChatLine, ChatSpaceData, ChatTitleBadge, SpaceChatPanelData } from "../../catalogs/chat/ui/chat-space";
 import type { DubspaceData } from "../../catalogs/dubspace/ui/dubspace-workspace";
 import type { PinboardData } from "../../catalogs/pinboard/ui/pinboard-board";
@@ -36,6 +37,7 @@ type AppState = {
   tab: "chat" | "dubspace" | "pinboard" | "taskspace" | "ide";
   world?: any;
   scopedProjection?: ScopedProjectionStateModel;
+  v2Projection?: V2ProjectionMessage;
   scopedObjectSummaries: Record<string, any>;
   routedSubjects: Partial<Record<"dubspace" | "pinboard" | "taskspace", string>>;
   audioOn: boolean;
@@ -447,6 +449,10 @@ function ensureV2BrowserWorker() {
   v2BrowserWorker = new Worker(new URL("./v2-browser-worker.ts", import.meta.url), { type: "module" });
   v2BrowserWorker.addEventListener("message", (event) => {
     if (event.data?.kind === "status") console.debug("woo.v2", event.data.status);
+    if (event.data?.kind === "projection") {
+      state.v2Projection = event.data as V2ProjectionMessage;
+      console.debug("woo.v2.projection", state.v2Projection);
+    }
     // Frame/error messages are exposed now so the worker-cache wire path can be
     // inspected during the migration; UI reducers will consume them directly
     // once the legacy `/ws` path is retired.
@@ -456,7 +462,10 @@ function ensureV2BrowserWorker() {
   v2BrowserWorker.postMessage({
     kind: "connect",
     token,
-    scope: state.actor
+    // The browser state plane is display-oriented, so subscribe to the active
+    // room projection when `/api/state` has established one; actor scope is a
+    // fallback for early sessions that have not entered a space yet.
+    scope: activeChatRoom() || state.actor
   });
 }
 

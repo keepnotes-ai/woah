@@ -1093,12 +1093,14 @@ tail, it receives a projection fallback rather than an unbounded replay. The
 browser-side M4 worker opens the v2 WebSocket, persists
 hello/reply/pending-frame state in IndexedDB, applies received projection/delta
 state transfers into projection, applied-frame, and transcript-tail stores,
-replays pending envelopes after reconnect, and marks reset/catch-up-needed state
-when the relay reports reset. The browser worker bundles into the SPA on every
-deployment but, on the legacy namespace, runs silently alongside the v1 `/ws`
-UI: it persists state into IndexedDB for soak-testing the wire path without
-driving rendering. UI migration to consume v2 committed state directly is
-deferred until at least one catalog is v2-authoritative on that namespace.
+persists executable object/state pages from closure transfers, replays pending
+envelopes after reconnect, and marks reset/catch-up-needed state when the relay
+reports reset. The browser worker bundles into the SPA on every deployment but,
+on the legacy namespace, runs silently alongside the v1 `/ws` UI: it persists
+state into IndexedDB for soak-testing the wire path without driving rendering
+unless the explicit `v2AppliedFrames` flag is present. UI migration to consume
+v2 committed state directly is deferred until at least one catalog is
+v2-authoritative on that namespace.
 
 M4 wire-slice status: local dev and the Cloudflare Worker expose the reserved
 `POST /v2/session/mint` path and `GET /v2/turn-network/ws` WebSocket endpoint.

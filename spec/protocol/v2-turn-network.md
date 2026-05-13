@@ -384,10 +384,11 @@ pre/post state hashes are available.
 
 Dispatch reads SHOULD contribute to `vm.verb_hashes`. The shadow recorder
 currently records the resolved definer, owner, version, `source_hash`,
-direct-callability, and native handler name when the verb is native. It records
-both top-level dispatches and local bytecode-to-bytecode calls so write-frame
-validation can prove which verb frame performed each mutation. Production
-transcripts fold that data into both the read set and the `vm` block.
+direct-callability, native handler name when the verb is native, and the
+handler's native primitive contract when one exists. It records both top-level
+dispatches and local bytecode-to-bytecode calls so write-frame validation can
+prove which verb frame performed each mutation. Production transcripts fold
+that data into both the read set and the `vm` block.
 
 Transcript values MAY be omitted when the receiver already has the matching
 content-addressed state page. Validation still needs either the value or a
@@ -939,8 +940,10 @@ Prototype status: browser-shim coverage currently commits pinboard
 and `drop`, plus taskspace `create_task`, task `claim`, and task
 `set_status`. Same-turn object creation is validated against transcript
 create/write facts rather than the pre-turn world. Deterministic native helpers
-are still admitted by a small shadow allowlist; production v2 needs this to
-become an explicit primitive contract rather than an implementation-side list.
+are admitted only when a `woo.native_primitive_contract.shadow.v1` contract
+declares the handler transcript-tracked and deterministic, including the state
+families it reads, writes, and emits. Native dispatches without such a contract
+make the transcript incomplete.
 
 ### Dubspace
 

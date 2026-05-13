@@ -4,6 +4,7 @@ import { shadowOwnerCellVersion, shadowStructuralCellVersion, stableShadowJson }
 import { hashSource } from "./source-hash";
 import type { ErrorValue, ObjRef, Observation, WooValue } from "./types";
 import type { RecordedCell, RecordedCellWriteOp, RecordedTurn, RecordedWriteAuthority, TurnStart } from "./turn-recorder";
+import { nativePrimitiveContractValue, nativePrimitiveIsTranscriptTracked } from "./native-primitive-contract";
 
 export type TranscriptCell = RecordedCell;
 
@@ -162,10 +163,11 @@ export function effectTranscriptFromRecordedTurn(turn: RecordedTurn): EffectTran
             source_hash: event.source_hash ?? null,
             direct_callable: event.direct_callable === true,
             native: event.native ?? null,
+            native_contract: nativePrimitiveContractValue(event.native),
             version: event.version ?? null
           }
         });
-        if (event.implementation === "native" && !isDeterministicTrackedNative(event.native)) {
+        if (event.implementation === "native" && !nativePrimitiveIsTranscriptTracked(event.native)) {
           incompleteReasons.add(`native:${event.target}:${event.verb}`);
         }
         break;
@@ -330,6 +332,7 @@ function actualReadCell(serialized: SerializedWorld, world: ReturnType<typeof cr
             source_hash: verb.source_hash,
             direct_callable: verb.direct_callable === true,
             native: verb.kind === "native" ? verb.native : null,
+            native_contract: verb.kind === "native" ? nativePrimitiveContractValue(verb.native) : null,
             version: verb.version
           }
         };
@@ -410,8 +413,4 @@ function cellKey(cell: TranscriptCell): string {
 
 function stableJson(value: WooValue): string {
   return stableShadowJson(value);
-}
-
-function isDeterministicTrackedNative(native: string | undefined): boolean {
-  return native === "thing_moveto" || native === "match_object";
 }

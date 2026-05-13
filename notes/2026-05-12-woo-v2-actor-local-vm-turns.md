@@ -1124,12 +1124,14 @@ Implementation learning:
   pre-turn world. Post-state validation now checks the final write per cell, so
   composite verbs such as `add_note` can update layout once in `enterfunc` and
   again in the outer verb without falsely requiring both values to be final.
-- Deterministic native helpers can be admitted only by handler identity, not by
-  the broad fact that a verb is native. Dispatch recording now includes the
-  native handler name; the shadow transcript currently treats `$thing:moveto`
-  (`thing_moveto`) and `$match:match_object` as tracked deterministic helpers.
-  The matcher became safe enough for this by recording local contents reads and
-  using ordinary recorded property reads for local candidate names.
+- Deterministic native helpers can be admitted only through explicit primitive
+  contracts, not by the broad fact that a verb is native. Dispatch recording now
+  includes the native handler name and the matching
+  `woo.native_primitive_contract.shadow.v1` value when one exists. The shadow
+  transcript currently contracts `$thing:moveto` (`thing_moveto`) and
+  `$match:match_object` as tracked deterministic helpers. The matcher became
+  safe enough for this by recording local contents reads and using ordinary
+  recorded property reads for local candidate names.
 - Hash-checking inline object pages plus the shadow anchor MAC is a useful
   minimum integrity boundary, but it is not enough for production: the receiver
   still needs a real signed proof tying page hashes to a scope head/receipt
@@ -1170,13 +1172,16 @@ The local commit model has a first implementation:
   also records local bytecode-to-bytecode dispatches, so commit validation can
   bind each write to its actual frame instead of authorizing against the union
   of all verb owners that appear in transcript reads.
+- done: tracked native helpers are now admitted by a declarative primitive
+  contract registry instead of an inline allowlist. Native dispatch reads carry
+  the contract value, and uncontracted native dispatches still mark transcripts
+  incomplete.
 - remaining: decide how remote sub-transcripts are merged, or keep cross-host
   bridge calls explicitly incomplete until the execution plane is in place.
 
 The remaining work in that layer is to make remote bridge/sub-transcript
-behavior explicit, and replace the small tracked-native allowlist with a
-declarative primitive contract that states which native helpers are
-deterministic, which state they read, and which effects they may emit.
+behavior explicit and expand the primitive contract model from the two current
+shadow-safe helpers into a production primitive catalog.
 
 The next state-plane implementation step is page/cell closure transfer:
 

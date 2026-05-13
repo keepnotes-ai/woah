@@ -174,7 +174,7 @@ describe("turn recorder", () => {
     expect(transcript.incompleteReasons).toContain("native:native_box:describe");
     expect(transcript.reads).toContainEqual(expect.objectContaining({
       cell: { kind: "verb", object: "$root", name: "describe" },
-      value: expect.objectContaining({ implementation: "native", owner: "$wiz", direct_callable: true })
+      value: expect.objectContaining({ implementation: "native", owner: "$wiz", direct_callable: true, native_contract: null })
     }));
     expect(validateTranscriptAgainstSerializedWorld(before, transcript)).toEqual({ ok: true, errors: [] });
     const receipt = shadowCommitReceipt(before, world.exportWorld(), transcript);
@@ -184,6 +184,53 @@ describe("turn recorder", () => {
       transcript_hash: transcript.hash
     });
     expect(receipt.errors).toContain("incomplete:native:native_box:describe");
+  });
+
+  it("keeps contracted native primitive dispatches complete and records the contract", async () => {
+    const world = createWorld();
+    const actor = "$wiz";
+
+    world.createObject({ id: "native_move_a", name: "Native Move A", parent: "$thing", owner: actor, location: "$nowhere" });
+    world.createObject({ id: "native_move_b", name: "Native Move B", parent: "$thing", owner: actor, location: "$nowhere" });
+    world.createObject({ id: "native_move_item", name: "Native Move Item", parent: "$thing", owner: actor, location: "native_move_a" });
+    const installed = installVerb(
+      world,
+      "native_move_item",
+      "relocate_via_native",
+      `verb :relocate_via_native(target) rxd {
+        this:moveto(target);
+        return location(this);
+      }`,
+      null
+    );
+    expect(installed.ok).toBe(true);
+
+    const before = world.exportWorld();
+    const recorder = new InMemoryTurnRecorder();
+    world.setTurnRecorder(recorder);
+
+    const result = await world.directCall("native-move-item", actor, "native_move_item", "relocate_via_native", ["native_move_b"]);
+
+    expect(result).toMatchObject({ op: "result", result: "native_move_b" });
+    const transcript = effectTranscriptFromRecordedTurn(recorder.turns[0]);
+    expect(transcript.complete).toBe(true);
+    expect(transcript.incompleteReasons).toEqual([]);
+    expect(transcript.reads).toContainEqual(expect.objectContaining({
+      cell: { kind: "verb", object: "$thing", name: "moveto" },
+      value: expect.objectContaining({
+        implementation: "native",
+        native: "thing_moveto",
+        native_contract: expect.objectContaining({
+          kind: "woo.native_primitive_contract.shadow.v1",
+          handler: "thing_moveto",
+          transcript: "tracked",
+          deterministic: true,
+          writes: expect.arrayContaining(["object.location", "container.contents"])
+        })
+      })
+    }));
+    expect(transcript.writes).toContainEqual(expect.objectContaining({ cell: { kind: "location", object: "native_move_item" }, value: "native_move_b", op: "move" }));
+    expect(validateTranscriptAgainstSerializedWorld(before, transcript)).toEqual({ ok: true, errors: [] });
   });
 
   it("marks cross-host dispatch as incomplete until remote transcripts are merged", async () => {

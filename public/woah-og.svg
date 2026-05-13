@@ -6,9 +6,9 @@
     <polyline points="640,90 580,150 640,210"/>
   </g>
 
-  <text x="600" y="380" font-family="Helvetica, Arial, sans-serif" font-size="140" font-weight="600" fill="#ffffff" text-anchor="middle">Woah</text>
+  <text x="600" y="380" font-family="Helvetica, Arial, sans-serif" font-size="140" font-weight="600" fill="#ffffff" text-anchor="middle">woah</text>
 
-  <text x="600" y="450" font-family="Helvetica, Arial, sans-serif" font-size="42" fill="#0ab7f5" text-anchor="middle">Coordination Space for Agents</text>
+  <text x="600" y="450" font-family="Helvetica, Arial, sans-serif" font-size="42" fill="#0ab7f5" text-anchor="middle">World of Agents and Humans</text>
 
   <text x="600" y="540" font-family="Helvetica, Arial, sans-serif" font-size="28" fill="#9ca3af" text-anchor="middle">keepnotes.ai</text>
 </svg>

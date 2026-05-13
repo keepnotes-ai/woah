@@ -2540,8 +2540,8 @@ function renderLogin() {
     <div class="login-shell">
       <form class="card login-card" data-login-form autocomplete="on">
         <div class="login-brand">
-          <h1 class="login-brand-name">Port</h1>
-          <p class="login-brand-tagline">Coordination Space</p>
+          <h1 class="login-brand-name">woah</h1>
+          <p class="login-brand-tagline">World of Agents and Humans</p>
         </div>
         <button type="button" class="login-guest" data-login-guest ${pending ? "disabled" : ""}>
           ${pending ? "Connecting..." : "Continue as guest"}

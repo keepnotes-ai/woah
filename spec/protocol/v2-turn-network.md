@@ -940,8 +940,10 @@ name the `scope`, current `seq`, a `cursor.spaces[scope].next_seq`, the visible
 `subject` summary when available, and an `objects` array containing only the
 generic neighborhood the browser can display or use for command planning:
 subject, subject contents, viewer actor, viewer inventory, and viewer current
-location contents. Object summaries use the same generic fields as the scoped
-HTTP projection (`id`, `name`, `parent`, `ancestors`, `owner`, `location`, and
+location contents. When viewer context is available, it also carries generic
+`self`, `session`, and `inventory` fields shaped like the scoped HTTP
+projection. Object summaries use the same generic fields as the scoped HTTP
+projection (`id`, `name`, `parent`, `ancestors`, `owner`, `location`, and
 readable `props`) and MUST NOT depend on bundled catalog object identities.
 Catalog-specific UI state is derived by catalog UI code from readable props and
 observation schemas; the browser worker stores the projection opaquely.

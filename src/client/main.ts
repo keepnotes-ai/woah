@@ -1187,12 +1187,18 @@ function applyV2ProjectionMessage(message: V2ProjectionMessage) {
     // turn submission and committed-frame reduction.
     ui.ingestSnapshot(`v2:${snapshot.scope}:${message.head.seq}`, snapshot.objects);
   }
+  const projection = message.projection && typeof message.projection === "object" && !Array.isArray(message.projection)
+    ? message.projection as any
+    : {};
+  const self = projection.self && typeof projection.self === "object" && !Array.isArray(projection.self) ? projection.self : state.scopedProjection.self;
+  const session = projection.session && typeof projection.session === "object" && !Array.isArray(projection.session) ? projection.session : state.scopedProjection.session;
+  const inventory = Array.isArray(projection.inventory) ? projection.inventory : state.scopedProjection.inventory;
   let cursor = state.scopedProjection.cursor;
   for (const [space, record] of Object.entries(snapshot.cursor?.spaces ?? {})) {
     const nextSeq = Number(record?.next_seq);
     if (Number.isFinite(nextSeq)) cursor = advanceProjectionCursor(cursor, space, nextSeq - 1);
   }
-  state.scopedProjection = { ...state.scopedProjection, cursor };
+  state.scopedProjection = { ...state.scopedProjection, cursor, self, session, inventory };
   render();
 }
 

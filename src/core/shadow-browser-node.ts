@@ -97,6 +97,14 @@ export type ShadowScopeProjection = {
   seq: number;
   cursor: { spaces: Record<ObjRef, { next_seq: number }>; live: { resumable: false } };
   viewer?: { actor: ObjRef; session?: string | null };
+  self?: ScopedObjectSummary | null;
+  session?: {
+    id: string;
+    actor: ObjRef;
+    current_location: ObjRef | null;
+    all_locations: ObjRef[];
+  } | null;
+  inventory?: ScopedObjectSummary[];
   subject: ScopedObjectSummary | null;
   objects: ScopedObjectSummary[];
 };
@@ -929,7 +937,16 @@ function shadowScopeProjection(
 ): ShadowScopeProjection {
   const index = shadowSerializedIndex(serialized);
   const scopeObj = index.objects.get(scope);
+  const session = viewer?.session ? index.sessions.get(viewer.session) : undefined;
+  const actorObj = viewer?.actor ? index.objects.get(viewer.actor) : undefined;
   const subject = scopeObj ? shadowSerializedObjectSummary(index, scopeObj, viewer?.actor) : null;
+  const self = actorObj ? shadowSerializedObjectSummary(index, actorObj, viewer?.actor) : null;
+  const inventory = (actorObj?.contents ?? [])
+    .map((id) => {
+      const obj = index.objects.get(id);
+      return obj ? shadowSerializedObjectSummary(index, obj, viewer?.actor) : null;
+    })
+    .filter((item): item is ScopedObjectSummary => item !== null);
   const objects = shadowProjectionRefs(index, scope, viewer)
     .map((id) => {
       const obj = index.objects.get(id);
@@ -946,6 +963,16 @@ function shadowScopeProjection(
     seq,
     cursor: { spaces: { [scope]: { next_seq: seq + 1 } }, live: { resumable: false } },
     ...(viewer ? { viewer } : {}),
+    ...(viewer ? {
+      self,
+      session: viewer.session ? {
+        id: viewer.session,
+        actor: viewer.actor,
+        current_location: session?.currentLocation ?? null,
+        all_locations: session?.currentLocation ? [session.currentLocation] : []
+      } : null,
+      inventory
+    } : {}),
     subject,
     objects
   };

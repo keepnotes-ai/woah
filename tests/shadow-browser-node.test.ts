@@ -64,6 +64,9 @@ describe("shadow browser node shim", () => {
       kind: "woo.scope_projection.shadow.v1",
       scope: "the_dubspace",
       viewer: { actor },
+      self: { id: actor },
+      session: { actor, current_location: "the_dubspace" },
+      inventory: expect.any(Array),
       cursor: { spaces: { the_dubspace: { next_seq: expect.any(Number) } }, live: { resumable: false } },
       subject: { id: "the_dubspace", props: expect.any(Object) }
     });

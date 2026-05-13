@@ -23,14 +23,15 @@ import { installGitHubTap, updateGitHubTap } from "./github-taps";
 import { LocalSQLiteRepository } from "./sqlite-repository";
 import { McpGateway } from "../mcp/gateway";
 import {
-  createShadowBrowserNode,
+  createShadowBrowserClient,
   createShadowBrowserRelayShim,
   handleShadowBrowserTurnExecEnvelope,
   receiveShadowBrowserEnvelopeReceipt,
-  setShadowBrowserSessionToken,
+  shadowBrowserSessionBearer,
+  shadowBrowserSessionClaimsValue,
   shadowBrowserTransportHello
 } from "../core/shadow-browser-node";
-import { encodeEnvelope, type ShadowEnvelope } from "../core/shadow-envelope";
+import { buildTransportErrorEnvelope, encodeEnvelope, type ShadowEnvelope } from "../core/shadow-envelope";
 
 // Local dev server only: HTTP authoring endpoints require a session and then
 // defer to the world's object-authoring permission checks.
@@ -78,7 +79,7 @@ const server = http.createServer(async (req, res) => {
       const session = authenticateToken(token);
       return json(res, {
         token: shadowBrowserSessionBearer(session),
-        claims: shadowBrowserSessionClaimsValue(session)
+        claims: shadowBrowserSessionClaimsValue(session, "local-dev", [session.actor])
       });
     }
     const protocol = await handleRestProtocolRequest(nodeRestRequest(req, url.pathname ?? ""), {
@@ -336,40 +337,20 @@ function attachedSession(ws: WebSocket): AttachedSocket | null {
   return null;
 }
 
-function v2ShadowBrowser(node: string, token: string, session: Session): ReturnType<typeof createShadowBrowserNode> {
+function v2ShadowBrowser(node: string, token: string, session: Session): ReturnType<typeof createShadowBrowserClient> {
   const relay = createShadowBrowserRelayShim({
     node: "node:dev:relay",
     scope: session.actor,
     serialized: world.exportWorld()
   });
-  const browser = createShadowBrowserNode({
+  return createShadowBrowserClient({
     node,
     scope: session.actor,
     actor: session.actor,
     session: session.id,
-    relay
+    relay,
+    token
   });
-  setShadowBrowserSessionToken(browser, token);
-  return browser;
-}
-
-function shadowBrowserSessionBearer(session: Session): string {
-  // Dev-only mirror of the shadow substrate bearer. Production minting will
-  // sign this claim set at the gateway; the local server keeps it transparent.
-  return `shadow-session:${session.id}:${session.actor}`;
-}
-
-function shadowBrowserSessionClaimsValue(session: Session): Record<string, WooValue> {
-  return {
-    session: session.id,
-    actor: session.actor,
-    deployment: "local-dev",
-    issued_at: session.started,
-    expires_at: session.expiresAt ?? session.started + 15 * 60 * 1000,
-    scopes: [session.actor],
-    features: ["shadow-envelope", "shadow-catchup", "shadow-multiplex"],
-    rev: 1
-  };
 }
 
 async function handleV2ShadowFrame(
@@ -377,7 +358,7 @@ async function handleV2ShadowFrame(
   node: string,
   token: string,
   session: Session,
-  browser: ReturnType<typeof createShadowBrowserNode>,
+  browser: ReturnType<typeof createShadowBrowserClient>,
   encoded: string
 ): Promise<void> {
   try {
@@ -385,21 +366,16 @@ async function handleV2ShadowFrame(
     const reply = await handleShadowBrowserTurnExecEnvelope(browser, receipt);
     if (reply) ws.send(encodeEnvelope(reply));
   } catch (err) {
-    ws.send(encodeEnvelope({
-      v: 2,
-      type: "woo.transport.error.v1",
+    ws.send(encodeEnvelope(buildTransportErrorEnvelope({
       id: `dev-relay:error:${Date.now()}`,
       from: "node:dev:relay",
       to: node,
       actor: session.actor,
       session: session.id,
       auth: { mode: "session", token },
-      body: {
-        kind: "woo.transport.error.v1",
-        code: "E_PROTOCOL",
-        message: normalizeError(err).message ?? "v2 transport error"
-      }
-    } satisfies ShadowEnvelope<{ kind: "woo.transport.error.v1"; code: string; message: string }>));
+      code: "E_PROTOCOL",
+      message: normalizeError(err).message ?? "v2 transport error"
+    })));
   }
 }
 

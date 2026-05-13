@@ -15,7 +15,7 @@ import { buildShadowTurnExecAd, executeShadowTurnCallAcrossInProcessNetwork, typ
 import { shadowTurnKeyFromTranscript, type ShadowTurnKey } from "./turn-key";
 import type { EffectTranscript } from "./effect-transcript";
 import { stableShadowJson } from "./shadow-cell-version";
-import { decodeEnvelope, encodeEnvelope, type ShadowEnvelope, type ShadowEnvelopeAuth } from "./shadow-envelope";
+import { decodeEnvelope, type ShadowEnvelope, type ShadowEnvelopeAuth } from "./shadow-envelope";
 import { constantTimeEqual, hashSource } from "./source-hash";
 import type { ObjRef, Observation, WooValue } from "./types";
 
@@ -321,7 +321,10 @@ export function createShadowBrowserNode(input: {
   });
   const cache = createShadowBrowserNodeCache();
   cacheObjectPages(cache, input.cached_objects ?? []);
-  const sessionToken = input.session ? shadowBrowserSessionToken(input.session, input.actor) : null;
+  const sessionToken = input.session ? shadowBrowserSessionBearer({
+    id: input.session,
+    actor: input.actor
+  }) : null;
   return {
     kind: "woo.browser_node.shadow.v1",
     node: input.node,
@@ -337,6 +340,15 @@ export function createShadowBrowserNode(input: {
     next_live: 1,
     next_envelope: 1
   };
+}
+
+export function createShadowBrowserClient(input: Parameters<typeof createShadowBrowserNode>[0] & { token: string }): ShadowBrowserNode {
+  // Wire/dev clients all need the same pair of operations: create the browser
+  // node against an existing relay, then replace the deterministic shadow-local
+  // bearer with the token presented on the transport.
+  const browser = createShadowBrowserNode(input);
+  setShadowBrowserSessionToken(browser, input.token);
+  return browser;
 }
 
 export function setShadowBrowserSessionToken(browser: ShadowBrowserNode, token: string): void {
@@ -804,10 +816,6 @@ function shadowBrowserWireTurnExecReply(reply: ShadowTurnExecReply): ShadowTurnE
   return structuredClone(reply) as ShadowTurnExecReply;
 }
 
-export function roundTripShadowBrowserEnvelope<T>(browser: ShadowBrowserNode, type: string, body: T): ShadowEnvelope<T> {
-  return decodeEnvelope<T>(encodeEnvelope(shadowBrowserEnvelope(browser, type, body)));
-}
-
 export function applyShadowBrowserAcceptedFrame(browser: ShadowBrowserNode, accepted: ShadowCommitAccepted): void {
   if (browser.cache.applied_frames.some((frame) => frame.id === accepted.id && frame.position.hash === accepted.position.hash)) return;
   browser.cache.applied_frames.push(accepted);
@@ -883,16 +891,11 @@ function shadowBrowserSessionClaims(
 ): Map<string, ShadowBrowserSessionClaims> {
   const claims = new Map<string, ShadowBrowserSessionClaims>();
   for (const session of sessions) {
-    const token = shadowBrowserSessionToken(session.id, session.actor);
+    const token = shadowBrowserSessionBearer(session);
+    const rev = sessionRevs.get(session.id) ?? 1;
     claims.set(token, {
-      session: session.id,
-      actor: session.actor,
-      deployment,
-      issued_at: session.started,
-      expires_at: session.expiresAt ?? session.started + 15 * 60 * 1000,
-      scopes: [scope],
-      features: ["shadow-envelope", "shadow-catchup", "shadow-multiplex"],
-      rev: sessionRevs.get(session.id) ?? 1
+      ...shadowBrowserSessionClaimsValue(session, deployment, [scope]),
+      rev
     });
   }
   return claims;
@@ -907,10 +910,28 @@ function shadowBrowserSessionRevs(
   return revs;
 }
 
-function shadowBrowserSessionToken(session: string, actor: ObjRef): string {
+export function shadowBrowserSessionBearer(session: Pick<SerializedSession, "id" | "actor">): string {
   // Shadow-local bearer only: the relay maps this deterministic token to
   // server-held claims. A real M4 deployment mints a signed gateway token.
-  return `shadow-session:${session}:${actor}`;
+  return `shadow-session:${session.id}:${session.actor}`;
+}
+
+export function shadowBrowserSessionClaimsValue(
+  session: Pick<SerializedSession, "id" | "actor" | "started" | "expiresAt">,
+  deployment: string,
+  scopes: ObjRef[],
+  rev = 1
+): ShadowBrowserSessionClaims {
+  return {
+    session: session.id,
+    actor: session.actor,
+    deployment,
+    issued_at: session.started,
+    expires_at: session.expiresAt ?? session.started + 15 * 60 * 1000,
+    scopes,
+    features: ["shadow-envelope", "shadow-catchup", "shadow-multiplex"],
+    rev
+  };
 }
 
 function shadowBrowserAuth(browser: ShadowBrowserNode): ShadowEnvelopeAuth {

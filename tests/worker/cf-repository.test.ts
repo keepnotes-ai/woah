@@ -527,7 +527,6 @@ describe("CFObjectRepository production-shape coverage", () => {
       expect(JSON.parse(acceptedRows[0].body)).not.toHaveProperty("serialized_after");
       expect(sqlRows(scopeState!.storage.sql.exec("SELECT COUNT(*) AS n FROM v2_commit_scope_transcript_tail"))[0]).toMatchObject({ n: 1 });
       expect(sqlRows(scopeState!.storage.sql.exec("SELECT COUNT(*) AS n FROM v2_commit_scope_reply"))[0]).toMatchObject({ n: 1 });
-      expect(sqlRows(scopeState!.storage.sql.exec("SELECT COUNT(*) AS n FROM v2_commit_scope_snapshot"))[0]).toMatchObject({ n: 0 });
 
       const writesBeforeReplay = scopeState!.storage.sql.execLog.filter((entry) => /^(INSERT|DELETE|UPDATE)\b/i.test(entry.query.trim())).length;
       await internals.webSocketV2TurnNetworkMessage(world, ws as unknown as WebSocket, encoded);

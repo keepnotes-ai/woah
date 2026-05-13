@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createWorld, createWorldFromSerialized } from "../src/core/bootstrap";
-import { encodeEnvelope } from "../src/core/shadow-envelope";
+import { decodeEnvelope, encodeEnvelope } from "../src/core/shadow-envelope";
 import { stableShadowJson } from "../src/core/shadow-cell-version";
 import {
   applyShadowBrowserTransfer,
@@ -14,7 +14,6 @@ import {
   purgeShadowBrowserRelayHistory,
   receiveShadowBrowserEnvelope,
   receiveShadowBrowserEnvelopeReceipt,
-  roundTripShadowBrowserEnvelope,
   setShadowBrowserSessionToken,
   shadowBrowserEnvelope,
   shadowBrowserTransportHello,
@@ -393,7 +392,7 @@ describe("shadow browser node shim", () => {
   it("advertises the M4 idempotency window through transport hello", async () => {
     const { browser } = await browserForScope("the_dubspace", "guest:browser-hello");
     const hello = shadowBrowserTransportHello(browser, 12345);
-    const roundTripped = roundTripShadowBrowserEnvelope(browser, hello.kind, hello);
+    const roundTripped = decodeEnvelope(encodeEnvelope(shadowBrowserEnvelope(browser, hello.kind, hello)));
 
     expect(hello).toMatchObject({
       kind: "woo.transport.hello.v1",

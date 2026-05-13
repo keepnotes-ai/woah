@@ -46,7 +46,8 @@ import type { AppliedFrame, CommandFrame, DirectResultFrame, ErrorFrame, LiveEve
 import type { SeedWorld, SerializedWorld, TombstoneRecord } from "../core/repository";
 import { createHostOperationMemo, normalizeError, type ParkedTaskRun } from "../core/world";
 import { installGitHubTap, updateGitHubTap, type CatalogTapLogEvent } from "../core/catalog-taps";
-import { encodeEnvelope, type ShadowEnvelope } from "../core/shadow-envelope";
+import { shadowBrowserSessionBearer, shadowBrowserSessionClaimsValue } from "../core/shadow-browser-node";
+import { buildTransportErrorEnvelope, encodeEnvelope, type ShadowEnvelope } from "../core/shadow-envelope";
 import { CFObjectRepository } from "./cf-repository";
 import { McpGateway, type McpV2EnvelopeResult, type McpV2OpenResult } from "../mcp/gateway";
 import { signInternalRequest, verifyInternalRequest } from "./internal-auth";
@@ -165,25 +166,6 @@ function webSocketProtocols(request: Request): string[] {
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-function shadowBrowserSessionBearer(session: Session): string {
-  // M4 reserves /v2/session/mint now, before the final signed token format.
-  // The shadow-local bearer is transparent but still maps to server-held claims.
-  return `shadow-session:${session.id}:${session.actor}`;
-}
-
-function shadowBrowserSessionClaimsValue(session: Session): Record<string, WooValue> {
-  return {
-    session: session.id,
-    actor: session.actor,
-    deployment: "shadow-local",
-    issued_at: session.started,
-    expires_at: session.expiresAt ?? session.started + 15 * 60 * 1000,
-    scopes: [session.actor],
-    features: ["shadow-envelope", "shadow-catchup", "shadow-multiplex"],
-    rev: 1
-  };
 }
 
 // Internal RPC routes that are pure reads of world state and therefore safe
@@ -372,7 +354,7 @@ export class PersistentObjectDO {
         await this.registerSessionRoute(session);
         return jsonResponse({
           token: shadowBrowserSessionBearer(session),
-          claims: shadowBrowserSessionClaimsValue(session)
+          claims: shadowBrowserSessionClaimsValue(session, "shadow-local", [session.actor])
         });
       }
 
@@ -2652,21 +2634,16 @@ export class PersistentObjectDO {
       });
       if (result.reply) ws.send(result.reply);
     } catch (err) {
-      ws.send(encodeEnvelope({
-        v: 2,
-        type: "woo.transport.error.v1",
+      ws.send(encodeEnvelope(buildTransportErrorEnvelope({
         id: `${this.durableHostKey()}:error:${Date.now()}`,
         from: this.durableHostKey(),
         to: att.node,
         actor: att.actor,
         session: att.sessionId,
         auth: { mode: "session", token: att.token },
-        body: {
-          kind: "woo.transport.error.v1",
-          code: "E_PROTOCOL",
-          message: errorMessage(err)
-        }
-      } satisfies ShadowEnvelope<{ kind: "woo.transport.error.v1"; code: string; message: string }>));
+        code: "E_PROTOCOL",
+        message: errorMessage(err)
+      })));
     }
   }
 

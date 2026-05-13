@@ -31,7 +31,6 @@ const DB_NAME = "woo-v2-browser";
 const DB_VERSION = 2;
 const META_STORE = "meta";
 const PENDING_STORE = "pending";
-const FRAME_STORE = "frames";
 const PROJECTION_STORE = "projections";
 const APPLIED_STORE = "applied_frames";
 const TRANSCRIPT_STORE = "transcript_tail";
@@ -136,7 +135,6 @@ async function receiveFrame(encoded: string): Promise<void> {
   // mutation so the browser worker rejects the same malformed envelopes as the
   // relay and in-process tests.
   const envelope = decodeEnvelope(encoded);
-  await putFrame(envelope);
   for (const mutation of v2BrowserCacheMutationsForEnvelope(envelope)) await applyCacheMutation(mutation);
   postMessage({ kind: "frame", envelope });
   postStatus();
@@ -195,15 +193,15 @@ async function browserNodeId(): Promise<string> {
 
 async function db(): Promise<IDBDatabase> {
   // The cache schema is intentionally small: metadata for hello/reset state,
-  // pending outbound envelopes for replay, and received frames for debugging
-  // and future projection hydration.
+  // pending outbound envelopes for replay, and dedicated state-plane stores for
+  // projection/catch-up hydration. Raw frame history is deliberately omitted so
+  // long-lived browser sessions do not accumulate an unbounded debug log.
   dbPromise ??= new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
     request.onupgradeneeded = () => {
       const database = request.result;
       if (!database.objectStoreNames.contains(META_STORE)) database.createObjectStore(META_STORE);
       if (!database.objectStoreNames.contains(PENDING_STORE)) database.createObjectStore(PENDING_STORE, { keyPath: "id" });
-      if (!database.objectStoreNames.contains(FRAME_STORE)) database.createObjectStore(FRAME_STORE, { keyPath: "id" });
       if (!database.objectStoreNames.contains(PROJECTION_STORE)) database.createObjectStore(PROJECTION_STORE, { keyPath: "scope" });
       if (!database.objectStoreNames.contains(APPLIED_STORE)) database.createObjectStore(APPLIED_STORE, { keyPath: "id" });
       if (!database.objectStoreNames.contains(TRANSCRIPT_STORE)) database.createObjectStore(TRANSCRIPT_STORE, { keyPath: "hash" });
@@ -233,10 +231,6 @@ async function deletePending(id: string): Promise<void> {
 async function allPending(): Promise<PendingEnvelope[]> {
   const pending = await tx<PendingEnvelope[]>(PENDING_STORE, "readonly", (store) => store.getAll());
   return pending.sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id));
-}
-
-async function putFrame(envelope: ShadowEnvelope): Promise<void> {
-  await tx(FRAME_STORE, "readwrite", (store) => store.put({ id: envelope.id, envelope, received_at: Date.now() }));
 }
 
 async function applyCacheMutation(mutation: V2BrowserCacheMutation): Promise<void> {

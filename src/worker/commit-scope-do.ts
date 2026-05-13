@@ -10,7 +10,7 @@ import type { EffectTranscript } from "../core/effect-transcript";
 import type { SerializedSession, SerializedWorld } from "../core/repository";
 import {
   buildShadowBrowserSessionAuth,
-  createShadowBrowserNode,
+  createShadowBrowserClient,
   createShadowBrowserRelayShim,
   handleShadowBrowserTurnExecEnvelope,
   MAX_SHADOW_ACCEPTED_TAIL,
@@ -19,7 +19,6 @@ import {
   MAX_SHADOW_TRANSCRIPT_TAIL,
   openShadowBrowserScope,
   receiveShadowBrowserEnvelopeReceipt,
-  setShadowBrowserSessionToken,
   shadowBrowserTransportHello,
   type ShadowBrowserEnvelopeReceipt,
   type ShadowBrowserRelayShim,
@@ -41,9 +40,6 @@ export class CommitScopeDO {
     private readonly state: CommitScopeDurableState,
     private readonly env: InternalAuthEnv
   ) {
-    this.state.storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS v2_commit_scope_snapshot (id TEXT PRIMARY KEY, body TEXT NOT NULL, updated_at INTEGER NOT NULL)"
-    );
     this.state.storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS v2_commit_scope_meta (id TEXT PRIMARY KEY, scope TEXT NOT NULL, relay_node TEXT NOT NULL, serialized TEXT NOT NULL, head TEXT NOT NULL, idempotency_window_ms INTEGER NOT NULL, updated_at INTEGER NOT NULL)"
     );
@@ -154,40 +150,18 @@ export class CommitScopeDO {
   }
 
   private browserFor(relay: ShadowBrowserRelayShim, input: CommitScopeBaseRequest) {
-    const browser = createShadowBrowserNode({
+    return createShadowBrowserClient({
       node: input.node,
       scope: input.scope,
       actor: input.actor,
       session: input.session,
-      relay
+      relay,
+      token: input.token
     });
-    setShadowBrowserSessionToken(browser, input.token);
-    return browser;
   }
 
   private loadSnapshot(input: CommitScopeBaseRequest): ShadowBrowserRelayShim | null {
-    const rowRelay = this.loadRowSnapshot(input);
-    if (rowRelay) return rowRelay;
-    const rows = sqlRows<{ body?: string }>(this.state.storage.sql.exec(
-      "SELECT body FROM v2_commit_scope_snapshot WHERE id = 'current'"
-    ));
-    const row = rows[0] ?? null;
-    if (!row?.body) return null;
-    const snapshot = JSON.parse(row.body) as CommitScopeSnapshot;
-    const relay = createShadowBrowserRelayShim({
-      node: snapshot.relay_node,
-      scope: snapshot.scope,
-      serialized: snapshot.serialized,
-      idempotency_window_ms: snapshot.idempotency_window_ms
-    });
-    relay.commit_scope.head = snapshot.head;
-    relay.accepted_frames = snapshot.accepted_frames;
-    relay.transcript_tail = snapshot.transcript_tail;
-    relay.recently_seen = new Map(snapshot.recently_seen);
-    relay.recent_replies = new Map(snapshot.recent_replies);
-    this.refreshSessionAuth(relay, input);
-    this.needsFullSave = true;
-    return relay;
+    return this.loadRowSnapshot(input);
   }
 
   private loadRowSnapshot(input: CommitScopeBaseRequest): ShadowBrowserRelayShim | null {
@@ -467,19 +441,6 @@ type CommitScopeEnvelopeResponse = {
   ok: true;
   reply: string | null;
   head: ShadowScopeHead;
-};
-
-type CommitScopeSnapshot = {
-  kind: "woo.commit_scope_snapshot.shadow.v1";
-  scope: ObjRef;
-  relay_node: string;
-  serialized: SerializedWorld;
-  head: ShadowScopeHead;
-  idempotency_window_ms: number;
-  accepted_frames: ShadowCommitAccepted[];
-  transcript_tail: EffectTranscript[];
-  recently_seen: Array<[string, number]>;
-  recent_replies: Array<[string, ShadowEnvelope<WooValue>]>;
 };
 
 type CommitScopeMetaRow = {

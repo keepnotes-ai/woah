@@ -25,6 +25,43 @@ export type ShadowEnvelope<T = WooValue> = {
   body: T;
 };
 
+export type ShadowTransportErrorBody = {
+  kind: "woo.transport.error.v1";
+  code: string;
+  message: string;
+  envelope_id?: string;
+};
+
+export function buildTransportErrorEnvelope(input: {
+  from: string;
+  to?: string;
+  actor?: ObjRef;
+  session?: string;
+  auth: ShadowEnvelopeAuth;
+  code: string;
+  message: string;
+  envelope_id?: string;
+  id?: string;
+}): ShadowEnvelope<ShadowTransportErrorBody> {
+  const envelope: ShadowEnvelope<ShadowTransportErrorBody> = {
+    v: 2,
+    type: "woo.transport.error.v1",
+    id: input.id ?? `${input.from}:error:${Date.now()}`,
+    from: input.from,
+    auth: input.auth,
+    body: {
+      kind: "woo.transport.error.v1",
+      code: input.code,
+      message: input.message,
+      ...(input.envelope_id ? { envelope_id: input.envelope_id } : {})
+    }
+  };
+  if (input.to) envelope.to = input.to;
+  if (input.actor) envelope.actor = input.actor;
+  if (input.session) envelope.session = input.session;
+  return envelope;
+}
+
 const MAX_SHADOW_ENVELOPE_BYTES = 1024 * 1024;
 const SHADOW_TEXT_ENCODER = new TextEncoder();
 // The codec is type-neutral across production and shadow suffixes. Relay

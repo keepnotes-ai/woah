@@ -1,8 +1,9 @@
 import { decodeEnvelope, encodeEnvelope, type ShadowEnvelope } from "../core/shadow-envelope";
 import type { EffectTranscript } from "../core/effect-transcript";
 import type { ShadowCommitAccepted, ShadowScopeHead } from "../core/shadow-commit-scope";
+import { isShadowScopeHead } from "../core/shadow-scope-head";
 import { v2BrowserCacheMutationsForEnvelope, type V2BrowserCacheMutation } from "./v2-browser-cache";
-import { isShadowScopeHead, v2BrowserWebSocketUrl } from "./v2-browser-url";
+import { v2BrowserWebSocketUrl } from "./v2-browser-url";
 
 type V2WorkerCommand =
   | { kind: "connect"; token: string; node?: string; scope?: string }

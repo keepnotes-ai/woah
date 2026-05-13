@@ -1,5 +1,5 @@
 import http from "node:http";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { parse } from "node:url";
 import { createServer as createViteServer } from "vite";
 import { WebSocket, WebSocketServer } from "ws";
@@ -26,12 +26,14 @@ import {
   createShadowBrowserClient,
   createShadowBrowserRelayShim,
   handleShadowBrowserTurnExecEnvelope,
+  openShadowBrowserScope,
   receiveShadowBrowserEnvelopeReceipt,
   shadowBrowserSessionBearer,
   shadowBrowserSessionClaimsValue,
   shadowBrowserTransportHello
 } from "../core/shadow-browser-node";
 import { buildTransportErrorEnvelope, encodeEnvelope, type ShadowEnvelope } from "../core/shadow-envelope";
+import { parseShadowScopeHeadJson } from "../core/shadow-scope-head";
 
 // Local dev server only: HTTP authoring endpoints require a session and then
 // defer to the world's object-authoring permission checks.
@@ -258,6 +260,7 @@ v2wss.on("connection", (ws, req) => {
   const url = new URL(req.url ?? "/v2/turn-network/ws", `http://${req.headers.host ?? "localhost"}`);
   const token = url.searchParams.get("token") ?? "";
   const node = url.searchParams.get("node") || `browser:dev:${socketCounter++}`;
+  const lastKnownHead = parseShadowScopeHeadJson(url.searchParams.get("last_known_head"));
   let session: Session;
   try {
     if (!token) throw wooError("E_NOSESSION", "token query parameter is required");
@@ -277,7 +280,7 @@ v2wss.on("connection", (ws, req) => {
   ws.send(encodeEnvelope({
     v: 2,
     type: hello.kind,
-    id: `dev-relay:hello:${Date.now()}`,
+    id: `dev-relay:hello:${randomUUID()}`,
     from: browser.relay.node,
     to: browser.node,
     actor: session.actor,
@@ -285,6 +288,37 @@ v2wss.on("connection", (ws, req) => {
     auth: { mode: "session", token },
     body: hello
   } satisfies ShadowEnvelope<typeof hello>));
+  // Match the Worker binding: the first frame is TransportHello, followed by a
+  // verified state-plane projection or catch-up delta for the requested scope.
+  void openShadowBrowserScope(browser, {
+    preseed_catalog_pages: true,
+    ...(lastKnownHead ? { last_known_head: lastKnownHead } : {})
+  }).then((opened) => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    ws.send(encodeEnvelope({
+      v: 2,
+      type: opened.transfer.kind,
+      id: `dev-relay:state:${randomUUID()}`,
+      from: browser.relay.node,
+      to: browser.node,
+      actor: session.actor,
+      session: session.id,
+      auth: { mode: "session", token },
+      body: opened.transfer
+    } satisfies ShadowEnvelope<typeof opened.transfer>));
+  }).catch((err) => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    ws.send(encodeEnvelope(buildTransportErrorEnvelope({
+      id: `dev-relay:error:${randomUUID()}`,
+      from: browser.relay.node,
+      to: node,
+      actor: session.actor,
+      session: session.id,
+      auth: { mode: "session", token },
+      code: "E_PROTOCOL",
+      message: normalizeError(err).message ?? "v2 open failed"
+    })));
+  });
 
   ws.on("message", (raw) => {
     if (rawDataSize(raw) > 1024 * 1024) {

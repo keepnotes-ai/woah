@@ -1,17 +1,5 @@
 import type { ShadowScopeHead } from "../core/shadow-commit-scope";
 
-export function isShadowScopeHead(value: unknown): value is ShadowScopeHead {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const head = value as Partial<ShadowScopeHead>;
-  return head.kind === "woo.scope_head.shadow.v1"
-    && typeof head.scope === "string"
-    && typeof head.epoch === "number"
-    && Number.isInteger(head.epoch)
-    && typeof head.seq === "number"
-    && Number.isInteger(head.seq)
-    && typeof head.hash === "string";
-}
-
 export function v2BrowserWebSocketUrl(input: {
   location: Pick<Location, "protocol" | "host">;
   token: string;

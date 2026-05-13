@@ -48,6 +48,7 @@ import { createHostOperationMemo, normalizeError, type ParkedTaskRun } from "../
 import { installGitHubTap, updateGitHubTap, type CatalogTapLogEvent } from "../core/catalog-taps";
 import { shadowBrowserSessionBearer, shadowBrowserSessionClaimsValue, type ShadowBrowserStateTransfer } from "../core/shadow-browser-node";
 import type { ShadowScopeHead } from "../core/shadow-commit-scope";
+import { parseShadowScopeHeadJson } from "../core/shadow-scope-head";
 import { buildTransportErrorEnvelope, encodeEnvelope, type ShadowEnvelope } from "../core/shadow-envelope";
 import { CFObjectRepository } from "./cf-repository";
 import { McpGateway, type McpV2EnvelopeResult, type McpV2OpenResult } from "../mcp/gateway";
@@ -183,23 +184,7 @@ function v2SessionAuthorityPayload(world: WooWorld): { sessions: SerializedSessi
 }
 
 function parseV2LastKnownHead(raw: string | null): ShadowScopeHead | undefined {
-  if (!raw) return undefined;
-  try {
-    const parsed = JSON.parse(raw) as Partial<ShadowScopeHead>;
-    if (
-      parsed.kind === "woo.scope_head.shadow.v1"
-      && typeof parsed.scope === "string"
-      && typeof parsed.epoch === "number"
-      && typeof parsed.seq === "number"
-      && typeof parsed.hash === "string"
-    ) {
-      return parsed as ShadowScopeHead;
-    }
-  } catch {
-    // Malformed catch-up hints are advisory; the authoritative open path falls
-    // back to a projection rather than rejecting an otherwise valid socket.
-  }
-  return undefined;
+  return parseShadowScopeHeadJson(raw);
 }
 
 // Internal RPC routes that are pure reads of world state and therefore safe

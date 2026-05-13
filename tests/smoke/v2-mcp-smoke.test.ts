@@ -13,6 +13,8 @@ describeRemote("deployed v2 MCP smoke", () => {
       const tools = toolsFromList(list);
       expect(tools).toContain("woo_call");
       expect(tools).toContain("woo_wait");
+      await alice.enterChatroom();
+      await bob.enterChatroom();
 
       const text = `v2 MCP smoke ${runId}`;
       const said = await alice.call("tools/call", {
@@ -53,10 +55,7 @@ describeRemote("deployed v2 MCP smoke", () => {
     const events = session.openEvents();
     try {
       await session.call("tools/list");
-      await session.call("tools/call", {
-        name: "woo_focus",
-        arguments: { target: "the_taskspace" }
-      });
+      await session.enterChatroom();
 
       const notification = await events.nextJson((value) => value?.method === "notifications/tools/list_changed", 5000);
       expect(notification).toMatchObject({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
@@ -66,17 +65,18 @@ describeRemote("deployed v2 MCP smoke", () => {
     }
   });
 
-  it("survives reconnect with the same MCP session id and keeps committed state visible", async () => {
+  it("preserves session state across multiple Streamable-HTTP exchanges", async () => {
     const session = await RemoteMcpSession.open(`guest:mcp-smoke-reconnect-${runId}`);
     try {
+      await session.enterChatroom();
       const text = `v2 MCP reconnect ${runId}`;
       await session.call("tools/call", {
         name: "woo_call",
         arguments: { object: "the_chatroom", verb: "say", args: [text] }
       });
 
-      // A later request with only Mcp-Session-Id exercises the gateway's
-      // session resume path after the initial HTTP-streamable handshake.
+      // A later request with only Mcp-Session-Id exercises the ordinary
+      // Streamable-HTTP continuity path after the initial handshake.
       const list = await session.call("tools/list");
       expect(toolsFromList(list)).toContain("woo_call");
 
@@ -102,6 +102,10 @@ describeRemote("deployed v2 MCP smoke", () => {
         arguments: { object: "the_chatroom", verb: "say", args: [text] }
       });
 
+      // Expected response: JSON array of recent CommitScopeDO accepted-frame
+      // rows, usually the most recent ~50. The shape is operator-defined; this
+      // smoke only requires the run-specific text to appear somewhere in the
+      // payload. Auth: WOO_MCP_SMOKE_ADMIN_TOKEN is sent as Bearer when set.
       // This endpoint is intentionally not part of the public product API. It
       // lets staging expose a narrow operator-only view of CommitScopeDO rows
       // without forcing normal smoke runs to depend on storage introspection.
@@ -159,6 +163,14 @@ class RemoteMcpSession {
     });
   }
 
+  async enterChatroom(): Promise<void> {
+    const entered = await this.call("tools/call", {
+      name: "woo_call",
+      arguments: { object: "the_chatroom", verb: "enter", args: [] }
+    });
+    expect(entered.result?.isError).not.toBe(true);
+  }
+
   openEvents(): EventStreamReader {
     const controller = new AbortController();
     const response = mcpFetch({
@@ -192,7 +204,16 @@ class EventStreamReader {
     const timeout = setTimeout(() => this.controller.abort(), timeoutMs);
     try {
       for (;;) {
-        const { value, done } = await reader.read();
+        let chunk: ReadableStreamReadResult<Uint8Array>;
+        try {
+          chunk = await reader.read();
+        } catch (err) {
+          if (this.controller.signal.aborted) {
+            throw new Error(`timed out waiting for matching MCP event after ${timeoutMs}ms`, { cause: err });
+          }
+          throw err;
+        }
+        const { value, done } = chunk;
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
         const events = buffer.split(/\r?\n\r?\n/);

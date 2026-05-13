@@ -54,7 +54,7 @@ describe("v2 browser cache reducer", () => {
       { kind: "projection", scope: "the_dubspace", head: accepted.position, projection: envelope.body.projection },
       { kind: "meta", key: "head:the_dubspace", value: accepted.position },
       { kind: "meta", key: "catchup_required", value: false },
-      { kind: "applied_frame", frame: accepted },
+      { kind: "applied_frame", frame: accepted, transcript },
       { kind: "transcript", transcript }
     ]);
   });

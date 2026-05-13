@@ -18,7 +18,7 @@ import * as weatherUiModule from "../../catalogs/weather/ui/weather-badge";
 import { appliedFrameErrorObservations, chatErrorText } from "./chat-errors";
 import { createWooClientFramework, escapeHtml, liveProjectionKey, ProjectionFieldFiller, type CatalogUiPackage, type ProjectionCallOptions, type ProjectionPatch, type WooContext, type WooElement } from "./framework";
 import { advanceProjectionCursor, idsFromRefsOrSummaries, presentActorsFromObservation, scopedHerePresentActors, scopedModelWithMoveResult, type ScopedProjectionStateModel } from "./scoped-projection";
-import { v2ProjectionSnapshotFromMessage, type V2ProjectionMessage } from "./v2-browser-messages";
+import { v2ProjectionSnapshotFromMessage, type V2AppliedFrameMessage, type V2ProjectionMessage } from "./v2-browser-messages";
 import type { ChatLine, ChatSpaceData, ChatTitleBadge, SpaceChatPanelData } from "../../catalogs/chat/ui/chat-space";
 import type { DubspaceData } from "../../catalogs/dubspace/ui/dubspace-workspace";
 import type { PinboardData } from "../../catalogs/pinboard/ui/pinboard-board";
@@ -455,6 +455,10 @@ function ensureV2BrowserWorker() {
       applyV2ProjectionMessage(state.v2Projection);
       window.dispatchEvent(new CustomEvent("woo.v2.projection", { detail: state.v2Projection }));
       console.debug("woo.v2.projection", state.v2Projection);
+    }
+    if (event.data?.kind === "applied_frame") {
+      window.dispatchEvent(new CustomEvent("woo.v2.applied_frame", { detail: event.data as V2AppliedFrameMessage }));
+      console.debug("woo.v2.applied_frame", event.data);
     }
     // Frame/error messages are exposed now so the worker-cache wire path can be
     // inspected during the migration; UI reducers will consume them directly

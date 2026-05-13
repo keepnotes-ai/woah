@@ -3,7 +3,7 @@ import type { EffectTranscript } from "../core/effect-transcript";
 import type { ShadowCommitAccepted, ShadowScopeHead } from "../core/shadow-commit-scope";
 import { isShadowScopeHead } from "../core/shadow-scope-head";
 import { v2BrowserCacheMutationsForEnvelope, type V2BrowserCacheMutation } from "./v2-browser-cache";
-import { v2ProjectionMessageFromRow } from "./v2-browser-messages";
+import { v2AppliedFrameMessageFromFrame, v2ProjectionMessageFromRow } from "./v2-browser-messages";
 import { v2BrowserWebSocketUrl } from "./v2-browser-url";
 
 type V2WorkerCommand =
@@ -172,6 +172,7 @@ async function receiveFrame(encoded: string): Promise<void> {
   for (const mutation of v2BrowserCacheMutationsForEnvelope(envelope)) {
     await applyCacheMutation(mutation);
     if (mutation.kind === "projection") postProjection(mutation.scope, mutation.head, mutation.projection);
+    if (mutation.kind === "applied_frame") postAppliedFrame(mutation.frame, mutation.transcript);
   }
   postMessage({ kind: "frame", envelope });
   postStatus();
@@ -306,6 +307,14 @@ async function postCachedProjection(scope: string): Promise<void> {
 
 function postProjection(scope: string, head: ShadowScopeHead, projection: unknown): void {
   const message = v2ProjectionMessageFromRow({ scope, head, projection });
+  if (message) postMessage(message);
+}
+
+function postAppliedFrame(frame: ShadowCommitAccepted, transcript?: EffectTranscript): void {
+  // Raw envelopes remain available as diagnostics, but committed frames are a
+  // first-class worker message so the UI can later reduce v2 commits without
+  // inspecting transport envelopes.
+  const message = v2AppliedFrameMessageFromFrame(frame, transcript);
   if (message) postMessage(message);
 }
 

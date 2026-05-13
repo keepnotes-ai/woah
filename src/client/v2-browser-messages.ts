@@ -1,5 +1,7 @@
 import { isShadowScopeHead, type ShadowScopeHead } from "../core/shadow-scope-head";
-import type { WooValue } from "../core/types";
+import type { ShadowCommitAccepted } from "../core/shadow-commit-scope";
+import type { EffectTranscript } from "../core/effect-transcript";
+import type { AppliedFrame, WooValue } from "../core/types";
 
 export type V2ProjectionRow = {
   scope: string;
@@ -14,6 +16,15 @@ export type V2ProjectionMessage = {
   head: ShadowScopeHead;
   projection: WooValue;
   cached?: boolean;
+};
+
+export type V2AppliedFrameMessage = {
+  kind: "applied_frame";
+  scope: string;
+  seq: number;
+  frame: ShadowCommitAccepted;
+  transcript?: EffectTranscript;
+  applied?: AppliedFrame;
 };
 
 export type V2ProjectionSnapshot = {
@@ -55,5 +66,37 @@ export function v2ProjectionSnapshotFromMessage(message: V2ProjectionMessage): V
     objects,
     ...(cursor ? { cursor } : {}),
     ...(subject !== undefined ? { subject } : {})
+  };
+}
+
+export function v2AppliedFrameMessageFromFrame(frame: ShadowCommitAccepted, transcript?: EffectTranscript): V2AppliedFrameMessage | undefined {
+  if (!frame || frame.kind !== "woo.commit.accepted.shadow.v1") return undefined;
+  const scope = frame.position?.scope;
+  const seq = frame.position?.seq;
+  if (typeof scope !== "string" || !Number.isFinite(seq)) return undefined;
+  return {
+    kind: "applied_frame",
+    scope,
+    seq,
+    frame,
+    ...(transcript ? { transcript, applied: v2AppliedFrameFromTranscript(frame, transcript) } : {})
+  };
+}
+
+function v2AppliedFrameFromTranscript(frame: ShadowCommitAccepted, transcript: EffectTranscript): AppliedFrame {
+  return {
+    op: "applied",
+    id: frame.id ?? transcript.id,
+    space: frame.position.scope,
+    seq: frame.position.seq,
+    ts: 0,
+    message: {
+      actor: transcript.call.actor,
+      target: transcript.call.target,
+      verb: transcript.call.verb,
+      args: transcript.call.args
+    },
+    observations: transcript.observations,
+    ...(transcript.result !== undefined ? { result: transcript.result } : {})
   };
 }

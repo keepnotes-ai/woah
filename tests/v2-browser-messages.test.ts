@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { v2ProjectionMessageFromRow, v2ProjectionSnapshotFromMessage } from "../src/client/v2-browser-messages";
+import { v2AppliedFrameMessageFromFrame, v2ProjectionMessageFromRow, v2ProjectionSnapshotFromMessage } from "../src/client/v2-browser-messages";
 
 describe("v2 browser worker messages", () => {
   it("builds projection messages only from well-shaped cached rows", () => {
@@ -58,6 +58,69 @@ describe("v2 browser worker messages", () => {
       cursor: { spaces: { "#room": { next_seq: 4 } } },
       subject: { id: "#room", name: "Room" },
       objects: [{ id: "#room", name: "Room" }, { id: "#note", name: "Note" }]
+    });
+  });
+
+  it("builds typed applied-frame worker messages", () => {
+    const frame = {
+      kind: "woo.commit.accepted.shadow.v1",
+      id: "accepted-1",
+      position: {
+        kind: "woo.scope_head.shadow.v1",
+        scope: "#room",
+        epoch: 1,
+        seq: 7,
+        hash: "head-7"
+      },
+      expected: {
+        kind: "woo.scope_head.shadow.v1",
+        scope: "#room",
+        epoch: 1,
+        seq: 6,
+        hash: "head-6"
+      },
+      transcript_hash: "transcript-7",
+      post_state_hash: "post-7",
+      receipt: { ok: true, writes: [] },
+      observations: []
+    } as any;
+
+    const transcript = {
+      kind: "woo.effect_transcript.shadow.v1",
+      id: "accepted-1",
+      route: { kind: "local" },
+      scope: "#room",
+      seq: 7,
+      call: { actor: "#actor", target: "#room", verb: "say", args: ["hi"] },
+      reads: [],
+      writes: [],
+      creates: [],
+      moves: [],
+      observations: [{ type: "said", text: "hi" }],
+      logicalInputs: [],
+      untrackedEffects: [],
+      result: { ok: true },
+      complete: true,
+      incompleteReasons: [],
+      hash: "transcript-7"
+    } as any;
+
+    expect(v2AppliedFrameMessageFromFrame(frame, transcript)).toEqual({
+      kind: "applied_frame",
+      scope: "#room",
+      seq: 7,
+      frame,
+      transcript,
+      applied: {
+        op: "applied",
+        id: "accepted-1",
+        space: "#room",
+        seq: 7,
+        ts: 0,
+        message: { actor: "#actor", target: "#room", verb: "say", args: ["hi"] },
+        observations: [{ type: "said", text: "hi" }],
+        result: { ok: true }
+      }
     });
   });
 });

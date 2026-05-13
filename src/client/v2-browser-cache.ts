@@ -8,7 +8,7 @@ export type V2BrowserCacheMutation =
   | { kind: "meta"; key: string; value: unknown }
   | { kind: "pending_delete"; id: string }
   | { kind: "projection"; scope: string; head: ShadowScopeHead; projection: WooValue }
-  | { kind: "applied_frame"; frame: ShadowCommitAccepted }
+  | { kind: "applied_frame"; frame: ShadowCommitAccepted; transcript?: EffectTranscript }
   | { kind: "transcript"; transcript: EffectTranscript };
 
 export function v2BrowserCacheMutationsForEnvelope(envelope: ShadowEnvelope): V2BrowserCacheMutation[] {
@@ -40,7 +40,7 @@ function stateTransferMutations(transfer: ShadowBrowserStateTransfer): V2Browser
   if (transfer.mode === "projection") return common;
   return [
     ...common,
-    ...transfer.applied.map((frame) => ({ kind: "applied_frame" as const, frame })),
+    ...transfer.applied.map((frame, index) => ({ kind: "applied_frame" as const, frame, transcript: transfer.transcript_tail[index] })),
     ...transfer.transcript_tail.map((transcript) => ({ kind: "transcript" as const, transcript }))
   ];
 }

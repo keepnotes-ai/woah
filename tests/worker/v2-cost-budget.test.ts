@@ -141,6 +141,7 @@ type CostHarness = {
     webSocketV2TurnNetworkMessage: (world: WooWorld, ws: WebSocket, message: string | ArrayBuffer) => Promise<void>;
   };
   ws: FakeWebSocket;
+  gatewayState: FakeDurableObjectState;
   scopeState: FakeDurableObjectState;
   commitScopeNamespace: CountingDurableObjectNamespace;
   openScope: () => Promise<void>;
@@ -164,13 +165,17 @@ describe("v2 CommitScopeDO cost budget", () => {
       // Budget allows two small retention/accounting additions, but rejects the
       // old retained-tail rewrite pattern that produced thousands of writes.
       expect(writes).toBeLessThanOrEqual(7);
-      expect(writeRowsByTable(harness.scopeState)).toMatchObject({
+      expect(writeRowsByTable(harness.scopeState)).toEqual({
         v2_commit_scope_meta: 1,
         v2_commit_scope_accepted_frame: 1,
         v2_commit_scope_transcript_tail: 1,
         v2_commit_scope_seen: 1,
         v2_commit_scope_reply: 1
       });
+      // v2 envelope handling may read gateway sessions for auth projection,
+      // but it must not persist session activity, metrics, or cache state on
+      // the gateway hot path.
+      expect(rowWrites(harness.gatewayState)).toBe(0);
       // One browser envelope should cross exactly one extra Durable Object
       // boundary: gateway -> CommitScopeDO. Extra hops are billing-visible.
       expect(harness.commitScopeNamespace.fetchCallCount).toBe(1);
@@ -202,6 +207,7 @@ describe("v2 CommitScopeDO cost budget", () => {
       const envelope = await harness.envelope(1);
       await harness.internals.webSocketV2TurnNetworkMessage(harness.world, harness.ws as unknown as WebSocket, envelope);
       const writesBeforeReplay = rowWrites(harness.scopeState);
+      const gatewayWritesBeforeReplay = rowWrites(harness.gatewayState);
 
       await harness.internals.webSocketV2TurnNetworkMessage(harness.world, harness.ws as unknown as WebSocket, envelope);
 
@@ -209,6 +215,7 @@ describe("v2 CommitScopeDO cost budget", () => {
       // this changes, retries can revive the same cost cliff as executing a
       // fresh turn, even though the side effect is correctly deduped.
       expect(rowWrites(harness.scopeState)).toBe(writesBeforeReplay);
+      expect(rowWrites(harness.gatewayState)).toBe(gatewayWritesBeforeReplay);
     } finally {
       harness.cleanup();
     }
@@ -297,6 +304,7 @@ async function makeCostHarness(): Promise<CostHarness> {
     world,
     internals,
     ws,
+    gatewayState,
     scopeState,
     commitScopeNamespace,
     openScope: async () => {
@@ -354,6 +362,7 @@ async function makeCostHarness(): Promise<CostHarness> {
 
 function resetCostLog(harness: CostHarness): void {
   harness.scopeState.storage.sql.execLog.length = 0;
+  harness.gatewayState.storage.sql.execLog.length = 0;
   harness.commitScopeNamespace.fetchCallCount = 0;
 }
 
@@ -367,6 +376,7 @@ function writeRowsByTable(state: FakeDurableObjectState): Record<string, number>
   const counts: Record<string, number> = {};
   for (const entry of state.storage.sql.execLog) {
     if (!/^(INSERT|UPDATE|DELETE)\b/i.test(entry.query.trim())) continue;
+    if (entry.changes === 0) continue;
     const table = writeTable(entry.query);
     if (!table) continue;
     counts[table] = (counts[table] ?? 0) + entry.changes;

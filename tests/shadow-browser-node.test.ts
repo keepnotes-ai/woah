@@ -1,13 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { createWorld, createWorldFromSerialized } from "../src/core/bootstrap";
+import { encodeEnvelope } from "../src/core/shadow-envelope";
 import { stableShadowJson } from "../src/core/shadow-cell-version";
 import {
   applyShadowBrowserTransfer,
+  buildShadowBrowserProjectionTransfer,
   createShadowBrowserNode,
   createShadowBrowserRelayShim,
   emitShadowBrowserLiveEvent,
   executeShadowBrowserTurn,
   openShadowBrowserScope,
+  receiveShadowBrowserEnvelope,
+  shadowBrowserEnvelope,
   type ShadowBrowserStateTransfer,
   type ShadowBrowserNode
 } from "../src/core/shadow-browser-node";
@@ -343,6 +347,149 @@ describe("shadow browser node shim", () => {
       call: { ...tamperedTranscript.transcript_tail[0].call, verb: "tampered" }
     };
     expect(() => applyShadowBrowserTransfer(browser, tamperedTranscript)).toThrow(/transcript hash mismatch/);
+  });
+
+  it("validates session auth in the in-process relay shim", async () => {
+    const { browser } = await browserForScope("the_dubspace", "guest:browser-auth");
+    await openShadowBrowserScope(browser);
+    const live = {
+      kind: "woo.live.event.shadow.v1" as const,
+      id: "browser-auth-live",
+      source: "delay_1",
+      actor: browser.actor,
+      scope: "the_dubspace",
+      observation: { type: "control_preview", source: "delay_1", control: "wet", value: 0.22 },
+      coalesce: "the_dubspace/delay_1/control/wet"
+    };
+    const bad = shadowBrowserEnvelope(browser, live.kind, live);
+    bad.auth = { mode: "session", token: "shadow-session:missing" };
+
+    expect(() => receiveShadowBrowserEnvelope(browser, encodeEnvelope(bad))).toThrow(/token is unknown/);
+  });
+
+  it("opens from a last-known head through delta catch-up when the relay has the tail", async () => {
+    const { browser } = await browserForScope("the_dubspace", "guest:browser-catchup-delta");
+    const opened = await openShadowBrowserScope(browser, { preseed_catalog_pages: true });
+    const base = structuredClone(browser.relay.commit_scope.head);
+    expect(opened.transfer_mode).toBe("projection");
+
+    const turn = await executeShadowBrowserTurn(browser, {
+      id: "browser-catchup-delta-wet",
+      target: "the_dubspace",
+      verb: "set_control",
+      args: ["delay_1", "wet", 0.77]
+    });
+    expect(turn.result).toMatchObject({ ok: true });
+
+    const reconnected = createShadowBrowserNode({
+      node: "browser-catchup-delta-reconnect",
+      scope: "the_dubspace",
+      actor: browser.actor,
+      session: browser.session,
+      relay: browser.relay
+    });
+    const caughtUp = await openShadowBrowserScope(reconnected, { last_known_head: base });
+
+    expect(caughtUp.transfer_mode).toBe("delta");
+    expect(reconnected.cache.applied_frames).toHaveLength(1);
+    expect(reconnected.cache.transcript_tail).toHaveLength(1);
+    expect(reconnected.cache.projections.get("the_dubspace")).toMatchObject({ seq: 1 });
+  });
+
+  it("falls back to projection catch-up when the relay has no delta tail", async () => {
+    const { browser } = await browserForScope("the_dubspace", "guest:browser-catchup-projection");
+    await openShadowBrowserScope(browser, { preseed_catalog_pages: true });
+    const base = structuredClone(browser.relay.commit_scope.head);
+    const turn = await executeShadowBrowserTurn(browser, {
+      id: "browser-catchup-projection-wet",
+      target: "the_dubspace",
+      verb: "set_control",
+      args: ["delay_1", "wet", 0.79]
+    });
+    expect(turn.result).toMatchObject({ ok: true });
+    browser.relay.accepted_frames = [];
+    browser.relay.transcript_tail = [];
+
+    const reconnected = createShadowBrowserNode({
+      node: "browser-catchup-projection-reconnect",
+      scope: "the_dubspace",
+      actor: browser.actor,
+      session: browser.session,
+      relay: browser.relay
+    });
+    const caughtUp = await openShadowBrowserScope(reconnected, { last_known_head: base });
+
+    expect(caughtUp.transfer_mode).toBe("projection");
+    expect(reconnected.cache.applied_frames).toHaveLength(0);
+    expect(reconnected.cache.transfers.find((transfer) => transfer.mode === "projection")).toBeDefined();
+    expect(reconnected.cache.projections.get("the_dubspace")).toMatchObject({ seq: 1 });
+  });
+
+  it("multiplexes commit, state, and live planes through one in-process envelope channel", async () => {
+    const anchor = createWorld();
+    const firstSession = anchor.auth("guest:browser-mux-a");
+    const secondSession = anchor.auth("guest:browser-mux-b");
+    await anchor.directCall("browser-mux-a-enter", firstSession.actor, "the_dubspace", "enter", [], { sessionId: firstSession.id });
+    await anchor.directCall("browser-mux-b-enter", secondSession.actor, "the_dubspace", "enter", [], { sessionId: secondSession.id });
+    const relay = createShadowBrowserRelayShim({
+      node: "browser-mux-relay",
+      scope: "the_dubspace",
+      serialized: anchor.exportWorld()
+    });
+    const sender = createShadowBrowserNode({
+      node: "browser-mux-a",
+      scope: "the_dubspace",
+      actor: firstSession.actor,
+      session: firstSession.id,
+      relay
+    });
+    const receiver = createShadowBrowserNode({
+      node: "browser-mux-b",
+      scope: "the_dubspace",
+      actor: secondSession.actor,
+      session: secondSession.id,
+      relay
+    });
+    await openShadowBrowserScope(sender, { preseed_catalog_pages: true });
+    await openShadowBrowserScope(receiver, { preseed_catalog_pages: true });
+
+    const turn = await executeShadowBrowserTurn(sender, {
+      id: "browser-mux-wet",
+      target: "the_dubspace",
+      verb: "set_control",
+      args: ["delay_1", "wet", 0.31]
+    });
+    if (!turn.result.ok || !turn.result.commit) throw new Error("expected committed mux turn");
+    const projection = buildShadowBrowserProjectionTransfer(relay, "the_dubspace", receiver.node);
+    const live = {
+      kind: "woo.live.event.shadow.v1" as const,
+      id: "browser-mux-preview",
+      source: "delay_1",
+      actor: sender.actor,
+      scope: "the_dubspace",
+      observation: { type: "control_preview", source: "delay_1", control: "wet", value: 0.32 },
+      coalesce: "the_dubspace/delay_1/control/wet"
+    };
+
+    const conflict = {
+      kind: "woo.commit.conflict.shadow.v1" as const,
+      id: "browser-mux-conflict",
+      scope: "the_dubspace",
+      current: relay.commit_scope.head,
+      reason: "stale_head" as const,
+      errors: ["multiplex harness conflict frame"],
+      receipt: turn.result.receipt
+    };
+    const channel = [
+      { browser: receiver, frame: encodeEnvelope(shadowBrowserEnvelope(receiver, "woo.commit.conflict.shadow.v1", conflict, "mux-commit")) },
+      { browser: receiver, frame: encodeEnvelope(shadowBrowserEnvelope(receiver, "woo.state.transfer.shadow.v1", projection, "mux-state")) },
+      { browser: sender, frame: encodeEnvelope(shadowBrowserEnvelope(sender, live.kind, live, "mux-live")) }
+    ];
+    for (const item of channel) receiveShadowBrowserEnvelope(item.browser, item.frame);
+
+    expect(receiver.cache.conflicts.some((frame) => frame.id === "browser-mux-conflict")).toBe(true);
+    expect(receiver.cache.transfers.some((transfer) => transfer.mode === "projection")).toBe(true);
+    expect(receiver.cache.live_events).toHaveLength(1);
   });
 });
 

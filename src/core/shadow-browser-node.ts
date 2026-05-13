@@ -1,4 +1,4 @@
-import type { SerializedObject, SerializedWorld } from "./repository";
+import type { SerializedObject, SerializedSession, SerializedWorld } from "./repository";
 import { createShadowCommitScope, type ShadowCommitAccepted, type ShadowCommitConflict, type ShadowCommitScope } from "./shadow-commit-scope";
 import {
   createShadowExecutionNode,
@@ -14,6 +14,7 @@ import { buildShadowTurnExecAd, executeShadowTurnCallAcrossInProcessNetwork, typ
 import { shadowTurnKeyFromTranscript, type ShadowTurnKey } from "./turn-key";
 import type { EffectTranscript } from "./effect-transcript";
 import { stableShadowJson } from "./shadow-cell-version";
+import { decodeEnvelope, encodeEnvelope, type ShadowEnvelope, type ShadowEnvelopeAuth } from "./shadow-envelope";
 import { constantTimeEqual, hashSource } from "./source-hash";
 import type { ObjRef, Observation, WooValue } from "./types";
 
@@ -111,6 +112,9 @@ export type ShadowBrowserRelayShim = {
   executors: ShadowExecutionNode[];
   subscriptions: Map<ObjRef, Set<string>>;
   browsers: Map<string, ShadowBrowserNode>;
+  session_auth: Map<string, ShadowBrowserSessionClaims>;
+  accepted_frames: ShadowCommitAccepted[];
+  transcript_tail: EffectTranscript[];
   live_events: ShadowLiveEvent[];
   state_signing: ShadowBrowserStateSigning;
 };
@@ -125,6 +129,7 @@ export type ShadowBrowserNode = {
   relay: ShadowBrowserRelayShim;
   cache: ShadowBrowserNodeCache;
   trusted_state_authorities: Map<string, string>;
+  session_token: string | null;
   next_turn: number;
   next_live: number;
 };
@@ -135,9 +140,26 @@ export type ShadowBrowserStateSigning = {
   secret: string;
 };
 
+export type ShadowBrowserSessionClaims = {
+  session: string;
+  actor: ObjRef;
+  deployment: string;
+  issued_at: number;
+  expires_at: number;
+  scopes: ObjRef[];
+  features: string[];
+  rev: number;
+};
+
 export type ShadowBrowserOpenScopeResult = {
   projection: WooValue;
   preseeded_objects: number;
+  transfer_mode: "projection" | "delta";
+};
+
+export type ShadowBrowserOpenScopeOptions = {
+  preseed_catalog_pages?: boolean;
+  last_known_head?: ShadowCommitAccepted["position"];
 };
 
 export type ShadowBrowserTurnInput = {
@@ -177,6 +199,9 @@ export function createShadowBrowserRelayShim(input: {
     executors: input.executors ?? [],
     subscriptions: new Map(),
     browsers: new Map(),
+    session_auth: shadowBrowserSessionClaims(input.serialized.sessions, input.scope),
+    accepted_frames: [],
+    transcript_tail: [],
     live_events: [],
     state_signing: {
       authority: input.state_signing?.authority ?? DEFAULT_SHADOW_BROWSER_STATE_AUTHORITY,
@@ -202,6 +227,7 @@ export function createShadowBrowserNode(input: {
   });
   const cache = createShadowBrowserNodeCache();
   cacheObjectPages(cache, input.cached_objects ?? []);
+  const sessionToken = input.session ? shadowBrowserSessionToken(input.session, input.actor) : null;
   return {
     kind: "woo.browser_node.shadow.v1",
     node: input.node,
@@ -212,6 +238,7 @@ export function createShadowBrowserNode(input: {
     relay: input.relay,
     cache,
     trusted_state_authorities: trustedBrowserStateAuthorities(input.trusted_state_authorities),
+    session_token: sessionToken,
     next_turn: 1,
     next_live: 1
   };
@@ -240,8 +267,9 @@ export function shadowBrowserCatalogObjects(serialized: SerializedWorld): Serial
 
 export async function openShadowBrowserScope(
   browser: ShadowBrowserNode,
-  options: { preseed_catalog_pages?: boolean } = {}
+  options: ShadowBrowserOpenScopeOptions = {}
 ): Promise<ShadowBrowserOpenScopeResult> {
+  validateShadowBrowserNodeAuth(browser);
   const serialized = browser.relay.commit_scope.serialized;
   const preseed = options.preseed_catalog_pages === true ? shadowBrowserCatalogObjects(serialized) : [];
   if (preseed.length > 0) {
@@ -251,11 +279,12 @@ export async function openShadowBrowserScope(
   subscribeShadowBrowserNode(browser, browser.scope);
   // Scope open enters the state plane even for display-only projection data, so
   // every cache fill goes through the same recipient-bound verification path.
-  const transfer = buildShadowBrowserProjectionTransfer(browser.relay, browser.scope, browser.node);
+  const transfer = buildShadowBrowserCatchupTransfer(browser.relay, browser.scope, browser.node, options.last_known_head);
   applyShadowBrowserTransfer(browser, transfer);
   return {
     projection: transfer.projection,
-    preseeded_objects: preseed.length
+    preseeded_objects: preseed.length,
+    transfer_mode: transfer.mode
   };
 }
 
@@ -274,6 +303,7 @@ export function unsubscribeShadowBrowserNode(browser: ShadowBrowserNode, scope: 
 }
 
 export function emitShadowBrowserLiveEvent(browser: ShadowBrowserNode, input: ShadowBrowserLiveInput): ShadowLiveEvent {
+  validateShadowBrowserNodeAuth(browser);
   const event: ShadowLiveEvent = {
     kind: "woo.live.event.shadow.v1",
     id: input.id ?? `${browser.node}:live:${browser.next_live++}`,
@@ -331,6 +361,7 @@ export async function executeShadowBrowserTurn(
   browser: ShadowBrowserNode,
   input: ShadowBrowserTurnInput
 ): Promise<ShadowBrowserTurnResult> {
+  validateShadowBrowserNodeAuth(browser);
   const id = input.id ?? `${browser.node}:turn:${browser.next_turn++}`;
   const call: ShadowTurnCall = {
     kind: "woo.turn_call.shadow.v1",
@@ -434,11 +465,26 @@ export function buildShadowBrowserDeltaTransfer(
   return { ...transfer, proof: signShadowBrowserStateTransfer(transfer, relay.state_signing, recipient) };
 }
 
+export function buildShadowBrowserCatchupTransfer(
+  relay: ShadowBrowserRelayShim,
+  scope: ObjRef,
+  recipient: string,
+  lastKnownHead?: ShadowCommitAccepted["position"]
+): ShadowProjectionTransfer | ShadowDeltaTransfer {
+  if (lastKnownHead && lastKnownHead.scope === scope && lastKnownHead.epoch === relay.commit_scope.head.epoch && lastKnownHead.seq < relay.commit_scope.head.seq) {
+    const accepted = relay.accepted_frames.find((frame) => frame.position.scope === scope && frame.position.seq === lastKnownHead.seq + 1);
+    const transcript = accepted ? relay.transcript_tail.find((item) => item.hash === accepted.transcript_hash) : undefined;
+    if (accepted && transcript) return buildShadowBrowserDeltaTransfer(relay, accepted, transcript, recipient);
+  }
+  return buildShadowBrowserProjectionTransfer(relay, scope, recipient);
+}
+
 export function publishShadowBrowserAcceptedFrame(
   relay: ShadowBrowserRelayShim,
   accepted: ShadowCommitAccepted,
   transcript: EffectTranscript
 ): void {
+  rememberShadowBrowserAcceptedFrame(relay, accepted, transcript);
   // Commit fan-out is subscription-gated; browsers outside the scope must ask
   // for later state transfer rather than receiving every accepted frame.
   for (const browser of relay.browsers.values()) {
@@ -448,6 +494,49 @@ export function publishShadowBrowserAcceptedFrame(
     const transfer = buildShadowBrowserDeltaTransfer(relay, accepted, transcript, browser.node);
     applyShadowBrowserTransfer(browser, transfer);
   }
+}
+
+export function shadowBrowserEnvelope<T>(
+  browser: ShadowBrowserNode,
+  type: string,
+  body: T,
+  id = `${browser.node}:env:${browser.next_live++}`
+): ShadowEnvelope<T> {
+  return {
+    v: 2,
+    type,
+    id,
+    from: browser.node,
+    to: browser.relay.node,
+    actor: browser.actor,
+    ...(browser.session ? { session: browser.session } : {}),
+    auth: shadowBrowserAuth(browser),
+    body
+  };
+}
+
+export function receiveShadowBrowserEnvelope(browser: ShadowBrowserNode, encoded: string): ShadowEnvelope {
+  const envelope = decodeEnvelope(encoded);
+  validateShadowBrowserEnvelopeAuth(browser.relay, browser, envelope);
+  switch (envelope.type) {
+    case "woo.live.event.shadow.v1":
+      publishShadowBrowserLiveEvent(browser.relay, envelope.body as ShadowLiveEvent);
+      break;
+    case "woo.state.transfer.shadow.v1":
+      applyShadowBrowserTransfer(browser, envelope.body as ShadowBrowserStateTransfer);
+      break;
+    case "woo.commit.accepted.shadow.v1":
+      applyShadowBrowserAcceptedFrame(browser, envelope.body as ShadowCommitAccepted);
+      break;
+    case "woo.commit.conflict.shadow.v1":
+      applyShadowBrowserConflict(browser, envelope.body as ShadowCommitConflict);
+      break;
+  }
+  return envelope;
+}
+
+export function roundTripShadowBrowserEnvelope<T>(browser: ShadowBrowserNode, type: string, body: T): ShadowEnvelope<T> {
+  return decodeEnvelope<T>(encodeEnvelope(shadowBrowserEnvelope(browser, type, body)));
 }
 
 export function applyShadowBrowserAcceptedFrame(browser: ShadowBrowserNode, accepted: ShadowCommitAccepted): void {
@@ -510,6 +599,81 @@ function shadowScopeProjection(serialized: SerializedWorld, scope: ObjRef): WooV
 
 function trustedBrowserStateAuthorities(input: Record<string, string> | undefined): Map<string, string> {
   return new Map(Object.entries(input ?? { [DEFAULT_SHADOW_BROWSER_STATE_AUTHORITY]: DEFAULT_SHADOW_BROWSER_STATE_SECRET }));
+}
+
+function shadowBrowserSessionClaims(sessions: SerializedSession[], scope: ObjRef): Map<string, ShadowBrowserSessionClaims> {
+  const claims = new Map<string, ShadowBrowserSessionClaims>();
+  for (const session of sessions) {
+    const token = shadowBrowserSessionToken(session.id, session.actor);
+    claims.set(token, {
+      session: session.id,
+      actor: session.actor,
+      deployment: "shadow-local",
+      issued_at: session.started,
+      expires_at: session.expiresAt ?? session.started + 15 * 60 * 1000,
+      scopes: [scope],
+      features: ["shadow-envelope", "shadow-catchup", "shadow-multiplex"],
+      rev: 1
+    });
+  }
+  return claims;
+}
+
+function shadowBrowserSessionToken(session: string, actor: ObjRef): string {
+  return `shadow-session:${session}:${actor}`;
+}
+
+function shadowBrowserAuth(browser: ShadowBrowserNode): ShadowEnvelopeAuth {
+  if (!browser.session_token) throw new Error("shadow browser session auth token is required");
+  const claims = browser.relay.session_auth.get(browser.session_token);
+  if (!claims) throw new Error("shadow browser session auth token is unknown");
+  return {
+    mode: "session",
+    token: browser.session_token,
+    claims: claims as unknown as Record<string, WooValue>
+  };
+}
+
+function validateShadowBrowserNodeAuth(browser: ShadowBrowserNode): void {
+  validateShadowBrowserAuth(browser.relay, {
+    mode: "session",
+    token: browser.session_token ?? undefined
+  }, browser.actor, browser.session);
+}
+
+function validateShadowBrowserEnvelopeAuth(relay: ShadowBrowserRelayShim, browser: ShadowBrowserNode, envelope: ShadowEnvelope): void {
+  if (envelope.from !== browser.node) throw new Error(`shadow envelope sender mismatch: ${envelope.from}`);
+  validateShadowBrowserAuth(relay, envelope.auth, envelope.actor, envelope.session);
+}
+
+function validateShadowBrowserAuth(
+  relay: ShadowBrowserRelayShim,
+  auth: ShadowEnvelopeAuth,
+  actor?: ObjRef,
+  session?: string | null
+): ShadowBrowserSessionClaims {
+  if (auth.mode !== "session") throw new Error(`unsupported shadow browser auth mode: ${auth.mode}`);
+  if (!auth.token) throw new Error("shadow browser auth token is required");
+  const claims = relay.session_auth.get(auth.token);
+  if (!claims) throw new Error("shadow browser auth token is unknown");
+  if (actor && claims.actor !== actor) throw new Error("shadow browser auth actor mismatch");
+  if (session && claims.session !== session) throw new Error("shadow browser auth session mismatch");
+  if (claims.expires_at <= Date.now()) throw new Error("shadow browser auth token is expired");
+  return claims;
+}
+
+function rememberShadowBrowserAcceptedFrame(
+  relay: ShadowBrowserRelayShim,
+  accepted: ShadowCommitAccepted,
+  transcript: EffectTranscript
+): void {
+  if (!relay.accepted_frames.some((frame) => frame.id === accepted.id && frame.position.hash === accepted.position.hash)) {
+    relay.accepted_frames.push(structuredClone(accepted) as ShadowCommitAccepted);
+    relay.accepted_frames.sort((a, b) => a.position.seq - b.position.seq || String(a.id ?? "").localeCompare(String(b.id ?? "")));
+  }
+  if (!relay.transcript_tail.some((item) => item.hash === transcript.hash)) {
+    relay.transcript_tail.push(structuredClone(transcript) as EffectTranscript);
+  }
 }
 
 function signShadowBrowserStateTransfer(

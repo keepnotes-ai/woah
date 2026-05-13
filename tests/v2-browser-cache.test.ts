@@ -73,6 +73,40 @@ describe("v2 browser cache reducer", () => {
     })).toEqual([{ kind: "pending_delete", id: "pending-1" }]);
   });
 
+  it("reduces successful turn replies into applied frame and transcript cache mutations", () => {
+    const accepted = {
+      kind: "woo.commit.accepted.shadow.v1",
+      id: "turn-2",
+      position: { kind: "woo.scope_head.shadow.v1", scope: "the_dubspace", epoch: 1, seq: 2, hash: "h2" },
+      receipt: { kind: "woo.commit_receipt.shadow.v1", id: "turn-2", accepted: true },
+      transcript_hash: "t2",
+      post_state_hash: "p2",
+      observations: []
+    };
+    const transcript = {
+      kind: "woo.effect_transcript.shadow.v1",
+      id: "turn-2",
+      scope: "the_dubspace",
+      seq: 2,
+      hash: "t2",
+      complete: true
+    };
+    expect(v2BrowserCacheMutationsForEnvelope({
+      ...envelopeFor("woo.turn.exec.reply.shadow.v1", {
+        kind: "woo.turn.exec.reply.shadow.v1",
+        ok: true,
+        transcript,
+        commit: accepted
+      }),
+      reply_to: "pending-2"
+    })).toEqual([
+      { kind: "pending_delete", id: "pending-2" },
+      { kind: "applied_frame", frame: accepted, transcript },
+      { kind: "transcript", transcript },
+      { kind: "meta", key: "head:the_dubspace", value: accepted.position }
+    ]);
+  });
+
   it("persists executable cell pages for later browser-side planning", () => {
     const page: ShadowStatePage = {
       kind: "woo.state_page.object_live.shadow.v1",

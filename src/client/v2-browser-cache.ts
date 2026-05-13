@@ -2,6 +2,7 @@ import type { EffectTranscript } from "../core/effect-transcript";
 import type { ShadowBrowserStateTransfer } from "../core/shadow-browser-node";
 import type { ShadowCommitAccepted, ShadowScopeHead } from "../core/shadow-commit-scope";
 import type { ShadowEnvelope } from "../core/shadow-envelope";
+import type { ShadowTurnExecReply } from "../core/shadow-turn-exec";
 import type { ShadowStatePage } from "../core/shadow-state-pages";
 import type { SerializedObject } from "../core/repository";
 import type { WooValue } from "../core/types";
@@ -28,6 +29,16 @@ export function v2BrowserCacheMutationsForEnvelope(envelope: ShadowEnvelope): V2
   }
   if (envelope.type === "woo.state.transfer.shadow.v1") {
     return stateTransferMutations(envelope.body as ShadowBrowserStateTransfer);
+  }
+  if (envelope.type === "woo.turn.exec.reply.shadow.v1") {
+    const reply = envelope.body as ShadowTurnExecReply;
+    const mutations: V2BrowserCacheMutation[] = envelope.reply_to ? [{ kind: "pending_delete", id: envelope.reply_to }] : [];
+    if (reply.ok === true && reply.transcript) {
+      if (reply.commit) mutations.push({ kind: "applied_frame" as const, frame: reply.commit as ShadowCommitAccepted, transcript: reply.transcript });
+      mutations.push({ kind: "transcript" as const, transcript: reply.transcript });
+      if (reply.commit) mutations.push({ kind: "meta" as const, key: `head:${reply.commit.position.scope}`, value: reply.commit.position });
+    }
+    return mutations;
   }
   if (envelope.reply_to) return [{ kind: "pending_delete", id: envelope.reply_to }];
   return [];

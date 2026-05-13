@@ -812,6 +812,17 @@ type ExecCapabilityAd = {
 };
 ```
 
+During the M4 browser migration, a relay MAY also accept
+`woo.turn.intent.request.shadow.v1` from a browser node. The intent contains
+`id`, `route`, `scope`, `target`, `verb`, `args`, and optional
+`commit_policy`, but not a `TurnKey`. It is a transitional shadow-local
+message: the CommitScopeDO plans the deterministic transcript against its
+authoritative scope state, derives the `TurnKey`, and then processes the turn
+through the same `TurnExecRequest`/`TurnExecReply` path. Browsers MUST treat
+this as server-assisted planning, not as proof that local closure execution is
+complete; production v2 returns to browser-built keys once the worker can
+reconstruct executable state from verified pages.
+
 `covers` means "this node probably has the state, code, metadata, and log tail."
 `accepts` means "this node is willing to run this target/verb/scope shape."
 
@@ -1102,7 +1113,11 @@ on the legacy namespace, runs silently alongside the v1 `/ws` UI: it persists
 state into IndexedDB for soak-testing the wire path without driving rendering
 unless the explicit `v2AppliedFrames` flag is present. UI migration to consume
 v2 committed state directly is deferred until at least one catalog is
-v2-authoritative on that namespace.
+v2-authoritative on that namespace. With the explicit `v2Outbound` flag, the
+SPA sends sequenced UI calls through `woo.turn.intent.request.shadow.v1` so the
+wire path can exercise v2 commit authority before browser-local planning is
+complete; direct calls and text command parsing remain on the legacy `/ws`
+transport in this slice.
 
 M4 wire-slice status: local dev and the Cloudflare Worker expose the reserved
 `POST /v2/session/mint` path and `GET /v2/turn-network/ws` WebSocket endpoint.

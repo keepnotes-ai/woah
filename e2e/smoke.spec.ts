@@ -95,6 +95,50 @@ test("browser worker receives initial v2 projection", async ({ page, request }) 
   await expect.poll(() => v2ProjectionEvents, { timeout: 5_000 }).toBeGreaterThan(0);
 });
 
+test("browser worker sends sequenced calls through v2 intent path", async ({ page, request }) => {
+  let appliedVerb = "";
+  let projectionEvents = 0;
+  await page.exposeFunction("recordV2AppliedFrame", (verb: string) => {
+    appliedVerb = verb;
+  });
+  await page.exposeFunction("recordV2ProjectionForOutbound", () => {
+    projectionEvents += 1;
+  });
+  await page.addInitScript(() => {
+    window.addEventListener("woo.v2.projection", () => {
+      void (window as unknown as { recordV2ProjectionForOutbound: () => Promise<void> }).recordV2ProjectionForOutbound();
+    });
+    window.addEventListener("woo.v2.applied_frame", (event) => {
+      const verb = String((event as CustomEvent<any>).detail?.applied?.message?.verb ?? "");
+      void (window as unknown as { recordV2AppliedFrame: (verb: string) => Promise<void> }).recordV2AppliedFrame(verb);
+    });
+  });
+
+  const auth = await request.post("/api/auth", { data: { token: `guest:e2e-v2-outbound-${crypto.randomUUID()}` } });
+  const session = String((await auth.json())?.session ?? "");
+  await page.goto("/");
+  await page.evaluate((sessionId) => {
+    localStorage.setItem("woo.session", sessionId);
+  }, session);
+  await page.goto("/objects/the_dubspace?v2Outbound&v2AppliedFrames&v2TestHooks");
+  await expect(page.locator(".actor")).not.toHaveText("connecting...", { timeout: 5_000 });
+  await expect(page.locator("[data-dubspace-workspace]")).toBeVisible({ timeout: 5_000 });
+  await expect.poll(() => projectionEvents, { timeout: 5_000 }).toBeGreaterThan(0);
+  await page.evaluate(() => {
+    (window as unknown as { __wooV2BrowserWorker: Worker }).__wooV2BrowserWorker.postMessage({
+      kind: "call",
+      id: `e2e-v2-intent-${crypto.randomUUID()}`,
+      route: "sequenced",
+      scope: "the_dubspace",
+      target: "the_dubspace",
+      verb: "set_control",
+      args: ["delay_1", "wet", 0.66]
+    });
+  });
+
+  await expect.poll(() => appliedVerb, { timeout: 5_000 }).toBe("set_control");
+});
+
 test("chat boot uses /api/me and moves without /api/state", async ({ page }) => {
   const stateCalls: string[] = [];
   await page.route("**/api/state", async (route) => {

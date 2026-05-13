@@ -179,6 +179,8 @@ const legacyPinboardChatHeightKey = "woo.pinboard.chatHeight";
 const spaceChatHeightsKey = "woo.spaceChat.heights";
 const scopedProjectionSmokeEnabled = new URLSearchParams(location.search).has("scopedProjectionSmoke");
 const v2AppliedFramesEnabled = new URLSearchParams(location.search).has("v2AppliedFrames");
+const v2OutboundEnabled = new URLSearchParams(location.search).has("v2Outbound");
+const v2TestHooksEnabled = new URLSearchParams(location.search).has("v2TestHooks");
 let scopedProjectionEnabled = (() => {
   const params = new URLSearchParams(location.search);
   if (params.get("api") === "state" || params.has("legacyState")) return false;
@@ -407,6 +409,7 @@ function ensureV2BrowserWorker() {
   // The v2 worker owns the durable browser-side cache and reconnect loop. The
   // legacy `/ws` UI path remains active while v2 reaches feature parity.
   v2BrowserWorker = new Worker(new URL("./v2-browser-worker.ts", import.meta.url), { type: "module" });
+  if (v2TestHooksEnabled) (window as unknown as { __wooV2BrowserWorker?: Worker }).__wooV2BrowserWorker = v2BrowserWorker;
   v2BrowserWorker.addEventListener("message", (event) => {
     if (event.data?.kind === "status") console.debug("woo.v2", event.data.status);
     if (event.data?.kind === "projection") {
@@ -440,7 +443,9 @@ function syncV2BrowserWorkerScope() {
   v2BrowserWorker.postMessage({
     kind: "connect",
     token,
-    scope
+    scope,
+    actor: state.actor,
+    session: state.session
   });
 }
 
@@ -2170,8 +2175,23 @@ function activeChatRoom() {
 function call(space: string, target: string, verb: string, args: unknown[] = [], options?: ProjectionCallOptions) {
   const id = crypto.randomUUID();
   ui.applyOptimisticCall(id, options);
+  if (v2OutboundEnabled && sendV2CallIntent(id, space, target, verb, args)) return id;
   if (!sendFrame({ op: "call", id, space, message: { target, verb, args } })) ui.failOptimisticCall(id);
   return id;
+}
+
+function sendV2CallIntent(id: string, scope: string, target: string, verb: string, args: unknown[]): boolean {
+  if (!v2BrowserWorker || !state.actor || !state.session) return false;
+  v2BrowserWorker.postMessage({
+    kind: "call",
+    id,
+    route: "sequenced",
+    scope,
+    target,
+    verb,
+    args
+  });
+  return true;
 }
 
 function callWithError(space: string, target: string, verb: string, args: unknown[] = [], onError?: (error: any) => void, options?: ProjectionCallOptions) {

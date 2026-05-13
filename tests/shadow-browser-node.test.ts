@@ -513,6 +513,33 @@ describe("shadow browser node shim", () => {
     expect(browser.relay.accepted_frames).toHaveLength(1);
   });
 
+  it("plans browser turn intents on the relay and commits through the normal reply path", async () => {
+    const { browser } = await browserForScope("the_dubspace", "guest:browser-wire-intent");
+    await openShadowBrowserScope(browser);
+    const intent = {
+      kind: "woo.turn.intent.request.shadow.v1" as const,
+      id: "wire-intent-wet",
+      route: "sequenced" as const,
+      scope: "the_dubspace",
+      target: "the_dubspace",
+      verb: "set_control",
+      args: ["delay_1", "wet", 0.72],
+      commit_policy: "execute_and_commit" as const
+    };
+    const encoded = encodeEnvelope(shadowBrowserEnvelope(browser, intent.kind, intent, "wire-intent-env-1"));
+
+    const receipt = receiveShadowBrowserEnvelopeReceipt(browser, encoded);
+    const reply = await handleShadowBrowserTurnExecEnvelope(browser, receipt);
+
+    expect(reply?.reply_to).toBe("wire-intent-env-1");
+    expect(reply?.body).toMatchObject({
+      kind: "woo.turn.exec.reply.shadow.v1",
+      ok: true,
+      commit: { position: { scope: "the_dubspace", seq: 1 } }
+    });
+    expect(worldFor(browser).getProp("delay_1", "wet")).toBe(0.72);
+  });
+
   it("bounds remembered envelope ids and cached replies inside the idempotency window", async () => {
     const { browser } = await browserForScope("the_dubspace", "guest:browser-idempotency-cap");
     await openShadowBrowserScope(browser);

@@ -266,6 +266,17 @@ export type ShadowBrowserTurnInput = {
   commit_policy?: ShadowTurnExecRequest["commit_policy"];
 };
 
+export type ShadowTurnIntentRequest = {
+  kind: "woo.turn.intent.request.shadow.v1";
+  id?: string;
+  route: ShadowTurnCall["route"];
+  scope: ObjRef;
+  target: ObjRef;
+  verb: string;
+  args?: WooValue[];
+  commit_policy?: ShadowTurnExecRequest["commit_policy"];
+};
+
 export type ShadowBrowserTurnResult = {
   id: string;
   call: ShadowTurnCall;
@@ -775,12 +786,14 @@ export async function handleShadowBrowserTurnExecEnvelope(
 ): Promise<ShadowEnvelope<ShadowTurnExecReply> | null> {
   // Keep wire turn-exec dispatch in the substrate so dev-server, Worker, and
   // future socket bindings share the same duplicate handling and reply shape.
-  if (receipt.envelope.type !== "woo.turn.exec.request.shadow.v1") return null;
+  if (receipt.envelope.type !== "woo.turn.exec.request.shadow.v1" && receipt.envelope.type !== "woo.turn.intent.request.shadow.v1") return null;
   if (!receipt.fresh) {
     const cached = browser.relay.recent_replies.get(receipt.idempotency_key);
     return cached ? structuredClone(cached) as ShadowEnvelope<ShadowTurnExecReply> : null;
   }
-  const request = receipt.envelope.body as ShadowTurnExecRequest;
+  const request = receipt.envelope.type === "woo.turn.intent.request.shadow.v1"
+    ? await shadowTurnExecRequestFromIntent(browser, receipt.envelope.body as ShadowTurnIntentRequest)
+    : receipt.envelope.body as ShadowTurnExecRequest;
   const result = await executeShadowBrowserTurnExecRequest(browser, request);
   if (!result.reply) return null;
   const body = shadowBrowserWireTurnExecReply(result.reply);
@@ -801,6 +814,35 @@ export async function handleShadowBrowserTurnExecEnvelope(
   browser.relay.recent_replies.set(receipt.idempotency_key, structuredClone(reply));
   trimShadowBrowserIdempotency(browser.relay);
   return reply;
+}
+
+async function shadowTurnExecRequestFromIntent(browser: ShadowBrowserNode, intent: ShadowTurnIntentRequest): Promise<ShadowTurnExecRequest> {
+  // Browser-local planning is the end-state, but early browser parity needs a
+  // safe outbound path before the worker can reconstruct executable closures.
+  // Server-assisted planning still records a deterministic transcript and
+  // turns it into the same ShadowTurnKey that a local browser planner will
+  // submit later.
+  const id = intent.id ?? `${browser.node}:intent:${browser.next_turn++}`;
+  const call: ShadowTurnCall = {
+    kind: "woo.turn_call.shadow.v1",
+    id,
+    route: intent.route,
+    scope: intent.scope,
+    session: browser.session,
+    actor: browser.actor,
+    target: intent.target,
+    verb: intent.verb,
+    args: intent.args ?? []
+  };
+  const planned = await runShadowTurnCall(browser.relay.commit_scope.serialized, call);
+  return {
+    kind: "woo.turn.exec.request.shadow.v1",
+    id,
+    call,
+    key: shadowTurnKeyFromTranscript(planned.transcript),
+    expected: browser.relay.commit_scope.head,
+    commit_policy: intent.commit_policy ?? "execute_and_commit"
+  };
 }
 
 async function executeShadowBrowserTurnExecRequest(

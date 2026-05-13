@@ -1,15 +1,18 @@
 import { decodeEnvelope, encodeEnvelope, type ShadowEnvelope } from "../core/shadow-envelope";
 import type { EffectTranscript } from "../core/effect-transcript";
 import type { ShadowCommitAccepted, ShadowScopeHead } from "../core/shadow-commit-scope";
+import type { ShadowTurnIntentRequest } from "../core/shadow-browser-node";
+import type { WooValue } from "../core/types";
 import { isShadowScopeHead } from "../core/shadow-scope-head";
 import { v2BrowserCacheMutationsForEnvelope, type V2BrowserCacheMutation } from "./v2-browser-cache";
 import { v2AppliedFrameMessageFromFrame, v2ProjectionMessageFromRow } from "./v2-browser-messages";
 import { v2BrowserWebSocketUrl } from "./v2-browser-url";
 
 type V2WorkerCommand =
-  | { kind: "connect"; token: string; node?: string; scope?: string }
+  | { kind: "connect"; token: string; node?: string; scope?: string; actor?: string; session?: string }
   | { kind: "disconnect" }
   | { kind: "send"; envelope: ShadowEnvelope }
+  | { kind: "call"; id: string; route: "sequenced"; scope: string; target: string; verb: string; args?: unknown[] }
   | { kind: "get_projection"; scope?: string }
   | { kind: "cache_status" };
 
@@ -45,7 +48,7 @@ const STATE_PAGE_STORE = "state_pages";
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 let socket: WebSocket | null = null;
-let current: { token: string; node: string; scope: string } | null = null;
+let current: { token: string; node: string; scope: string; actor?: string; session?: string } | null = null;
 let reconnectTimer: number | undefined;
 let connecting = false;
 let reconnectDelayMs = 500;
@@ -69,7 +72,9 @@ async function handleCommand(command: V2WorkerCommand): Promise<void> {
       await connectTo({
         token: command.token,
         node: command.node ?? await browserNodeId(),
-        scope: command.scope ?? ""
+        scope: command.scope ?? "",
+        actor: command.actor,
+        session: command.session
       });
       break;
     case "disconnect":
@@ -94,6 +99,9 @@ async function handleCommand(command: V2WorkerCommand): Promise<void> {
       postStatus();
       break;
     }
+    case "call":
+      await sendTurnIntent(command);
+      break;
     case "get_projection":
       await postCachedProjection(command.scope ?? current?.scope ?? "");
       break;
@@ -103,9 +111,9 @@ async function handleCommand(command: V2WorkerCommand): Promise<void> {
   }
 }
 
-async function connectTo(next: { token: string; node: string; scope: string }): Promise<void> {
+async function connectTo(next: { token: string; node: string; scope: string; actor?: string; session?: string }): Promise<void> {
   const changed = current !== null
-    && (current.token !== next.token || current.node !== next.node || current.scope !== next.scope);
+    && (current.token !== next.token || current.node !== next.node || current.scope !== next.scope || current.actor !== next.actor || current.session !== next.session);
   current = next;
   await postCachedProjection(current.scope);
   if (changed) {
@@ -203,6 +211,43 @@ function pendingMatchesCurrentSession(pending: PendingEnvelope): boolean {
   } catch {
     return false;
   }
+}
+
+async function sendTurnIntent(command: Extract<V2WorkerCommand, { kind: "call" }>): Promise<void> {
+  if (!current || !current.actor) {
+    postMessage({ kind: "error", error: "v2 browser call requires an authenticated actor" });
+    return;
+  }
+  const body: ShadowTurnIntentRequest = {
+    kind: "woo.turn.intent.request.shadow.v1",
+    id: command.id,
+    route: command.route,
+    scope: command.scope || current.scope,
+    target: command.target,
+    verb: command.verb,
+    args: Array.isArray(command.args) ? command.args as WooValue[] : [],
+    commit_policy: "execute_and_commit"
+  };
+  const envelope: ShadowEnvelope<ShadowTurnIntentRequest> = {
+    v: 2,
+    type: body.kind,
+    id: command.id,
+    from: current.node,
+    actor: current.actor,
+    ...(current.session ? { session: current.session } : {}),
+    auth: { mode: "session", token: current.token },
+    body
+  };
+  const encoded = encodeEnvelope(envelope);
+  await putPending({
+    id: envelope.id,
+    encoded,
+    created_at: Date.now(),
+    auth_token: current.token,
+    from: current.node
+  });
+  sendEncoded(encoded);
+  postStatus();
 }
 
 function sendEncoded(encoded: string): void {

@@ -269,6 +269,7 @@ v2wss.on("connection", (ws, req) => {
   const url = new URL(req.url ?? "/v2/turn-network/ws", `http://${req.headers.host ?? "localhost"}`);
   const token = url.searchParams.get("token") ?? "";
   const node = url.searchParams.get("node") || `browser:dev:${socketCounter++}`;
+  const requestedScope = url.searchParams.get("scope") as ObjRef | null;
   const lastKnownHead = parseShadowScopeHeadJson(url.searchParams.get("last_known_head"));
   let session: Session;
   try {
@@ -278,13 +279,14 @@ v2wss.on("connection", (ws, req) => {
     ws.close(1008, normalizeError(err).message);
     return;
   }
+  const scope = requestedScope || session.actor;
 
   const socketId = `v2-ws-${socketCounter++}`;
   world.attachSocket(session.id, socketId);
   sockets.set(ws, { sessionId: session.id, actor: session.actor, socketId });
   // The local WebSocket shim keeps one browser node for the connection, matching
   // the Worker path's socket-lifetime idempotency and cache behavior.
-  const browser = v2ShadowBrowser(node, token, session);
+  const browser = v2ShadowBrowser(node, token, session, scope || session.actor);
   const hello = shadowBrowserTransportHello(browser);
   ws.send(encodeEnvelope({
     v: 2,
@@ -380,15 +382,15 @@ function attachedSession(ws: WebSocket): AttachedSocket | null {
   return null;
 }
 
-function v2ShadowBrowser(node: string, token: string, session: Session): ReturnType<typeof createShadowBrowserClient> {
+function v2ShadowBrowser(node: string, token: string, session: Session, scope: ObjRef): ReturnType<typeof createShadowBrowserClient> {
   const relay = createShadowBrowserRelayShim({
     node: "node:dev:relay",
-    scope: session.actor,
+    scope,
     serialized: world.exportWorld()
   });
   return createShadowBrowserClient({
     node,
-    scope: session.actor,
+    scope,
     actor: session.actor,
     session: session.id,
     relay,

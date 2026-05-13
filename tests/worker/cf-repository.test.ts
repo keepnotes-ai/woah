@@ -1,116 +1,33 @@
-import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it, vi } from "vitest";
 import { installVerb } from "../../src/core/authoring";
 import { createWorld } from "../../src/core/bootstrap";
+import { encodeEnvelope } from "../../src/core/shadow-envelope";
+import {
+  createShadowBrowserNode,
+  createShadowBrowserRelayShim,
+  openShadowBrowserScope,
+  setShadowBrowserSessionToken,
+  shadowBrowserEnvelope,
+  type ShadowBrowserNode
+} from "../../src/core/shadow-browser-node";
+import { runShadowTurnCall, type ShadowTurnCall } from "../../src/core/shadow-turn-call";
+import { shadowTurnKeyFromTranscript } from "../../src/core/turn-key";
 import type { Message, ObjRef, TinyBytecode, VerbDef, WooValue } from "../../src/core/types";
 import type { CallContext, HostBridge, HostObjectSummary, MoveObjectResult, RoomSnapshot, ScopedObjectSummary, WooWorld } from "../../src/core/world";
 import { CFObjectRepository } from "../../src/worker/cf-repository";
+import { CommitScopeDO } from "../../src/worker/commit-scope-do";
 import { DirectoryDO } from "../../src/worker/directory-do";
 import worker from "../../src/worker/index";
 import { signInternalRequest } from "../../src/worker/internal-auth";
 import { PersistentObjectDO, type Env } from "../../src/worker/persistent-object-do";
+import { FakeDurableObjectNamespace, FakeDurableObjectState } from "./fake-do";
 
 // These are production-shape Worker integration tests; under full-suite CPU
 // contention they legitimately exceed Vitest's default 30s per-test timeout.
 vi.setConfig({ testTimeout: 120_000 });
 
-class FakeSqlCursor {
-  constructor(private readonly rows: Record<string, unknown>[]) {}
-
-  toArray(): Record<string, unknown>[] {
-    return this.rows;
-  }
-
-  [Symbol.iterator](): Iterator<Record<string, unknown>> {
-    return this.rows[Symbol.iterator]();
-  }
-}
-
-class FakeSqlStorage {
-  constructor(private readonly db: DatabaseSync) {}
-
-  exec(query: string, ...params: unknown[]): FakeSqlCursor {
-    const stmt = this.db.prepare(query);
-    const head = query.trim().split(/\s+/, 1)[0]?.toUpperCase();
-    if (head === "SELECT" || head === "PRAGMA") {
-      return new FakeSqlCursor(stmt.all(...(params as any[])) as Record<string, unknown>[]);
-    }
-    stmt.run(...(params as any[]));
-    return new FakeSqlCursor([]);
-  }
-}
-
-class FakeDurableObjectState {
-  readonly id: { name: string };
-  private readonly db = new DatabaseSync(":memory:");
-  private transactionDepth = 0;
-  private savepointCounter = 0;
-
-  constructor(name = "world") {
-    this.id = { name };
-  }
-
-  readonly storage = {
-    sql: new FakeSqlStorage(this.db),
-    transactionSync: <T>(fn: () => T): T => this.transactionSync(fn)
-  };
-
-  async blockConcurrencyWhile<T>(fn: () => T | Promise<T>): Promise<T> {
-    return await fn();
-  }
-
-  acceptWebSocket(_ws: WebSocket): void {
-    // Not needed for repository / REST-path tests.
-  }
-
-  getWebSockets(): WebSocket[] {
-    return [];
-  }
-
-  close(): void {
-    this.db.close();
-  }
-
-  private transactionSync<T>(fn: () => T): T {
-    if (this.transactionDepth > 0) {
-      const name = `fake_cf_sp_${++this.savepointCounter}`;
-      this.db.exec(`SAVEPOINT ${name}`);
-      try {
-        const result = fn();
-        this.db.exec(`RELEASE SAVEPOINT ${name}`);
-        return result;
-      } catch (err) {
-        this.db.exec(`ROLLBACK TO SAVEPOINT ${name}`);
-        this.db.exec(`RELEASE SAVEPOINT ${name}`);
-        throw err;
-      }
-    }
-
-    this.db.exec("BEGIN IMMEDIATE");
-    this.transactionDepth = 1;
-    try {
-      const result = fn();
-      this.db.exec("COMMIT");
-      return result;
-    } catch (err) {
-      this.db.exec("ROLLBACK");
-      throw err;
-    } finally {
-      this.transactionDepth = 0;
-    }
-  }
-}
-
-class FakeDurableObjectNamespace {
-  constructor(private readonly factory: (name: string) => { fetch(request: Request): Promise<Response> | Response }) {}
-
-  idFromName(name: string): { name: string } {
-    return { name };
-  }
-
-  get(id: { name: string }): { fetch(request: Request): Promise<Response> | Response } {
-    return this.factory(id.name);
-  }
+function sqlRows<T>(cursor: { toArray(): Record<string, unknown>[] }): T[] {
+  return cursor.toArray() as T[];
 }
 
 type Harness = {
@@ -292,6 +209,405 @@ class FakeHostBridge implements HostBridge {
 }
 
 describe("CFObjectRepository production-shape coverage", () => {
+  it("reserves the v2 session mint endpoint with shadow-local claims", async () => {
+    const directoryState = new FakeDurableObjectState("directory");
+    const gatewayState = new FakeDurableObjectState("world");
+    const directory = new DirectoryDO(directoryState as unknown as DurableObjectState, { WOO_INTERNAL_SECRET: "cf-test-secret" });
+    const env = {
+      WOO_INITIAL_WIZARD_TOKEN: "cf-v2-mint-token",
+      WOO_INTERNAL_SECRET: "cf-test-secret",
+      WOO_AUTO_INSTALL_CATALOGS: "",
+      DIRECTORY: new FakeDurableObjectNamespace((name) => {
+        if (name !== "directory") throw new Error(`unexpected Directory DO ${name}`);
+        return directory;
+      }),
+      WOO: new FakeDurableObjectNamespace((name) => {
+        throw new Error(`unexpected Woo DO ${name}`);
+      })
+    } as unknown as Env;
+    const gateway = new PersistentObjectDO(gatewayState as unknown as DurableObjectState, env);
+
+    try {
+      const response = await gateway.fetch(new Request("https://woo.test/v2/session/mint", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: "wizard:cf-v2-mint-token" })
+      }));
+
+      expect(response.status).toBe(200);
+      const body = await response.json() as { token: string; claims: Record<string, unknown> };
+      expect(body.token).toMatch(/^shadow-session:/);
+      expect(body.claims).toMatchObject({
+        actor: "$wiz",
+        deployment: "shadow-local",
+        rev: 1
+      });
+    } finally {
+      directoryState.close();
+      gatewayState.close();
+    }
+  });
+
+  it("rejects v2 WebSocket upgrades without the required subprotocol", async () => {
+    const directoryState = new FakeDurableObjectState("directory");
+    const gatewayState = new FakeDurableObjectState("world");
+    const directory = new DirectoryDO(directoryState as unknown as DurableObjectState, { WOO_INTERNAL_SECRET: "cf-test-secret" });
+    const env = {
+      WOO_INITIAL_WIZARD_TOKEN: "cf-v2-subprotocol-token",
+      WOO_INTERNAL_SECRET: "cf-test-secret",
+      WOO_AUTO_INSTALL_CATALOGS: "",
+      DIRECTORY: new FakeDurableObjectNamespace((name) => {
+        if (name !== "directory") throw new Error(`unexpected Directory DO ${name}`);
+        return directory;
+      }),
+      WOO: new FakeDurableObjectNamespace((name) => {
+        throw new Error(`unexpected Woo DO ${name}`);
+      })
+    } as unknown as Env;
+    const gateway = new PersistentObjectDO(gatewayState as unknown as DurableObjectState, env);
+
+    try {
+      const response = await gateway.fetch(new Request("https://woo.test/v2/turn-network/ws?token=wizard:cf-v2-subprotocol-token", {
+        headers: { upgrade: "websocket" }
+      }));
+
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toMatchObject({
+        error: { code: "E_PROTOCOL" }
+      });
+    } finally {
+      directoryState.close();
+      gatewayState.close();
+    }
+  });
+
+  it("accepts a v2 WebSocket upgrade and sends TransportHello first", async () => {
+    const directoryState = new FakeDurableObjectState("directory");
+    const gatewayState = new FakeDurableObjectState("world");
+    const commitStates = new Map<string, FakeDurableObjectState>();
+    const directory = new DirectoryDO(directoryState as unknown as DurableObjectState, { WOO_INTERNAL_SECRET: "cf-test-secret" });
+    const sent: string[] = [];
+    class FakeServerWebSocket {
+      attachment: unknown;
+      readonly sent = sent;
+
+      serializeAttachment(value: unknown): void {
+        this.attachment = value;
+      }
+
+      send(data: string): void {
+        this.sent.push(data);
+      }
+
+      close(): void {}
+    }
+    class FakeWebSocketPair {
+      readonly 0 = {} as WebSocket;
+      readonly 1 = new FakeServerWebSocket() as unknown as WebSocket;
+    }
+    class CloudflareUpgradeResponse {
+      readonly body: BodyInit | null;
+      readonly headers: Headers;
+      readonly status: number;
+      readonly statusText: string;
+      readonly webSocket?: WebSocket;
+
+      constructor(body: BodyInit | null = null, init: (ResponseInit & { webSocket?: WebSocket }) = {}) {
+        this.body = body;
+        this.headers = new Headers(init.headers);
+        this.status = init.status ?? 200;
+        this.statusText = init.statusText ?? "";
+        this.webSocket = init.webSocket;
+      }
+
+      get ok(): boolean {
+        return this.status >= 200 && this.status < 300;
+      }
+
+      async text(): Promise<string> {
+        if (typeof this.body === "string") return this.body;
+        if (this.body == null) return "";
+        if (this.body instanceof ArrayBuffer) return new TextDecoder().decode(this.body);
+        return String(this.body);
+      }
+
+      async json(): Promise<unknown> {
+        return JSON.parse(await this.text());
+      }
+    }
+    const previousPair = (globalThis as unknown as { WebSocketPair?: unknown }).WebSocketPair;
+    const previousResponse = globalThis.Response;
+    vi.stubGlobal("WebSocketPair", FakeWebSocketPair);
+    vi.stubGlobal("Response", CloudflareUpgradeResponse);
+    const env = {
+      WOO_INITIAL_WIZARD_TOKEN: "cf-v2-upgrade-token",
+      WOO_INTERNAL_SECRET: "cf-test-secret",
+      WOO_AUTO_INSTALL_CATALOGS: "",
+      DIRECTORY: new FakeDurableObjectNamespace((name) => {
+        if (name !== "directory") throw new Error(`unexpected Directory DO ${name}`);
+        return directory;
+      }),
+      WOO: new FakeDurableObjectNamespace((name) => {
+        throw new Error(`unexpected Woo DO ${name}`);
+      }),
+      COMMIT_SCOPE: new FakeDurableObjectNamespace((name) => {
+        let state = commitStates.get(name);
+        if (!state) {
+          state = new FakeDurableObjectState(name);
+          commitStates.set(name, state);
+        }
+        return new CommitScopeDO(state as unknown as DurableObjectState, { WOO_INTERNAL_SECRET: "cf-test-secret" });
+      })
+    } as unknown as Env;
+    const gateway = new PersistentObjectDO(gatewayState as unknown as DurableObjectState, env);
+
+    try {
+      const response = await gateway.fetch(new Request("https://woo.test/v2/turn-network/ws?token=wizard:cf-v2-upgrade-token&node=browser:upgrade-test", {
+        headers: {
+          upgrade: "websocket",
+          "sec-websocket-protocol": "woo-v2.turn-network.json"
+        }
+      }));
+
+      expect(response.status).toBe(101);
+      expect(response.headers.get("sec-websocket-protocol")).toBe("woo-v2.turn-network.json");
+      expect(gatewayState.acceptedWebSockets).toHaveLength(1);
+      expect(sent).toHaveLength(1);
+      expect(JSON.parse(sent[0])).toMatchObject({
+        type: "woo.transport.hello.v1",
+        to: "browser:upgrade-test",
+        body: { kind: "woo.transport.hello.v1", actor: "$wiz" }
+      });
+    } finally {
+      if (previousPair === undefined) {
+        Reflect.deleteProperty(globalThis as unknown as { WebSocketPair?: unknown }, "WebSocketPair");
+      } else {
+        vi.stubGlobal("WebSocketPair", previousPair);
+      }
+      vi.stubGlobal("Response", previousResponse);
+      directoryState.close();
+      gatewayState.close();
+      for (const state of commitStates.values()) state.close();
+    }
+  });
+
+  it("handles v2 turn requests through the Worker WebSocket message path", async () => {
+    const directoryState = new FakeDurableObjectState("directory");
+    const gatewayState = new FakeDurableObjectState("world");
+    const commitStates = new Map<string, FakeDurableObjectState>();
+    const envelopeBodies: Array<Record<string, unknown>> = [];
+    const directory = new DirectoryDO(directoryState as unknown as DurableObjectState, { WOO_INTERNAL_SECRET: "cf-test-secret" });
+    const env = {
+      WOO_INITIAL_WIZARD_TOKEN: "cf-v2-message-token",
+      WOO_INTERNAL_SECRET: "cf-test-secret",
+      WOO_AUTO_INSTALL_CATALOGS: "",
+      DIRECTORY: new FakeDurableObjectNamespace((name) => {
+        if (name !== "directory") throw new Error(`unexpected Directory DO ${name}`);
+        return directory;
+      }),
+      WOO: new FakeDurableObjectNamespace((name) => {
+        throw new Error(`unexpected Woo DO ${name}`);
+      }),
+      COMMIT_SCOPE: new FakeDurableObjectNamespace((name) => {
+        let state = commitStates.get(name);
+        if (!state) {
+          state = new FakeDurableObjectState(name);
+          commitStates.set(name, state);
+        }
+        const scope = new CommitScopeDO(state as unknown as DurableObjectState, { WOO_INTERNAL_SECRET: "cf-test-secret" });
+        return {
+          async fetch(request: Request): Promise<Response> {
+            if (new URL(request.url).pathname === "/v2/envelope") {
+              envelopeBodies.push(await request.clone().json() as Record<string, unknown>);
+            }
+            return await scope.fetch(request);
+          }
+        };
+      })
+    } as unknown as Env;
+    const gateway = new PersistentObjectDO(gatewayState as unknown as DurableObjectState, env);
+    const internals = gateway as unknown as {
+      webSocketV2TurnNetworkMessage: (world: WooWorld, ws: WebSocket, message: string | ArrayBuffer) => Promise<void>;
+    };
+    class FakeWebSocket {
+      readonly sent: string[] = [];
+      send(data: string): void { this.sent.push(data); }
+      close(): void {}
+      deserializeAttachment(): unknown {
+        return {
+          protocol: "v2-turn-network",
+          sessionId: session.id,
+          actor: session.actor,
+          socketId: "v2-message-socket",
+          node: "browser:worker-test",
+          scope: "#-1",
+          token: "guest:cf-v2-message"
+        };
+      }
+    }
+    let session: ReturnType<WooWorld["auth"]>;
+
+    try {
+      const world = createWorld();
+      session = world.auth("guest:cf-v2-message");
+      world.createObject({ id: "cf_v2_message_box", name: "Worker V2 Box", parent: "$thing", owner: session.actor });
+      world.defineProperty("cf_v2_message_box", { name: "value", defaultValue: 0, owner: session.actor, perms: "rw", typeHint: "int" });
+      expect(installVerb(world, "cf_v2_message_box", "set_value", `verb :set_value(value) rxd {
+        this.value = value;
+        return this.value;
+      }`, null).ok).toBe(true);
+      const relay = createShadowBrowserRelayShim({
+        node: "node:commit-scope:#-1",
+        scope: "#-1",
+        serialized: world.exportWorld()
+      });
+      const browser = createShadowBrowserNode({
+        node: "browser:worker-test",
+        scope: "#-1",
+        actor: session.actor,
+        session: session.id,
+        relay
+      });
+      setShadowBrowserSessionToken(browser, "guest:cf-v2-message");
+      await openShadowBrowserScope(browser, { preseed_catalog_pages: true });
+      const call: ShadowTurnCall = {
+        kind: "woo.turn_call.shadow.v1",
+        id: "cf-v2-message-value",
+        route: "direct",
+        scope: "#-1",
+        session: session.id,
+        actor: session.actor,
+        target: "cf_v2_message_box",
+        verb: "set_value",
+        args: [67]
+      };
+      const planned = await runShadowTurnCall(browser.relay.commit_scope.serialized, call);
+      const request = {
+        kind: "woo.turn.exec.request.shadow.v1" as const,
+        id: call.id,
+        call,
+        key: shadowTurnKeyFromTranscript(planned.transcript),
+        expected: browser.relay.commit_scope.head,
+        commit_policy: "execute_and_commit" as const
+      };
+      const encoded = encodeEnvelope(shadowBrowserEnvelope(browser, request.kind, request, "cf-v2-message-env"));
+      const ws = new FakeWebSocket();
+      const openRequest = await signInternalRequest(env, new Request("https://woo.internal/v2/open", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          scope: "#-1",
+          node: "browser:worker-test",
+          token: "guest:cf-v2-message",
+          session: session.id,
+          actor: session.actor,
+          sessions: world.exportSessions(),
+          serialized: world.exportWorld()
+        })
+      }));
+      const commitScope = env.COMMIT_SCOPE;
+      if (!commitScope) throw new Error("test env missing COMMIT_SCOPE");
+      const opened = await commitScope.get(commitScope.idFromName("#-1")).fetch(openRequest);
+      expect(opened.ok).toBe(true);
+
+      await internals.webSocketV2TurnNetworkMessage(world, ws as unknown as WebSocket, encoded);
+
+      const replies = ws.sent.map((frame) => JSON.parse(frame) as Record<string, any>);
+      expect(replies).toHaveLength(1);
+      expect(replies[0]).toMatchObject({ type: "woo.turn.exec.reply.shadow.v1", reply_to: "cf-v2-message-env" });
+      expect(replies[0].body).toMatchObject({ ok: true, id: "cf-v2-message-value" });
+      expect(replies[0].body.commit.serialized_after).toBeUndefined();
+      expect(envelopeBodies[0]?.sessions).toEqual(expect.arrayContaining([expect.objectContaining({ id: session.id, actor: session.actor })]));
+      expect(envelopeBodies[0]).not.toHaveProperty("serialized");
+      const scopeState = commitStates.get("#-1");
+      expect(scopeState).toBeDefined();
+      expect(sqlRows(scopeState!.storage.sql.exec("SELECT scope FROM v2_commit_scope_meta"))).toEqual([{ scope: "#-1" }]);
+      expect(sqlRows(scopeState!.storage.sql.exec("SELECT seq FROM v2_commit_scope_accepted_frame"))).toEqual([{ seq: 1 }]);
+      const acceptedRows = sqlRows<{ body: string }>(scopeState!.storage.sql.exec("SELECT body FROM v2_commit_scope_accepted_frame"));
+      expect(JSON.parse(acceptedRows[0].body)).not.toHaveProperty("serialized_after");
+      expect(sqlRows(scopeState!.storage.sql.exec("SELECT COUNT(*) AS n FROM v2_commit_scope_transcript_tail"))[0]).toMatchObject({ n: 1 });
+      expect(sqlRows(scopeState!.storage.sql.exec("SELECT COUNT(*) AS n FROM v2_commit_scope_reply"))[0]).toMatchObject({ n: 1 });
+      expect(sqlRows(scopeState!.storage.sql.exec("SELECT COUNT(*) AS n FROM v2_commit_scope_snapshot"))[0]).toMatchObject({ n: 0 });
+
+      const writesBeforeReplay = scopeState!.storage.sql.execLog.filter((entry) => /^(INSERT|DELETE|UPDATE)\b/i.test(entry.query.trim())).length;
+      await internals.webSocketV2TurnNetworkMessage(world, ws as unknown as WebSocket, encoded);
+      const replayed = ws.sent.map((frame) => JSON.parse(frame) as Record<string, any>);
+      expect(replayed).toHaveLength(2);
+      expect(replayed[1].body).toEqual(replayed[0].body);
+      const writesAfterReplay = scopeState!.storage.sql.execLog.filter((entry) => /^(INSERT|DELETE|UPDATE)\b/i.test(entry.query.trim())).length;
+      expect(writesAfterReplay).toBe(writesBeforeReplay);
+    } finally {
+      directoryState.close();
+      gatewayState.close();
+      for (const state of commitStates.values()) state.close();
+    }
+  });
+
+  it("reports malformed v2 envelopes through the CommitScopeDO path", async () => {
+    const directoryState = new FakeDurableObjectState("directory");
+    const gatewayState = new FakeDurableObjectState("world");
+    const commitStates = new Map<string, FakeDurableObjectState>();
+    const directory = new DirectoryDO(directoryState as unknown as DurableObjectState, { WOO_INTERNAL_SECRET: "cf-test-secret" });
+    const env = {
+      WOO_INITIAL_WIZARD_TOKEN: "cf-v2-reset-token",
+      WOO_INTERNAL_SECRET: "cf-test-secret",
+      WOO_AUTO_INSTALL_CATALOGS: "",
+      DIRECTORY: new FakeDurableObjectNamespace((name) => {
+        if (name !== "directory") throw new Error(`unexpected Directory DO ${name}`);
+        return directory;
+      }),
+      WOO: new FakeDurableObjectNamespace((name) => {
+        throw new Error(`unexpected Woo DO ${name}`);
+      }),
+      COMMIT_SCOPE: new FakeDurableObjectNamespace((name) => {
+        let state = commitStates.get(name);
+        if (!state) {
+          state = new FakeDurableObjectState(name);
+          commitStates.set(name, state);
+        }
+        return new CommitScopeDO(state as unknown as DurableObjectState, { WOO_INTERNAL_SECRET: "cf-test-secret" });
+      })
+    } as unknown as Env;
+    const gateway = new PersistentObjectDO(gatewayState as unknown as DurableObjectState, env);
+    const internals = gateway as unknown as {
+      getWorld: (host?: string) => Promise<WooWorld>;
+      webSocketV2TurnNetworkMessage: (world: WooWorld, ws: WebSocket, message: string | ArrayBuffer) => Promise<void>;
+    };
+    class FakeWebSocket {
+      readonly sent: string[] = [];
+      send(data: string): void { this.sent.push(data); }
+      close(): void {}
+      deserializeAttachment(): unknown {
+        return {
+          protocol: "v2-turn-network",
+          sessionId: session.id,
+          actor: session.actor,
+          socketId: "v2-reset-socket",
+          node: "browser:reset-test",
+          token: "guest:cf-v2-reset"
+        };
+      }
+    }
+    let session: ReturnType<WooWorld["auth"]>;
+
+    try {
+      const world = await internals.getWorld("world");
+      session = world.auth("guest:cf-v2-reset");
+      const ws = new FakeWebSocket();
+      await internals.webSocketV2TurnNetworkMessage(world, ws as unknown as WebSocket, "{}");
+
+      expect(ws.sent).toHaveLength(1);
+      expect(JSON.parse(ws.sent[0])).toMatchObject({
+        type: "woo.transport.error.v1",
+        body: { code: "E_PROTOCOL" }
+      });
+    } finally {
+      directoryState.close();
+      gatewayState.close();
+      for (const state of commitStates.values()) state.close();
+    }
+  });
+
   it("emits startup storage metrics before world init completes", async () => {
     const logs: string[] = [];
     const logSpy = vi.spyOn(console, "log").mockImplementation((...args) => {

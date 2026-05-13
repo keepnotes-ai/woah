@@ -29,6 +29,9 @@ import { installCatalogManifest, updateCatalogManifest, type CatalogManifest, ty
 import { normalizeVerbPerms } from "./verb-perms";
 import { analyzeBytecodePurity, combineVerbPurity, compileVerb, propagateVerbPurity } from "./authoring";
 import { hashSource, randomHex, constantTimeEqual } from "./source-hash";
+import { shadowOwnerCellVersion, shadowStructuralCellVersion, type ShadowStructuralCellKind } from "./shadow-cell-version";
+import { objectCreateEvent, type ActiveTurnRecorder, type RecordedWriteAuthority, type TurnRecorder, type TurnRecorderEvent, type TurnStart } from "./turn-recorder";
+import { remoteBridgeUntrackedEffect } from "./remote-bridge-transcript-policy";
 
 export type NativeHandler = (ctx: CallContext, args: WooValue[]) => WooValue | Promise<WooValue>;
 const GUEST_SESSION_GRACE_MS = 60_000;
@@ -185,10 +188,14 @@ export type HostOperationMemo = {
   // Read promises are scoped to one execution frame. Remote write bridges must
   // invalidate the matching key so read-after-write observes the new value.
   reads: Map<string, Promise<unknown>>;
+  // v2 shadow turn recorder. This travels with a call context so future
+  // distributed executors can keep recording explicit without relying on global
+  // world state.
+  turnRecorder?: ActiveTurnRecorder | null;
 };
 
-export function createHostOperationMemo(): HostOperationMemo {
-  return { routes: new Map(), reads: new Map() };
+export function createHostOperationMemo(turnRecorder?: ActiveTurnRecorder | null): HostOperationMemo {
+  return { routes: new Map(), reads: new Map(), turnRecorder };
 }
 
 export type MoveObjectResult = {
@@ -410,10 +417,160 @@ export class WooWorld {
   private presenceIndexBuilt = false;
   private lastSubscriberScrubAt = new Map<ObjRef, number>();
 
-  constructor(private repository?: WooRepository, options: { hostBridge?: HostBridge | null } = {}) {
+  private turnRecorder: TurnRecorder | null;
+  private activeTurnRecorder: ActiveTurnRecorder | null = null;
+  private currentTurnWriter: RecordedWriteAuthority | null = null;
+  private logicalInputReplay: Map<string, WooValue[]> | null = null;
+
+  constructor(private repository?: WooRepository, options: { hostBridge?: HostBridge | null; turnRecorder?: TurnRecorder | null } = {}) {
     this.objectRepository = isObjectRepository(repository) ? repository : null;
     this.hostBridge = options.hostBridge ?? null;
+    this.turnRecorder = options.turnRecorder ?? null;
     this.registerNativeHandlers();
+  }
+
+  setTurnRecorder(recorder: TurnRecorder | null): void {
+    this.turnRecorder = recorder;
+  }
+
+  private async withTurnRecording<T>(turn: TurnStart, fn: (active: ActiveTurnRecorder) => Promise<T>): Promise<T> {
+    const recorder = this.turnRecorder;
+    if (!recorder) {
+      return await fn(this.activeTurnRecorder ?? { event: () => undefined });
+    }
+    const previous = this.activeTurnRecorder;
+    const previousWriter = this.currentTurnWriter;
+    const active = recorder.startTurn(turn);
+    this.activeTurnRecorder = active;
+    this.currentTurnWriter = null;
+    try {
+      const result = await fn(active);
+      active.event({ kind: "turn_finish", ok: true, result: result as WooValue });
+      return result;
+    } catch (err) {
+      active.event({ kind: "turn_finish", ok: false, error: normalizeError(err) });
+      throw err;
+    } finally {
+      this.activeTurnRecorder = previous;
+      this.currentTurnWriter = previousWriter;
+    }
+  }
+
+  // Called by the VM whenever execution changes frames. The recorder annotates
+  // subsequent mutations with this frame until dispatch/VM unwinds.
+  setTurnRecorderFrame(ctx: CallContext): void {
+    if (!this.activeTurnRecorder) return;
+    this.currentTurnWriter = this.turnWriterFromContext(ctx);
+  }
+
+  private async withTurnRecorderFrame<T>(ctx: CallContext, fn: () => Promise<T>): Promise<T> {
+    const previous = this.currentTurnWriter;
+    this.setTurnRecorderFrame(ctx);
+    try {
+      return await fn();
+    } finally {
+      this.currentTurnWriter = previous;
+    }
+  }
+
+  private turnWriterFromContext(ctx: CallContext): RecordedWriteAuthority {
+    return {
+      progr: ctx.progr,
+      thisObj: ctx.thisObj,
+      verb: ctx.verbName,
+      definer: ctx.definer,
+      caller: ctx.caller,
+      callerPerms: ctx.callerPerms
+    };
+  }
+
+  private recordTurnEvent(event: TurnRecorderEvent): void {
+    this.activeTurnRecorder?.event(this.recordedEventWithWriter(event));
+  }
+
+  // Local bytecode-to-bytecode calls bypass dispatch(), so the VM uses this
+  // hook to keep verb metadata reads complete for transcript validation.
+  recordTurnDispatch(target: ObjRef, verbName: string, startAt: ObjRef | null | undefined, definer: ObjRef, verb: VerbDef): void {
+    this.recordTurnEvent({
+      kind: "dispatch",
+      target,
+      verb: verbName,
+      startAt,
+      definer,
+      implementation: verb.kind,
+      owner: verb.owner,
+      version: verb.version,
+      source_hash: verb.source_hash,
+      direct_callable: verb.direct_callable,
+      ...(verb.kind === "native" ? { native: verb.native } : {})
+    });
+  }
+
+  private recordedEventWithWriter(event: TurnRecorderEvent): TurnRecorderEvent {
+    if (!this.currentTurnWriter) return event;
+    switch (event.kind) {
+      case "cell_write":
+      case "prop_write":
+      case "object_create":
+      case "object_move":
+        return event.writer ? event : { ...event, writer: this.currentTurnWriter };
+      default:
+        return event;
+    }
+  }
+
+  private propertyVersionForRecording(objRef: ObjRef, name: string): number | string | undefined {
+    const obj = this.objects.get(objRef);
+    if (!obj) return undefined;
+    if (name === "owner") return shadowOwnerCellVersion(objRef, obj.owner);
+    return obj.propertyVersions.get(name) ?? 0;
+  }
+
+  private structuralVersionForRecording(kind: ShadowStructuralCellKind, objRef: ObjRef): string | undefined {
+    const obj = this.objects.get(objRef);
+    return obj ? shadowStructuralCellVersion(kind, obj) : undefined;
+  }
+
+  private recordUntrackedEffect(name: string, detail?: Record<string, WooValue>): void {
+    this.recordTurnEvent({
+      kind: "untracked_effect",
+      name,
+      ...(detail ? { detail } : {})
+    });
+  }
+
+  setLogicalInputsForReplay(inputs: Array<{ name: string; value: WooValue }>): void {
+    const queued = new Map<string, WooValue[]>();
+    for (const input of inputs) {
+      const list = queued.get(input.name) ?? [];
+      list.push(cloneValue(input.value));
+      queued.set(input.name, list);
+    }
+    this.logicalInputReplay = queued;
+  }
+
+  private takeReplayLogicalInput(name: string): WooValue | undefined {
+    const queued = this.logicalInputReplay?.get(name);
+    if (!queued || queued.length === 0) return undefined;
+    const value = queued.shift();
+    if (queued.length === 0) this.logicalInputReplay?.delete(name);
+    return value;
+  }
+
+  logicalNow(name = "now"): number {
+    const replayed = this.takeReplayLogicalInput(name);
+    const value = typeof replayed === "number" ? replayed : Date.now();
+    this.recordTurnEvent({ kind: "logical_input", name, value });
+    return value;
+  }
+
+  logicalRandomInt(n: number, name = "random"): number {
+    const replayed = this.takeReplayLogicalInput(name);
+    const value = typeof replayed === "number" && Number.isInteger(replayed) && replayed >= 0 && replayed < n
+      ? replayed
+      : Math.floor(Math.random() * n);
+    this.recordTurnEvent({ kind: "logical_input", name, value });
+    return value;
   }
 
   enableIncrementalPersistence(): void {
@@ -559,6 +716,7 @@ export class WooWorld {
     if (obj.parent) this.persistObject(obj.parent);
     if (obj.location) this.persistObject(obj.location);
     this.persist();
+    this.recordTurnEvent(objectCreateEvent(obj));
     return obj;
   }
 
@@ -763,15 +921,40 @@ export class WooWorld {
     this.assertOrdinaryPropertyName(name);
     const obj = this.object(objRef);
     const before = obj.properties.get(name);
+    const hadValue = obj.properties.has(name);
+    const beforeVersion = this.propertyVersionForRecording(objRef, name);
     if (obj.properties.has(name) && valuesEqual(before as WooValue, value)) {
+      this.recordTurnEvent({
+        kind: "prop_write",
+        object: objRef,
+        name,
+        hadValue,
+        before: cloneValue(before as WooValue),
+        after: cloneValue(value),
+        changed: false,
+        beforeVersion,
+        afterVersion: beforeVersion
+      });
       return false;
     }
     obj.properties.set(name, cloneValue(value));
     obj.propertyVersions.set(name, (obj.propertyVersions.get(name) ?? 0) + 1);
+    const afterVersion = this.propertyVersionForRecording(objRef, name);
     obj.modified = Date.now();
     if (name === "subscribers" || name === "session_subscribers") {
       this.invalidatePresenceIndex();
     }
+    this.recordTurnEvent({
+      kind: "prop_write",
+      object: objRef,
+      name,
+      hadValue,
+      ...(hadValue ? { before: cloneValue(before as WooValue) } : {}),
+      after: cloneValue(value),
+      changed: true,
+      beforeVersion,
+      afterVersion
+    });
     return true;
   }
 
@@ -854,8 +1037,15 @@ export class WooWorld {
 
   getProp(objRef: ObjRef, name: string): WooValue {
     const obj = this.object(objRef);
-    if (name === "owner") return obj.owner;
-    if (obj.properties.has(name)) return cloneValue(obj.properties.get(name)!);
+    if (name === "owner") {
+      this.recordTurnEvent({ kind: "prop_read", object: objRef, name, value: obj.owner, version: this.propertyVersionForRecording(objRef, name) });
+      return obj.owner;
+    }
+    if (obj.properties.has(name)) {
+      const value = cloneValue(obj.properties.get(name)!);
+      this.recordTurnEvent({ kind: "prop_read", object: objRef, name, value, version: this.propertyVersionForRecording(objRef, name) });
+      return value;
+    }
     // The `name` attribute is the substrate's authoritative display label
     // (see createObject, examine output, objectDisplayNameAsync). When no
     // explicit property has been set, surface the attribute to woocode
@@ -864,13 +1054,20 @@ export class WooWorld {
     // attribute, not a property value. createAuthoredObject mirrors them
     // intentionally for builder-created objects; this fallback covers the
     // bootstrap path that doesn't.
-    if (name === "name") return obj.name;
+    if (name === "name") {
+      this.recordTurnEvent({ kind: "prop_read", object: objRef, name, value: obj.name, version: this.propertyVersionForRecording(objRef, name) });
+      return obj.name;
+    }
     let parent = obj.parent;
     while (parent) {
       const ancestor = this.parentWalkLookup(objRef, parent);
       if (!ancestor) break;
       const def = ancestor.propertyDefs.get(name);
-      if (def) return cloneValue(def.defaultValue);
+      if (def) {
+        const value = cloneValue(def.defaultValue);
+        this.recordTurnEvent({ kind: "prop_read", object: objRef, name, value, version: this.propertyVersionForRecording(objRef, name) });
+        return value;
+      }
       parent = ancestor.parent;
     }
     throw wooError("E_PROPNF", `property not found: ${name}`, name);
@@ -1108,6 +1305,8 @@ export class WooWorld {
   async getPropChecked(progr: ObjRef, objRef: ObjRef, name: string, memo?: HostOperationMemo): Promise<WooValue> {
     if (await this.remoteHostForObject(objRef, memo)) {
       if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+      const effect = remoteBridgeUntrackedEffect("get_prop", { progr, object: objRef, property: name });
+      this.recordUntrackedEffect(effect.name, effect.detail);
       return await this.hostBridge.getPropChecked(progr, objRef, name, memo);
     }
     if (!this.canReadProperty(progr, objRef, name)) {
@@ -1128,6 +1327,8 @@ export class WooWorld {
   async setPropChecked(progr: ObjRef, objRef: ObjRef, name: string, value: WooValue, memo?: HostOperationMemo): Promise<void> {
     if (await this.remoteHostForObject(objRef, memo)) {
       if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+      const effect = remoteBridgeUntrackedEffect("set_prop", { progr, object: objRef, property: name });
+      this.recordUntrackedEffect(effect.name, effect.detail);
       await this.hostBridge.setPropChecked(progr, objRef, name, value, memo);
       return;
     }
@@ -2465,7 +2666,9 @@ export class WooWorld {
         observations,
         hostMemo,
         observe: (event) => {
-          observations.push({ ...event, source: event.source ?? space });
+          const observation = { ...event, source: event.source ?? space };
+          this.recordTurnEvent({ kind: "observe", observation });
+          observations.push(observation);
         }
       };
       const result = await this.planCommandForSpace(ctx, text, space) as WooValue;
@@ -2539,32 +2742,41 @@ export class WooWorld {
         hostMemo,
         onSessionsEnded: options.onSessionsEnded,
         observe: (event) => {
-          observations.push({ ...event, source: event.source ?? target });
+          const observation = { ...event, source: event.source ?? target };
+          this.recordTurnEvent({ kind: "observe", observation });
+          observations.push(observation);
         },
         deferHostEffect: options.deferHostEffect ? (effect) => deferredHostEffects.push(effect) : undefined
       };
-      await this.withPersistencePaused(async () => {
-        const before = this.snapshotProps();
-        const beforePlacement = this.snapshotPlacement();
-        const beforeParkedTasks = new Map(this.parkedTasks);
-        const beforeParkedTaskCounter = this.parkedTaskCounter;
-        const beforeObjectCount = this.objects.size;
-        try {
-          result = await this.dispatch(dispatchCtx, target, verbName, args);
-          mutated =
-            beforeObjectCount !== this.objects.size ||
-            this.propsChanged(before) ||
-            this.placementChanged(beforePlacement) ||
-            beforeParkedTasks.size !== this.parkedTasks.size ||
-            beforeParkedTaskCounter !== this.parkedTaskCounter;
-        } catch (err) {
-          this.restoreProps(before);
-          this.restorePlacement(beforePlacement);
-          this.parkedTasks = new Map(beforeParkedTasks);
-          this.parkedTaskCounter = beforeParkedTaskCounter;
-          throw err;
+      await this.withTurnRecording(
+        { id: frameId, route: "direct", scope: audience ?? "#-1", seq: -1, session: sessionId, actor, target, verb: verbName, args },
+        async (activeRecorder) => {
+          hostMemo.turnRecorder = activeRecorder;
+          await this.withPersistencePaused(async () => {
+            const before = this.snapshotProps();
+            const beforePlacement = this.snapshotPlacement();
+            const beforeParkedTasks = new Map(this.parkedTasks);
+            const beforeParkedTaskCounter = this.parkedTaskCounter;
+            const beforeObjectCount = this.objects.size;
+            try {
+              result = await this.dispatch(dispatchCtx, target, verbName, args);
+              mutated =
+                beforeObjectCount !== this.objects.size ||
+                this.propsChanged(before) ||
+                this.placementChanged(beforePlacement) ||
+                beforeParkedTasks.size !== this.parkedTasks.size ||
+                beforeParkedTaskCounter !== this.parkedTaskCounter;
+            } catch (err) {
+              this.restoreProps(before);
+              this.restorePlacement(beforePlacement);
+              this.parkedTasks = new Map(beforeParkedTasks);
+              this.parkedTaskCounter = beforeParkedTaskCounter;
+              throw err;
+            }
+          });
+          return result;
         }
-      });
+      );
       if (mutated || this.persistenceDirty) this.persist(true);
       if (options.deferHostEffect) {
         for (const effect of deferredHostEffects) options.deferHostEffect(effect);
@@ -2669,15 +2881,24 @@ export class WooWorld {
         observations,
         hostMemo: createHostOperationMemo(),
         observe: (event) => {
-          observations.push({ ...event, source: event.source ?? space.id });
+          const observation = { ...event, source: event.source ?? space.id };
+          this.recordTurnEvent({ kind: "observe", observation });
+          observations.push(observation);
         }
       };
 
       try {
-        await this.withBehaviorSavepoint(async () => {
-          result = await this.dispatch(ctx, message.target, message.verb, message.args);
-          result = await this.enrichScopedMoveResult(ctx, result);
-        });
+        await this.withTurnRecording(
+          { id, route: "sequenced", scope: spaceRef, seq, session: sessionId, actor: message.actor, target: message.target, verb: message.verb, args: message.args },
+          async (activeRecorder) => {
+            if (ctx.hostMemo) ctx.hostMemo.turnRecorder = activeRecorder;
+            await this.withBehaviorSavepoint(async () => {
+              result = await this.dispatch(ctx, message.target, message.verb, message.args);
+              result = await this.enrichScopedMoveResult(ctx, result);
+            });
+            return result ?? null;
+          }
+        );
         logEntry.applied_ok = true;
       } catch (err) {
         if (isVmSuspendSignal(err)) {
@@ -2755,15 +2976,24 @@ export class WooWorld {
           observations,
           hostMemo: createHostOperationMemo(),
           observe: (event) => {
-            observations.push({ ...event, source: event.source ?? space.id });
+            const observation = { ...event, source: event.source ?? space.id };
+            this.recordTurnEvent({ kind: "observe", observation });
+            observations.push(observation);
           }
         };
 
         try {
-          await this.withBehaviorSavepoint(async () => {
-            result = await this.dispatch(ctx, message.target, message.verb, message.args);
-            result = await this.enrichScopedMoveResult(ctx, result);
-          });
+          await this.withTurnRecording(
+            { id, route: "sequenced", scope: spaceRef, seq, session: sessionId, actor: message.actor, target: message.target, verb: message.verb, args: message.args },
+            async (activeRecorder) => {
+              if (ctx.hostMemo) ctx.hostMemo.turnRecorder = activeRecorder;
+              await this.withBehaviorSavepoint(async () => {
+                result = await this.dispatch(ctx, message.target, message.verb, message.args);
+                result = await this.enrichScopedMoveResult(ctx, result);
+              });
+              return result ?? null;
+            }
+          );
           logEntry.applied_ok = true;
         } catch (err) {
           if (isVmSuspendSignal(err)) {
@@ -2832,6 +3062,8 @@ export class WooWorld {
     let result: WooValue;
     if (await this.remoteHostForObject(target, ctx.hostMemo) || (startAt ? await this.remoteHostForObject(startAt, ctx.hostMemo) : false)) {
       if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+      const effect = remoteBridgeUntrackedEffect("dispatch", { target, verb: verbName, start_at: startAt ?? null });
+      this.recordUntrackedEffect(effect.name, effect.detail);
       result = await this.hostBridge.dispatch(ctx, target, verbName, args, startAt);
     } else {
       if (this.callDepth >= MAX_CALL_DEPTH) throw wooError("E_CALL_DEPTH", "maximum verb call depth exceeded");
@@ -2842,6 +3074,7 @@ export class WooWorld {
         // as "no parent override" and fall back to the standard resolveVerb walk.
         const { definer, verb } = startAt == null ? this.resolveVerb(target, verbName) : this.resolveVerbFrom(startAt, verbName);
         this.assertCanExecuteVerb(ctx.progr, target, verbName, verb);
+        this.recordTurnDispatch(target, verbName, startAt, definer, verb);
         const runCtx: CallContext = {
           ...ctx,
           thisObj: target,
@@ -2858,9 +3091,9 @@ export class WooWorld {
           // permissions and set progr/definer/caller frame fields.
           const handler = this.nativeHandlers.get(verb.native);
           if (!handler) throw wooError("E_VERBNF", `native handler not found: ${verb.native}`);
-          result = await handler(runCtx, args);
+          result = await this.withTurnRecorderFrame(runCtx, async () => await handler(runCtx, args));
         } else {
-          result = await runTinyVm(runCtx, verb.bytecode, args);
+          result = await this.withTurnRecorderFrame(runCtx, async () => await runTinyVm(runCtx, verb.bytecode, args));
         }
       } finally {
         this.callDepth -= 1;
@@ -4572,13 +4805,23 @@ export class WooWorld {
   async moveObjectChecked(objRef: ObjRef, targetRef: ObjRef, options: { suppressMirrorHost?: string | null } = {}): Promise<MoveObjectResult> {
     if (await this.remoteHostForObject(objRef)) {
       if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+      const effect = remoteBridgeUntrackedEffect("move", { object: objRef, target: targetRef });
+      this.recordUntrackedEffect(effect.name, effect.detail);
       return await this.hostBridge.moveObject(objRef, targetRef, options);
     }
     return await this.moveObjectOwned(objRef, targetRef, options);
   }
 
   contentsOf(objRef: ObjRef): ObjRef[] {
-    return Array.from(this.object(objRef).contents);
+    const obj = this.object(objRef);
+    const value = Array.from(obj.contents);
+    this.recordTurnEvent({
+      kind: "cell_read",
+      cell: { kind: "contents", object: objRef },
+      version: this.structuralVersionForRecording("contents", objRef),
+      value
+    });
+    return value;
   }
 
   /**
@@ -4591,9 +4834,17 @@ export class WooWorld {
    */
   mirrorContents(containerRef: ObjRef, objRef: ObjRef, present: boolean): void {
     const container = this.object(containerRef);
+    const prior = this.structuralVersionForRecording("contents", containerRef);
     if (present) container.contents.add(objRef);
     else container.contents.delete(objRef);
     container.modified = Date.now();
+    this.recordTurnEvent({
+      kind: "cell_write",
+      cell: { kind: "contents", object: containerRef },
+      value: Array.from(container.contents),
+      op: present ? "add" : "remove",
+      prior
+    });
     this.persistObject(containerRef);
     this.persist();
   }
@@ -4605,15 +4856,31 @@ export class WooWorld {
     // hot, maintain a local contents reverse index instead.
     for (const obj of this.objects.values()) {
       if (!obj.contents.delete(objRef)) continue;
+      const prior = this.structuralVersionForRecording("contents", obj.id);
       obj.modified = Date.now();
+      this.recordTurnEvent({
+        kind: "cell_write",
+        cell: { kind: "contents", object: obj.id },
+        value: Array.from(obj.contents),
+        op: "remove",
+        prior
+      });
       this.persistObject(obj.id);
       changed = true;
     }
     if (this.objects.has(targetRef)) {
       const target = this.object(targetRef);
       if (!target.contents.has(objRef)) {
+        const prior = this.structuralVersionForRecording("contents", targetRef);
         target.contents.add(objRef);
         target.modified = Date.now();
+        this.recordTurnEvent({
+          kind: "cell_write",
+          cell: { kind: "contents", object: targetRef },
+          value: Array.from(target.contents),
+          op: "add",
+          prior
+        });
         this.persistObject(targetRef);
         changed = true;
       }
@@ -4654,8 +4921,19 @@ export class WooWorld {
 
   async objectLocationChecked(objRef: ObjRef, memo?: HostOperationMemo): Promise<ObjRef | null> {
     const remote = await this.remoteHostForObject(objRef, memo);
-    if (!remote) return this.object(objRef).location;
+    if (!remote) {
+      const obj = this.object(objRef);
+      this.recordTurnEvent({
+        kind: "cell_read",
+        cell: { kind: "location", object: objRef },
+        version: this.structuralVersionForRecording("location", objRef),
+        value: obj.location
+      });
+      return obj.location;
+    }
     if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+    const effect = remoteBridgeUntrackedEffect("location", { object: objRef });
+    this.recordUntrackedEffect(effect.name, effect.detail);
     return await this.hostBridge.location(objRef, memo);
   }
 
@@ -4686,7 +4964,7 @@ export class WooWorld {
       actor: ctx.actor,
       text,
       body: text,
-      ts: Date.now()
+      ts: this.logicalNow("tell.ts")
     });
   }
 
@@ -5162,6 +5440,13 @@ export class WooWorld {
       parkedTasks: Array.from(this.parkedTasks.values()).map((task) => cloneValue(task as unknown as WooValue) as unknown as ParkedTaskRecord),
       tombstones: Array.from(this.tombstones).sort()
     };
+  }
+
+  exportSessions(): SerializedSession[] {
+    // Transport relays need fresh session claims for auth/revocation checks, but
+    // not a full world snapshot. Keep this narrow so hot-path gateways do not
+    // serialize object/log state just to refresh bearer-token authority.
+    return Array.from(this.sessions.values()).map((session) => this.serializeSession(session));
   }
 
   /**
@@ -6192,13 +6477,47 @@ export class WooWorld {
     const obj = this.object(objRef);
     this.object(targetRef);
     const oldLocation = obj.location;
-    if (oldLocation && this.objects.has(oldLocation)) this.object(oldLocation).contents.delete(objRef);
+    const locationPrior = this.structuralVersionForRecording("location", objRef);
+    let oldContentsPrior: string | undefined;
+    if (oldLocation && this.objects.has(oldLocation)) {
+      const oldContainer = this.object(oldLocation);
+      oldContentsPrior = this.structuralVersionForRecording("contents", oldLocation);
+      oldContainer.contents.delete(objRef);
+      oldContainer.modified = Date.now();
+    }
     obj.location = targetRef;
-    this.object(targetRef).contents.add(objRef);
+    const target = this.object(targetRef);
+    const targetContentsPrior = this.structuralVersionForRecording("contents", targetRef);
+    target.contents.add(objRef);
+    target.modified = Date.now();
     obj.modified = Date.now();
     this.persistObject(objRef);
     if (oldLocation) this.persistObject(oldLocation);
     this.persistObject(targetRef);
+    this.recordTurnEvent({ kind: "object_move", object: objRef, from: oldLocation, to: targetRef });
+    this.recordTurnEvent({
+      kind: "cell_write",
+      cell: { kind: "location", object: objRef },
+      value: targetRef,
+      op: "move",
+      prior: locationPrior
+    });
+    if (oldLocation && oldContentsPrior !== undefined) {
+      this.recordTurnEvent({
+        kind: "cell_write",
+        cell: { kind: "contents", object: oldLocation },
+        value: Array.from(this.object(oldLocation).contents),
+        op: "remove",
+        prior: oldContentsPrior
+      });
+    }
+    this.recordTurnEvent({
+      kind: "cell_write",
+      cell: { kind: "contents", object: targetRef },
+      value: Array.from(target.contents),
+      op: "add",
+      prior: targetContentsPrior
+    });
   }
 
   private async moveObjectOwned(objRef: ObjRef, targetRef: ObjRef, options: { suppressMirrorHost?: string | null } = {}): Promise<MoveObjectResult> {
@@ -6206,11 +6525,20 @@ export class WooWorld {
     const targetRemote = await this.remoteHostForObject(targetRef);
     if (!targetRemote) this.object(targetRef);
     const oldLocation = obj.location;
+    const locationPrior = this.structuralVersionForRecording("location", objRef);
     obj.location = targetRef;
     obj.modified = Date.now();
     this.persistObject(objRef);
     if (oldLocation && oldLocation !== targetRef) await this.mirrorContainerContents(oldLocation, objRef, false, options);
     await this.mirrorContainerContents(targetRef, objRef, true, options);
+    this.recordTurnEvent({ kind: "object_move", object: objRef, from: oldLocation, to: targetRef });
+    this.recordTurnEvent({
+      kind: "cell_write",
+      cell: { kind: "location", object: objRef },
+      value: targetRef,
+      op: "move",
+      prior: locationPrior
+    });
     return { oldLocation, location: targetRef };
   }
 
@@ -6224,6 +6552,8 @@ export class WooWorld {
     if (remote) {
       if (options.suppressMirrorHost && remote === options.suppressMirrorHost) return;
       if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+      const effect = remoteBridgeUntrackedEffect("mirror_contents", { container: containerRef, object: objRef, present });
+      this.recordUntrackedEffect(effect.name, effect.detail);
       await this.hostBridge.mirrorContents(containerRef, objRef, present);
       return;
     }
@@ -6764,7 +7094,9 @@ export class WooWorld {
         observations,
         hostMemo: createHostOperationMemo(),
         observe: (event) => {
-          observations.push({ ...event, source: event.source ?? hostSpace });
+          const observation = { ...event, source: event.source ?? hostSpace };
+          this.recordTurnEvent({ kind: "observe", observation });
+          observations.push(observation);
         }
       };
 
@@ -7005,7 +7337,9 @@ export class WooWorld {
       message,
       observations,
       observe: (event) => {
-        observations.push({ ...event, source: event.source ?? space });
+        const observation = { ...event, source: event.source ?? space };
+        this.recordTurnEvent({ kind: "observe", observation });
+        observations.push(observation);
       }
     };
   }
@@ -7676,9 +8010,11 @@ export class WooWorld {
   private async objectContents(objRef: ObjRef, memo?: HostOperationMemo): Promise<ObjRef[]> {
     if (await this.remoteHostForObject(objRef, memo)) {
       if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+      const effect = remoteBridgeUntrackedEffect("contents", { object: objRef });
+      this.recordUntrackedEffect(effect.name, effect.detail);
       return await this.hostBridge.contents(objRef, memo);
     }
-    return Array.from(this.object(objRef).contents);
+    return this.contentsOf(objRef);
   }
 
   private isActorForLook(item: ObjRef, present: ObjRef[]): boolean {
@@ -8679,8 +9015,8 @@ export class WooWorld {
       return { id, names, aliases };
     }
     if (!this.objects.has(id)) return { id, names, aliases };
-    const obj = this.object(id);
-    names.push(obj.name);
+    const name = this.getProp(id, "name");
+    if (typeof name === "string") names.push(name);
     const [title] = await Promise.all([
       this.titleForLook(ctx, ctx.thisObj, id).catch(() => null),
       this.addCatalogMatchNames(ctx, id, names)

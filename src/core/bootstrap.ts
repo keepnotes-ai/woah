@@ -223,7 +223,11 @@ export function createWorld(options: { repository?: WorldRepository & Partial<Ob
       world.discardPendingPersistence();
     }
   } else {
-    world.withPersistencePaused(() => bootstrap(world, { catalogs: options.catalogs }));
+    // Fresh repository-backed worlds should start from the same deterministic
+    // boot snapshot as in-memory worlds. Reusing the cached snapshot avoids
+    // recompiling/reinstalling bundled catalogs for every empty test or cold
+    // repository while preserving the persisted first-save shape.
+    world.importWorld(cloneSerializedWorld(cachedBootSnapshot(options.catalogs)));
     world.persist();
   }
   world.enableIncrementalPersistence();

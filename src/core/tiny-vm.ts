@@ -289,11 +289,15 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
       push(value);
       return;
     }
+    caller.ctx.world.recordTurnDispatch(obj, name, startAt, definer, verb);
     pushFrame(callCtx, verb.bytecode, callArgs);
   };
 
   while (frames.length > 0) {
     const current = frame();
+    // Internal bytecode calls do not re-enter world.dispatch(), so publish the
+    // active frame here before any VM op can mutate recorded state.
+    current.ctx.world.setTurnRecorderFrame(current.ctx);
     if (current.pc >= current.bytecode.ops.length) {
       returnFromFrame(null);
       continue;
@@ -912,7 +916,7 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
       case "abs":
         return Math.abs(numeric(builtinArgs[0], "abs argument"));
       case "now":
-        return Date.now();
+        return frame.ctx.world.logicalNow("now");
       case "create": {
         chargeTicks(frame, 45);
         const parent = assertObj(builtinArgs[0]);
@@ -969,7 +973,7 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
       case "idle_seconds": {
         if (builtinArgs.length !== 1) throw wooError("E_INVARG", "idle_seconds expects one actor");
         const at = frame.ctx.world.actorLastInputAt(assertObj(builtinArgs[0]));
-        return at === null ? null : Math.max(0, Math.floor((Date.now() - at) / 1000));
+        return at === null ? null : Math.max(0, Math.floor((frame.ctx.world.logicalNow("idle_seconds.now") - at) / 1000));
       }
       case "isa": {
         if (builtinArgs.length !== 2) throw wooError("E_INVARG", "isa expects object and ancestor");
@@ -991,11 +995,10 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
       case "random": {
         const n = numeric(builtinArgs[0], "random argument");
         if (!Number.isInteger(n) || n <= 0) throw wooError("E_INVARG", "random(n) requires a positive integer", builtinArgs[0]);
-        return Math.floor(Math.random() * n);
+        return frame.ctx.world.logicalRandomInt(n, "random");
       }
       case "contents": {
-        const obj = frame.ctx.world.object(assertObj(builtinArgs[0]));
-        return Array.from(obj.contents);
+        return frame.ctx.world.contentsOf(assertObj(builtinArgs[0]));
       }
       case "location": {
         if (builtinArgs.length !== 1) throw wooError("E_INVARG", "location expects one object");

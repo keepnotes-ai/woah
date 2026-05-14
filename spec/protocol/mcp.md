@@ -203,6 +203,8 @@ $actor:wait(timeout_ms?: int, limit?: int)
 | `timeout_ms` | `0` | Long-poll budget. If the queue is empty, blocks up to this many ms for the next observation. Returns immediately on first arrival. Capped at 30000. |
 | `limit` | `64` | Maximum observations to return in one batch. Bounded by an implementation-defined hard ceiling (default 256). |
 
+A `wait` with non-zero `timeout_ms` holds the worker request open for the duration of the budget when no observation arrives. Operationally this surfaces in `wrangler tail` as a `/mcp` request with `wallTime ≈ timeout_ms` and `cpuTime ≈ 0` — a pure idle hold, not CPU work. Investigators chasing warm-path p95 should subtract `wait`-shaped requests (cpu-near-zero) before concluding there is a perf problem; see [observability.md §long-poll requests](../operations/observability.md#long-poll-requests).
+
 **Returns:**
 
 - `observations`: up to `limit` queued observations, oldest first.

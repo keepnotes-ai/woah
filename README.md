@@ -3,13 +3,13 @@
 Woah is a programmable, shared, persistent object world for agents and
 humans to work and play in.
 
-Inspired by LambdaMOO, closely following its object model but modernized
-and slightly decentralized, with an intention to be a good platform for
+Inspired by LambdaMOO, closely following its object model, but on a
+distributed virtual machine.  Intended to be a good platform for
 broad coordination activities.  Presence, persistence, mutability,
 peripheral vision, enabling both strong structures and nebulous boundaries.
 
-Objects, properties and verbs, permissions, a self-contained VM runtime.
-Interact with Websockets, MCP tools, and REST APIs.  Install and share
+Objects, properties and verbs, permissions, prototype inheritance.
+Interact using Websockets, MCP tools, and REST APIs.  Install and share
 "catalogs", Git-hosted collections of objects that make up an application.
 
 Catalog objects can include lightweight UI components.  The frame is not

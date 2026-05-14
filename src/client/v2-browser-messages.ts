@@ -2,6 +2,8 @@ import { isShadowScopeHead, type ShadowScopeHead } from "../core/shadow-scope-he
 import type { ShadowCommitAccepted } from "../core/shadow-commit-scope";
 import type { EffectTranscript } from "../core/effect-transcript";
 import type { AppliedFrame, WooValue } from "../core/types";
+import type { DirectResultFrame, ErrorFrame } from "../core/types";
+import type { ShadowTurnExecReply } from "../core/shadow-turn-exec";
 
 export type V2ProjectionRow = {
   scope: string;
@@ -25,6 +27,11 @@ export type V2AppliedFrameMessage = {
   frame: ShadowCommitAccepted;
   transcript?: EffectTranscript;
   applied?: AppliedFrame;
+};
+
+export type V2TurnResultMessage = {
+  kind: "turn_result";
+  frame: DirectResultFrame | ErrorFrame;
 };
 
 export type V2ProjectionSnapshot = {
@@ -83,6 +90,49 @@ export function v2AppliedFrameMessageFromFrame(frame: ShadowCommitAccepted, tran
   };
 }
 
+export function v2TurnResultMessageFromReply(reply: ShadowTurnExecReply, replyTo?: string): V2TurnResultMessage | undefined {
+  // Committed replies become applied-frame messages. Non-committing direct
+  // replies need a v1-shaped result/error frame so existing catalog UI handlers
+  // can consume them while the transport moves to v2.
+  const id = reply.id ?? replyTo;
+  if (reply.ok === true) {
+    if (reply.commit) return undefined;
+    if (reply.outcome.error !== undefined) {
+      return {
+        kind: "turn_result",
+        frame: {
+          op: "error",
+          ...(id ? { id } : {}),
+          error: coerceErrorValue(reply.outcome.error)
+        }
+      };
+    }
+    return {
+      kind: "turn_result",
+      frame: {
+        op: "result",
+        ...(id ? { id } : {}),
+        command: reply.transcript.call,
+        result: reply.outcome.result ?? null,
+        observations: reply.transcript.observations,
+        audience: null
+      }
+    };
+  }
+  if (reply.reason === "missing_state") return undefined;
+  return {
+    kind: "turn_result",
+    frame: {
+      op: "error",
+      ...(id ? { id } : {}),
+      error: {
+        code: `E_V2_${reply.reason.toUpperCase()}`,
+        message: reply.reason
+      }
+    }
+  };
+}
+
 function v2AppliedFrameFromTranscript(frame: ShadowCommitAccepted, transcript: EffectTranscript): AppliedFrame {
   return {
     op: "applied",
@@ -98,5 +148,13 @@ function v2AppliedFrameFromTranscript(frame: ShadowCommitAccepted, transcript: E
     },
     observations: transcript.observations,
     ...(transcript.result !== undefined ? { result: transcript.result } : {})
+  };
+}
+
+function coerceErrorValue(value: WooValue) {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value as ErrorFrame["error"];
+  return {
+    code: "E_V2_TURN",
+    message: String(value)
   };
 }

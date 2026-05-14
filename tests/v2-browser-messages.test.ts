@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { v2AppliedFrameMessageFromFrame, v2ProjectionMessageFromRow, v2ProjectionSnapshotFromMessage } from "../src/client/v2-browser-messages";
+import { v2AppliedFrameMessageFromFrame, v2ProjectionMessageFromRow, v2ProjectionSnapshotFromMessage, v2TurnResultMessageFromReply } from "../src/client/v2-browser-messages";
 
 describe("v2 browser worker messages", () => {
   it("builds projection messages only from well-shaped cached rows", () => {
@@ -120,6 +120,46 @@ describe("v2 browser worker messages", () => {
         message: { actor: "#actor", target: "#room", verb: "say", args: ["hi"] },
         observations: [{ type: "said", text: "hi" }],
         result: { ok: true }
+      }
+    });
+  });
+
+  it("converts non-committing v2 replies into direct result frames", () => {
+    const reply = {
+      kind: "woo.turn.exec.reply.shadow.v1",
+      ok: true,
+      id: "preview-1",
+      outcome: { result: 0.42 },
+      transcript: {
+        kind: "woo.effect_transcript.shadow.v1",
+        id: "preview-1",
+        route: "direct",
+        scope: "#room",
+        seq: 0,
+        call: { actor: "#actor", target: "#room", verb: "preview_control", args: ["#delay", "wet", 0.42] },
+        reads: [],
+        writes: [],
+        creates: [],
+        moves: [],
+        observations: [{ type: "gesture_progress", target: "#delay", name: "wet", value: 0.42 }],
+        logicalInputs: [],
+        untrackedEffects: [],
+        result: 0.42,
+        complete: true,
+        incompleteReasons: [],
+        hash: "transcript-preview"
+      }
+    } as any;
+
+    expect(v2TurnResultMessageFromReply(reply, "preview-envelope")).toEqual({
+      kind: "turn_result",
+      frame: {
+        op: "result",
+        id: "preview-1",
+        command: { actor: "#actor", target: "#room", verb: "preview_control", args: ["#delay", "wet", 0.42] },
+        result: 0.42,
+        observations: [{ type: "gesture_progress", target: "#delay", name: "wet", value: 0.42 }],
+        audience: null
       }
     });
   });

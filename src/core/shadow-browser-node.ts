@@ -170,6 +170,7 @@ export type ShadowBrowserRelayShim = {
   idempotency_window_ms: number;
   recently_seen: Map<string, number>;
   recent_replies: Map<string, ShadowEnvelope>;
+  live_session_serialized: Map<string, SerializedWorld>;
   accepted_frames: ShadowCommitAccepted[];
   transcript_tail: EffectTranscript[];
   live_events: ShadowLiveEvent[];
@@ -320,6 +321,7 @@ export function createShadowBrowserRelayShim(input: {
     idempotency_window_ms: Math.max(input.idempotency_window_ms ?? MIN_SHADOW_IDEMPOTENCY_WINDOW_MS, MIN_SHADOW_IDEMPOTENCY_WINDOW_MS),
     recently_seen: new Map(),
     recent_replies: new Map(),
+    live_session_serialized: new Map(),
     accepted_frames: [],
     transcript_tail: [],
     live_events: [],
@@ -791,13 +793,32 @@ export async function handleShadowBrowserTurnExecEnvelope(
     const cached = browser.relay.recent_replies.get(receipt.idempotency_key);
     return cached ? structuredClone(cached) as ShadowEnvelope<ShadowTurnExecReply> : null;
   }
-  const request = receipt.envelope.type === "woo.turn.intent.request.shadow.v1"
-    ? await shadowTurnExecRequestFromIntent(browser, receipt.envelope.body as ShadowTurnIntentRequest)
+  const intent = receipt.envelope.type === "woo.turn.intent.request.shadow.v1"
+    ? receipt.envelope.body as ShadowTurnIntentRequest
+    : null;
+  const request = intent
+    ? await shadowTurnExecRequestFromIntent(browser, intent)
     : receipt.envelope.body as ShadowTurnExecRequest;
-  const result = await executeShadowBrowserTurnExecRequest(browser, request);
-  if (!result.reply) return null;
-  const body = shadowBrowserWireTurnExecReply(result.reply);
-  const reply: ShadowEnvelope<ShadowTurnExecReply> = {
+  const reply = intent?.commit_policy === "execute_only"
+    ? await executeShadowBrowserExecuteOnlyIntent(browser, request)
+    : (await executeShadowBrowserTurnExecRequest(browser, request)).reply;
+  if (!reply) return null;
+  const response = shadowBrowserTurnExecReplyEnvelope(browser, receipt, request, reply);
+  // Idempotency is reply-oriented: a client retrying because it missed the
+  // first reply must receive the same answer without re-running the turn.
+  browser.relay.recent_replies.set(receipt.idempotency_key, structuredClone(response));
+  trimShadowBrowserIdempotency(browser.relay);
+  return response;
+}
+
+function shadowBrowserTurnExecReplyEnvelope(
+  browser: ShadowBrowserNode,
+  receipt: ShadowBrowserEnvelopeReceipt,
+  request: ShadowTurnExecRequest,
+  reply: ShadowTurnExecReply
+): ShadowEnvelope<ShadowTurnExecReply> {
+  const body = shadowBrowserWireTurnExecReply(reply);
+  const envelope: ShadowEnvelope<ShadowTurnExecReply> = {
     v: 2,
     type: body.kind,
     id: `${browser.relay.node}:reply:${request.id ?? request.call.id ?? receipt.envelope.id}`,
@@ -809,11 +830,31 @@ export async function handleShadowBrowserTurnExecEnvelope(
     auth: shadowBrowserAuth(browser),
     body
   };
-  // Idempotency is reply-oriented: a client retrying because it missed the
-  // first reply must receive the same answer without re-running the turn.
-  browser.relay.recent_replies.set(receipt.idempotency_key, structuredClone(reply));
-  trimShadowBrowserIdempotency(browser.relay);
-  return reply;
+  return envelope;
+}
+
+async function executeShadowBrowserExecuteOnlyIntent(browser: ShadowBrowserNode, request: ShadowTurnExecRequest): Promise<ShadowTurnExecReply> {
+  validateShadowBrowserNodeAuth(browser);
+  // Server-assisted browser intents already have a deterministic planned
+  // transcript. Execute-only turns are live/direct surface updates, so keep a
+  // per-session live snapshot separate from the committed scope. That lets
+  // direct gestures chain (for example Dubspace enter -> local control command)
+  // without making the next authority-bearing commit validate against live-only
+  // state.
+  const sessionKey = request.call.session ?? request.call.actor;
+  const serializedBefore = browser.relay.live_session_serialized.get(sessionKey) ?? browser.relay.commit_scope.serialized;
+  const run = await runShadowTurnCall(serializedBefore, request.call);
+  browser.relay.live_session_serialized.set(sessionKey, run.serializedAfter);
+  const outcome = run.transcript.error
+    ? { error: run.transcript.error as unknown as WooValue }
+    : { result: run.transcript.result };
+  return {
+    kind: "woo.turn.exec.reply.shadow.v1",
+    ok: true,
+    id: request.id ?? request.call.id,
+    outcome,
+    transcript: run.transcript
+  };
 }
 
 async function shadowTurnExecRequestFromIntent(browser: ShadowBrowserNode, intent: ShadowTurnIntentRequest): Promise<ShadowTurnExecRequest> {
@@ -834,7 +875,10 @@ async function shadowTurnExecRequestFromIntent(browser: ShadowBrowserNode, inten
     verb: intent.verb,
     args: intent.args ?? []
   };
-  const planned = await runShadowTurnCall(browser.relay.commit_scope.serialized, call);
+  const serialized = intent.commit_policy === "execute_only"
+    ? browser.relay.live_session_serialized.get(call.session ?? call.actor) ?? browser.relay.commit_scope.serialized
+    : browser.relay.commit_scope.serialized;
+  const planned = await runShadowTurnCall(serialized, call);
   return {
     kind: "woo.turn.exec.request.shadow.v1",
     id,

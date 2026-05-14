@@ -2,17 +2,18 @@ import { decodeEnvelope, encodeEnvelope, type ShadowEnvelope } from "../core/sha
 import type { EffectTranscript } from "../core/effect-transcript";
 import type { ShadowCommitAccepted, ShadowScopeHead } from "../core/shadow-commit-scope";
 import type { ShadowTurnIntentRequest } from "../core/shadow-browser-node";
+import type { ShadowTurnExecReply } from "../core/shadow-turn-exec";
 import type { WooValue } from "../core/types";
 import { isShadowScopeHead } from "../core/shadow-scope-head";
 import { v2BrowserCacheMutationsForEnvelope, type V2BrowserCacheMutation } from "./v2-browser-cache";
-import { v2AppliedFrameMessageFromFrame, v2ProjectionMessageFromRow } from "./v2-browser-messages";
+import { v2AppliedFrameMessageFromFrame, v2ProjectionMessageFromRow, v2TurnResultMessageFromReply } from "./v2-browser-messages";
 import { v2BrowserWebSocketUrl } from "./v2-browser-url";
 
 type V2WorkerCommand =
   | { kind: "connect"; token: string; node?: string; scope?: string; actor?: string; session?: string }
   | { kind: "disconnect" }
   | { kind: "send"; envelope: ShadowEnvelope }
-  | { kind: "call"; id: string; route: "sequenced"; scope: string; target: string; verb: string; args?: unknown[] }
+  | { kind: "call"; id: string; route: "direct" | "sequenced"; scope: string; target: string; verb: string; args?: unknown[]; commit_policy?: "execute_and_commit" | "execute_only" }
   | { kind: "get_projection"; scope?: string }
   | { kind: "cache_status" };
 
@@ -53,6 +54,7 @@ let reconnectTimer: number | undefined;
 let connecting = false;
 let reconnectDelayMs = 500;
 const maxReconnectDelayMs = 10_000;
+let commandQueue: Promise<void> = Promise.resolve();
 
 type V2WorkerScope = {
   addEventListener(type: "message", listener: (event: MessageEvent<V2WorkerCommand>) => void): void;
@@ -63,7 +65,14 @@ type V2WorkerScope = {
 const workerScope = self as unknown as V2WorkerScope;
 
 workerScope.addEventListener("message", (event: MessageEvent<V2WorkerCommand>) => {
-  void handleCommand(event.data);
+  // Connect and call messages can arrive back-to-back during route changes.
+  // Serialize command handling so a turn intent cannot run before the
+  // preceding connect has installed the current actor/session authority.
+  commandQueue = commandQueue
+    .then(() => handleCommand(event.data))
+    .catch((err: unknown) => {
+      postMessage({ kind: "error", error: errorMessage(err) });
+    });
 });
 
 async function handleCommand(command: V2WorkerCommand): Promise<void> {
@@ -181,11 +190,18 @@ async function receiveFrame(encoded: string): Promise<void> {
   // mutation so the browser worker rejects the same malformed envelopes as the
   // relay and in-process tests.
   const envelope = decodeEnvelope(encoded);
+  let installedExecutableState = false;
   for (const mutation of v2BrowserCacheMutationsForEnvelope(envelope)) {
     await applyCacheMutation(mutation);
     if (mutation.kind === "projection") postProjection(mutation.scope, mutation.head, mutation.projection);
     if (mutation.kind === "applied_frame") postAppliedFrame(mutation.frame, mutation.transcript);
+    if (mutation.kind === "object_page" || mutation.kind === "state_page") installedExecutableState = true;
   }
+  if (envelope.type === "woo.turn.exec.reply.shadow.v1") {
+    const message = v2TurnResultMessageFromReply(envelope.body as ShadowTurnExecReply, envelope.reply_to);
+    if (message) postMessage(message);
+  }
+  if (installedExecutableState) await replayPending();
   postMessage({ kind: "frame", envelope });
   postStatus();
 }
@@ -226,7 +242,7 @@ async function sendTurnIntent(command: Extract<V2WorkerCommand, { kind: "call" }
     target: command.target,
     verb: command.verb,
     args: Array.isArray(command.args) ? command.args as WooValue[] : [],
-    commit_policy: "execute_and_commit"
+    commit_policy: command.commit_policy ?? (command.route === "direct" ? "execute_only" : "execute_and_commit")
   };
   const envelope: ShadowEnvelope<ShadowTurnIntentRequest> = {
     v: 2,

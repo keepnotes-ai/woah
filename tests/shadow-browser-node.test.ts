@@ -53,6 +53,46 @@ describe("shadow browser node shim", () => {
     expect(worldFor(browser).getProp("delay_1", "wet")).toBe(0.44);
   });
 
+  it("does not let execute-only live turns dirty the next committed dubspace turn", async () => {
+    const anchor = createWorld();
+    const session = anchor.auth("guest:browser-dubspace-live-before-commit");
+    const relay = createShadowBrowserRelayShim({
+      node: "browser-relay",
+      scope: "the_dubspace",
+      serialized: anchor.exportWorld()
+    });
+    const browser = createShadowBrowserNode({
+      node: "browser-the_dubspace",
+      scope: "the_dubspace",
+      actor: session.actor,
+      session: session.id,
+      relay
+    });
+
+    const live = await executeShadowBrowserTurn(browser, {
+      id: "browser-dubspace-live-enter",
+      route: "direct",
+      target: "the_dubspace",
+      verb: "enter",
+      args: [],
+      commit_policy: "execute_only"
+    });
+    const committed = await executeShadowBrowserTurn(browser, {
+      id: "browser-dubspace-committed-wet",
+      route: "sequenced",
+      target: "the_dubspace",
+      verb: "set_control",
+      args: ["delay_1", "wet", 0.51]
+    });
+
+    expect(live.result).toMatchObject({ ok: true, commit: undefined });
+    expect(committed.result).toMatchObject({
+      ok: true,
+      commit: { kind: "woo.commit.accepted.shadow.v1", position: { scope: "the_dubspace", seq: 1 } }
+    });
+    expect(worldFor(browser).getProp("delay_1", "wet")).toBe(0.51);
+  });
+
   it("opens with a catalog-neutral scope projection neighborhood", async () => {
     const { browser, actor } = await browserForScope("the_dubspace", "guest:browser-projection-neighborhood", async (world) => {
       world.defineProperty("the_dubspace", { name: "private_projection_probe", defaultValue: "sealed", owner: "$wiz", perms: "", typeHint: "str" });
@@ -538,6 +578,43 @@ describe("shadow browser node shim", () => {
       commit: { position: { scope: "the_dubspace", seq: 1 } }
     });
     expect(worldFor(browser).getProp("delay_1", "wet")).toBe(0.72);
+  });
+
+  it("chains execute-only browser intents through per-session live state", async () => {
+    const { browser } = await browserForScope("the_dubspace", "guest:browser-wire-live-chain");
+    await openShadowBrowserScope(browser);
+    const send = async (id: string, verb: string, args: WooValue[]) => {
+      const intent = {
+        kind: "woo.turn.intent.request.shadow.v1" as const,
+        id,
+        route: "direct" as const,
+        scope: "the_dubspace",
+        target: "the_dubspace",
+        verb,
+        args,
+        commit_policy: "execute_only" as const
+      };
+      const receipt = receiveShadowBrowserEnvelopeReceipt(browser, encodeEnvelope(shadowBrowserEnvelope(browser, intent.kind, intent, `${id}:env`)));
+      return await handleShadowBrowserTurnExecEnvelope(browser, receipt);
+    };
+
+    await send("live-enter", "enter", []);
+    await send("live-plan", "command_plan", ["`filter 500"]);
+    const reply = await send("live-filter", "say_to", ["filter_1", "500"]);
+
+    expect(reply?.body).toMatchObject({
+      kind: "woo.turn.exec.reply.shadow.v1",
+      ok: true
+    });
+    expect(reply?.body.ok === true ? reply.body.commit : undefined).toBeUndefined();
+    expect(reply?.body.ok === true ? reply.body.transcript.call.verb : "").toBe("say_to");
+    expect(reply?.body.ok === true ? reply.body.transcript.observations : []).toContainEqual(expect.objectContaining({
+      type: "control_changed",
+      target: "filter_1",
+      name: "cutoff",
+      value: 500
+    }));
+    expect(worldFor(browser).getProp("filter_1", "cutoff")).not.toBe(500);
   });
 
   it("bounds remembered envelope ids and cached replies inside the idempotency window", async () => {

@@ -104,6 +104,10 @@ type CommandOptions = {
   deferHostEffect?: (effect: DeferredHostEffect) => void;
 };
 
+type PublicCommandLocationOptions = {
+  skipPresenceCheck?: boolean;
+};
+
 export type CallContext = {
   world: WooWorld;
   space: ObjRef;
@@ -2845,7 +2849,20 @@ export class WooWorld {
       this.validateMessage(message);
       const space = this.object(spaceRef);
       await this.scrubStaleSubscribersForSpace(spaceRef, message.actor, this.chatPresent(spaceRef));
+      // Sequenced calls use the same catalog-level presence override as
+      // direct calls. The check runs before the recorder opens, so ignoring
+      // skip_presence_check here would make v2 commit-scope turns fail with no
+      // transcript instead of producing an authority-verifiable result.
+      let skipPresenceCheck = false;
+      try {
+        skipPresenceCheck = this.resolveVerb(message.target, message.verb).verb.skip_presence_check === true;
+      } catch {
+        // Let unresolved target verbs continue into the sequenced call body,
+        // where they become applied $error observations and still consume seq.
+      }
+      if (!skipPresenceCheck) {
         this.authorizePresence(message.actor, spaceRef, sessionId);
+      }
       const nextSeq = Number(this.getProp(spaceRef, "next_seq"));
       const seq = nextSeq;
       this.setProp(spaceRef, "next_seq", nextSeq + 1);
@@ -2937,7 +2954,17 @@ export class WooWorld {
         this.validateMessage(message);
         const space = this.object(spaceRef);
         await this.scrubStaleSubscribersForSpace(spaceRef, message.actor, this.chatPresent(spaceRef));
-        this.authorizePresence(message.actor, spaceRef, sessionId);
+        // Match the in-memory apply path: verb metadata decides whether the
+        // pre-recording presence gate applies to sequenced calls.
+        let skipPresenceCheck = false;
+        try {
+          skipPresenceCheck = this.resolveVerb(message.target, message.verb).verb.skip_presence_check === true;
+        } catch {
+          // Keep missing-verb calls on the applied-frame rollback path.
+        }
+        if (!skipPresenceCheck) {
+          this.authorizePresence(message.actor, spaceRef, sessionId);
+        }
         const seq = Number(this.getProp(spaceRef, "next_seq"));
         const ts = Date.now();
         this.setPropLocal(spaceRef, "next_seq", seq + 1);
@@ -7635,7 +7662,7 @@ export class WooWorld {
     return actor;
   }
 
-  private async publicCommandLocation(ctx: CallContext, actor: ObjRef, value: WooValue | undefined): Promise<ObjRef | null> {
+  private async publicCommandLocation(ctx: CallContext, actor: ObjRef, value: WooValue | undefined, options: PublicCommandLocationOptions = {}): Promise<ObjRef | null> {
       const location = typeof value === "string"
         ? value as ObjRef
         : actor === ctx.actor && ctx.session
@@ -7644,16 +7671,17 @@ export class WooWorld {
             if (isOptionalProjectionReadError(err)) return null;
             throw err;
           });
-    await this.assertPublicCommandLocation(ctx, actor, location);
+    await this.assertPublicCommandLocation(ctx, actor, location, options);
     return location;
   }
 
-  private async assertPublicCommandLocation(ctx: CallContext, actor: ObjRef, location: ObjRef | null): Promise<void> {
+  private async assertPublicCommandLocation(ctx: CallContext, actor: ObjRef, location: ObjRef | null, options: PublicCommandLocationOptions = {}): Promise<void> {
     if (!location || this.isWizard(ctx.actor)) return;
     if (actor !== ctx.actor) {
       throw wooError("E_PERM", `${ctx.actor} cannot parse commands for ${actor}`, { actor: ctx.actor, requested_actor: actor });
     }
     if (location === actor) return;
+    if (options.skipPresenceCheck === true) return;
 
       const actorLocation = actor === ctx.actor && ctx.session
         ? this.currentLocationForSession(ctx.session)
@@ -7673,6 +7701,19 @@ export class WooWorld {
       // Missing or unreadable command locations are rejected below.
     }
     throw wooError("E_PERM", `${actor} is not present in ${location}`, { actor, location });
+  }
+
+  private currentVerbSkipsPresenceCheck(ctx: CallContext): boolean {
+    try {
+      if (this.ownVerbExact(ctx.definer, ctx.verbName)?.skip_presence_check === true) return true;
+    } catch {
+      // Fall through to the original message verb below.
+    }
+    try {
+      return this.resolveVerb(ctx.message.target, ctx.message.verb).verb.skip_presence_check === true;
+    } catch {
+      return false;
+    }
   }
 
   private async commandVisibleCandidates(ctx: CallContext, actor: ObjRef, location: ObjRef | null): Promise<ObjRef[]> {
@@ -7894,7 +7935,13 @@ export class WooWorld {
     });
     this.nativeHandlers.set("plan_command", async (ctx, args) => {
       const space = assertObj(args[1] ?? ctx.caller);
-      return await this.planCommandForSpace(ctx, assertString(args[0] ?? ""), space) as unknown as WooValue;
+      return await this.planCommandForSpace(ctx, assertString(args[0] ?? ""), space, {
+        // Catalog wrappers such as `$conversational:command_plan` are
+        // read-only planners. When the wrapper explicitly opts out of presence
+        // checks, let it plan against the supplied command space without
+        // teaching the browser about catalog command aliases.
+        skipPresenceCheck: this.currentVerbSkipsPresenceCheck(ctx)
+      }) as unknown as WooValue;
     });
     this.nativeHandlers.set("parse_command", async (ctx, args) => {
       const actor = await this.publicCommandActor(ctx, args[1]);
@@ -8660,11 +8707,11 @@ export class WooWorld {
     return resolved ? { name: resolved.verb.name, definer: resolved.definer, direct_callable: resolved.verb.direct_callable === true, arg_spec: resolved.verb.arg_spec ?? {} } : null;
   }
 
-  private async planCommandForSpace(ctx: CallContext, input: string, space: ObjRef): Promise<WooValue> {
+  private async planCommandForSpace(ctx: CallContext, input: string, space: ObjRef, options: PublicCommandLocationOptions = {}): Promise<WooValue> {
     const text = input.trim();
     if (!text) return await this.commandHuhPlan(ctx, space, input, "empty command");
     const actor = await this.publicCommandActor(ctx, undefined);
-    const location = await this.publicCommandLocation(ctx, actor, space);
+    const location = await this.publicCommandLocation(ctx, actor, space, options);
 
     const lowered = await this.lowerSpeechPrefixPlan(ctx, text, space, actor, location);
     if (lowered) return lowered as unknown as WooValue;

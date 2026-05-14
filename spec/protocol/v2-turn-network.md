@@ -1150,20 +1150,20 @@ for the migration plan and namespace strategy.
 Browser-node dubspace preview flow:
 
 ```text
-UI -> worker: preview_control(target, name, value)
-worker -> local audio: apply preview immediately
-worker -> relay live plane: LiveEvent(gesture_progress)
-relay -> subscribers: best-effort LiveEvent
+UI -> local audio: apply preview immediately
+UI -> worker: TurnIntent(route=direct, commit_policy=execute_only, preview_control(target, name, value))
+worker -> relay: v2 envelope on the browser socket
+relay -> browser: direct result envelope with gesture_progress observations
 ```
 
 Browser-node dubspace commit flow:
 
 ```text
-UI -> worker: set_control(target, name, value)
-worker: run deterministic turn and record transcript
-worker -> commit scope: CommitSubmit
-commit scope -> subscribers: AppliedFrame(control_changed)
-browser audio engines apply the committed frame
+UI -> worker: TurnIntent(route=sequenced, set_control(target, name, value))
+relay: plans the deterministic turn and records the transcript
+relay -> commit scope: CommitSubmit
+commit scope -> browser: AppliedFrame(control_changed)
+browser UI/audio engines apply the committed frame
 ```
 
 ## VTN15. Functional parity requirements

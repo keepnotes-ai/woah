@@ -71,6 +71,16 @@ describe("v2 browser cache reducer", () => {
       ...envelopeFor("woo.turn.exec.reply.shadow.v1", { kind: "woo.turn.exec.reply.shadow.v1", ok: true }),
       reply_to: "pending-1"
     })).toEqual([{ kind: "pending_delete", id: "pending-1" }]);
+
+    expect(v2BrowserCacheMutationsForEnvelope({
+      ...envelopeFor("woo.turn.exec.reply.shadow.v1", {
+        kind: "woo.turn.exec.reply.shadow.v1",
+        ok: false,
+        reason: "missing_state",
+        missing_atoms: [{ hash: "needed" }]
+      }),
+      reply_to: "pending-missing"
+    })).toEqual([]);
   });
 
   it("reduces successful turn replies into applied frame and transcript cache mutations", () => {

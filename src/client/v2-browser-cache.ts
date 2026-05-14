@@ -32,7 +32,12 @@ export function v2BrowserCacheMutationsForEnvelope(envelope: ShadowEnvelope): V2
   }
   if (envelope.type === "woo.turn.exec.reply.shadow.v1") {
     const reply = envelope.body as ShadowTurnExecReply;
-    const mutations: V2BrowserCacheMutation[] = envelope.reply_to ? [{ kind: "pending_delete", id: envelope.reply_to }] : [];
+    // Missing-state replies are cache-warm prompts, not terminal answers. Keep
+    // the pending envelope so the worker can replay it after the state transfer
+    // has installed the requested executable pages.
+    const mutations: V2BrowserCacheMutation[] = envelope.reply_to && !(reply.ok === false && reply.reason === "missing_state")
+      ? [{ kind: "pending_delete", id: envelope.reply_to }]
+      : [];
     if (reply.ok === true && reply.transcript) {
       if (reply.commit) mutations.push({ kind: "applied_frame" as const, frame: reply.commit as ShadowCommitAccepted, transcript: reply.transcript });
       mutations.push({ kind: "transcript" as const, transcript: reply.transcript });

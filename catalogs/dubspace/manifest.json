@@ -348,6 +348,7 @@
         {
           "name": "set_control",
           "perms": "rx",
+          "skip_presence_check": true,
           "tool_exposed": true,
           "arg_spec": {
             "args": [
@@ -386,6 +387,7 @@
         {
           "name": "start_loop",
           "perms": "rx",
+          "skip_presence_check": true,
           "tool_exposed": true,
           "arg_spec": {
             "args": [
@@ -397,6 +399,7 @@
         {
           "name": "stop_loop",
           "perms": "rx",
+          "skip_presence_check": true,
           "tool_exposed": true,
           "arg_spec": {
             "args": [
@@ -408,6 +411,7 @@
         {
           "name": "set_drum_step",
           "perms": "rx",
+          "skip_presence_check": true,
           "tool_exposed": true,
           "arg_spec": {
             "args": [
@@ -425,6 +429,7 @@
             "tempo"
           ],
           "perms": "rx",
+          "skip_presence_check": true,
           "tool_exposed": true,
           "arg_spec": {
             "args": [
@@ -437,6 +442,7 @@
         {
           "name": "start_transport",
           "perms": "rx",
+          "skip_presence_check": true,
           "tool_exposed": true,
           "arg_spec": {
             "args": []
@@ -446,6 +452,7 @@
         {
           "name": "stop_transport",
           "perms": "rx",
+          "skip_presence_check": true,
           "tool_exposed": true,
           "arg_spec": {
             "args": []
@@ -455,6 +462,7 @@
         {
           "name": "save_scene",
           "perms": "rx",
+          "skip_presence_check": true,
           "tool_exposed": true,
           "arg_spec": {
             "args": [
@@ -466,6 +474,7 @@
         {
           "name": "recall_scene",
           "perms": "rx",
+          "skip_presence_check": true,
           "tool_exposed": true,
           "arg_spec": {
             "args": [

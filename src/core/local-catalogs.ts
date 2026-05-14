@@ -533,7 +533,17 @@ function runLocalCatalogMigration(
   options: { allowImplementationHints?: boolean; reconcileSeedHooks?: boolean; rehomeNowhereSeedObjects?: boolean; reconcileClassVerbs?: boolean; only?: string } = {}
 ): Set<string> {
   const covered = new Set<string>();
-  if (migrationApplied(world, id)) return covered;
+  const alreadyApplied = migrationApplied(world, id);
+  // TEMP diag: trace the chat persistence reconcile to confirm it's reaching reconcile.
+  if (id === "2026-05-14-chat-v2-command-persistence-reconcile") {
+    let southeastBefore: unknown = null;
+    if (world.objects.has("$room")) {
+      const v = world.ownVerbExact("$room", "southeast");
+      southeastBefore = v?.arg_spec ?? null;
+    }
+    console.log("woo.diag", JSON.stringify({ tag: "persistence-reconcile-entry", alreadyApplied, names: [...names], chatInstalled: localCatalogInstalled(world, "chat"), cleanHasChat: cleanInstalled.has("chat"), southeastBefore }));
+  }
+  if (alreadyApplied) return covered;
   let repaired = false;
   for (const name of names) {
     if (options.only && name !== options.only) continue;
@@ -552,6 +562,10 @@ function runLocalCatalogMigration(
     if (result.status === "failed") throw new Error(`local catalog schema plan failed: ${result.plan_id}`);
     repaired = true;
     covered.add(name);
+  }
+  if (id === "2026-05-14-chat-v2-command-persistence-reconcile") {
+    const v = world.objects.has("$room") ? world.ownVerbExact("$room", "southeast") : null;
+    console.log("woo.diag", JSON.stringify({ tag: "persistence-reconcile-exit", repaired, southeastAfter: v?.arg_spec ?? null }));
   }
   if (repaired || !options.only) markMigrationApplied(world, id);
   return covered;

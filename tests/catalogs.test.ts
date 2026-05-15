@@ -1460,6 +1460,27 @@ describe("local catalogs", () => {
     expect(world.getProp("the_taskboard", "_tracked_tasks")).toEqual(["the_legacy_task"]);
   });
 
+  it("merges newly-discovered $task refs into a partially-backfilled _tracked_tasks", () => {
+    // A deployed world that ran an older contents-only backfill ended up
+    // with _tracked_tasks holding the ready/parked tasks at the registry
+    // but missing tasks that had already been claimed (and moved onto an
+    // actor). The repair must walk again and merge — not skip on the
+    // non-empty fast path — so :listing/the kanban can see the in-flight
+    // tasks too.
+    const world = createWorld();
+    world.createObject({ id: "the_ready_task", name: "ready", parent: "$task", owner: "$wiz", location: "the_taskboard" });
+    world.setProp("the_ready_task", "registry", "the_taskboard");
+    world.createObject({ id: "the_inflight_task", name: "inflight", parent: "$task", owner: "$wiz", location: "$wiz" });
+    world.setProp("the_inflight_task", "registry", "the_taskboard");
+    // Older partial backfill: only the ready task got recorded.
+    world.setProp("the_taskboard", "_tracked_tasks", ["the_ready_task"]);
+    runHostScopedDataMigrations(world, "the_taskboard");
+    const tracked = world.getProp("the_taskboard", "_tracked_tasks") as string[];
+    expect(tracked).toContain("the_ready_task");
+    expect(tracked).toContain("the_inflight_task");
+    expect(tracked).toHaveLength(2);
+  });
+
   it("drops the superseded taskspace catalog state on cold init", () => {
     // Simulate a world that installed @local:taskspace under the v0.3
     // catalog and never saw the rename to `tasks`. Fabricate the seed

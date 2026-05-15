@@ -251,7 +251,7 @@
               "key"
             ]
           },
-          "source": "verb :remove_obligation(key) rxd { /* Remove a step. Fails if any workflow still references it. Existing tasks that already snapshotted this step keep their copy; an obligation_orphaned observation fires for each. Registry owner or wizard only. */ if (this.owner != actor && !has_flag(actor, \"wizard\")) { raise { code: \"E_PERM\", message: \"only the registry owner or wizard can edit obligations\" }; } if (!(key in this.obligations)) { return false; } for kind, keys in this.policies { for k in keys { if (k == key) { raise { code: \"E_CONSTRAINT\", message: \"obligation still referenced by a policy\", value: kind }; } } } let before = this.obligations[key]; let next = {}; for k, v in this.obligations { if (k != key) { next[k] = v; } } this.obligations = next; observe({ type: \"registry_obligation_changed\", registry: this, key: key, before: before, after: null, actor: actor, ts: now() }); for t in contents(this) { if (!isa(t, $task)) { continue; } let touched = false; for o in t.obligations { if (o[\"key\"] == key) { touched = true; } } if (touched) { observe({ type: \"obligation_orphaned\", task: t, obligation_key: key, ts: now() }); } } return true; }",
+          "source": "verb :remove_obligation(key) rxd { /* Remove a step. Fails if any workflow still references it. Existing tasks that already snapshotted this step keep their copy; an obligation_orphaned observation fires for each — including in-flight tasks the registry has minted but that have moved to an actor via :claim/:handoff. Registry owner or wizard only. */ if (this.owner != actor && !has_flag(actor, \"wizard\")) { raise { code: \"E_PERM\", message: \"only the registry owner or wizard can edit obligations\" }; } if (!(key in this.obligations)) { return false; } for kind, keys in this.policies { for k in keys { if (k == key) { raise { code: \"E_CONSTRAINT\", message: \"obligation still referenced by a policy\", value: kind }; } } } let before = this.obligations[key]; let next = {}; for k, v in this.obligations { if (k != key) { next[k] = v; } } this.obligations = next; observe({ type: \"registry_obligation_changed\", registry: this, key: key, before: before, after: null, actor: actor, ts: now() }); for t in this._tracked_tasks { if (!valid(t)) { continue; } if (!isa(t, $task)) { continue; } let touched = false; for o in t.obligations { if (o[\"key\"] == key) { touched = true; } } if (touched) { observe({ type: \"obligation_orphaned\", task: t, obligation_key: key, ts: now() }); } } return true; }",
           "direct_callable": true,
           "skip_presence_check": true
         },
@@ -689,6 +689,24 @@
       "shape": {
         "registry": "obj",
         "kind": "str",
+        "actor": "obj"
+      }
+    },
+    {
+      "on": "$task_registry",
+      "type": "task_renamed",
+      "shape": {
+        "task": "obj",
+        "name": "str",
+        "actor": "obj"
+      }
+    },
+    {
+      "on": "$task_registry",
+      "type": "task_relabeled",
+      "shape": {
+        "task": "obj",
+        "labels": "list",
         "actor": "obj"
       }
     }

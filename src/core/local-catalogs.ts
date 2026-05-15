@@ -698,30 +698,37 @@ function runTaskRegistryRoomParentMigration(world: WooWorld, names: readonly str
 // would return nothing — including for tasks still sitting at the
 // registry. Idempotent: only writes when the existing list is missing or
 // empty.
-// Pure walk: for every $task_registry instance whose `_tracked_tasks` is
-// missing or empty, populate it from the $task instances on this slice
-// whose `registry` ref points at it. Caller is responsible for any
-// idempotency ledger; the walk itself is naturally idempotent — once
-// `_tracked_tasks` is non-empty for a given registry, subsequent passes
-// skip it. Self-hosted taskboards (host_placement: "self") need this on
-// the OWNING host slice, not the gateway, because the data lives there.
+// Pure walk: for every $task_registry instance, populate `_tracked_tasks`
+// by walking the $task instances on this slice whose `registry` ref points
+// at it, merged with whatever is already there. A non-empty existing list
+// is NOT a fast-path to skip — earlier partial repairs ran a contents-only
+// backfill (ready tasks at the registry, but not tasks that were claimed
+// and moved onto an actor), so a worktree with a non-empty list might still
+// be missing in-flight tasks. The walk is naturally idempotent: once every
+// $task with registry == this is in the list, subsequent passes find no
+// new refs and short-circuit before writing.
+// Self-hosted taskboards (host_placement: "self") need this on the OWNING
+// host slice, not the gateway, because the data lives there.
 function backfillTaskRegistryTrackedTasks(world: WooWorld): void {
   if (!world.objects.has("$task_registry") || !world.objects.has("$task")) return;
   for (const id of Array.from(world.objects.keys())) {
     if (id === "$task_registry") continue;
     if (!world.isDescendantOf(id, "$task_registry")) continue;
     const existing = world.propOrNull(id, "_tracked_tasks");
-    if (Array.isArray(existing) && existing.length > 0) continue;
-    const tracked: ObjRef[] = [];
+    const existingList: ObjRef[] = Array.isArray(existing)
+      ? existing.filter((x): x is ObjRef => typeof x === "string")
+      : [];
+    const merged = new Set<ObjRef>(existingList);
+    const before = merged.size;
     for (const child of Array.from(world.objects.keys())) {
       if (!world.isDescendantOf(child, "$task")) continue;
       if (child === "$task") continue;
       const registry = world.propOrNull(child, "registry");
       if (registry !== id) continue;
-      tracked.push(child as ObjRef);
+      merged.add(child as ObjRef);
     }
-    if (tracked.length === 0 && Array.isArray(existing) && existing.length === 0) continue;
-    world.setProp(id, "_tracked_tasks", tracked as WooValue);
+    if (merged.size === before) continue;
+    world.setProp(id, "_tracked_tasks", Array.from(merged) as WooValue);
   }
 }
 

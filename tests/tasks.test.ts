@@ -265,6 +265,46 @@ describe("tasks catalog", () => {
     if (r.op === "error") expect(r.error.code).toBe("E_CONSTRAINT");
   });
 
+  it("remove_obligation emits obligation_orphaned for tasks claimed off the registry", async () => {
+    // After a task is claimed it moves onto the actor and disappears from
+    // contents(this). The registry still tracks it through _tracked_tasks,
+    // and a still-snapshotted obligation must surface as orphaned so the
+    // UI / agent can see why the per-task checklist no longer matches the
+    // registry's current obligations.
+    const world = setupWorld();
+    const session = world.auth("guest:orphan-watcher");
+    await seedMinimal(world, session.actor);
+    const created = await world.directCall("create", session.actor, "the_taskboard", "create_task", [
+      "task",
+      "in-flight",
+      "",
+      [],
+      null
+    ]);
+    expect(created.op).toBe("result");
+    if (created.op !== "result") return;
+    const taskRef = created.result as string;
+    const claim = await world.directCall("claim", session.actor, taskRef, "claim", []);
+    expect(claim.op).toBe("result");
+    expect(world.object(taskRef).location).toBe(session.actor);
+
+    // Drop the policy reference so :remove_obligation isn't blocked by
+    // the policy-still-references guard.
+    const rmPolicy = await adminCall(world, "rmp", "the_taskboard", "remove_policy", ["task"]);
+    expect(rmPolicy.op).toBe("result");
+
+    const rm = await adminCall(world, "rmo", "the_taskboard", "remove_obligation", ["do:it"]);
+    expect(rm.op).toBe("result");
+    if (rm.op !== "result") return;
+    const orphaned = rm.observations.filter((o) => o.type === "obligation_orphaned");
+    expect(orphaned).toHaveLength(1);
+    expect(orphaned[0]).toMatchObject({
+      type: "obligation_orphaned",
+      task: taskRef,
+      obligation_key: "do:it"
+    });
+  });
+
   it("set_obligation rejects an unknown role", async () => {
     const world = setupWorld();
     const r = await adminCall(world, "o", "the_taskboard", "set_obligation", [

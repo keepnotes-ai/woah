@@ -287,6 +287,7 @@ export function buildShadowTurnIntentEnvelope(input: {
   session: string;
   token: string;
   id?: string;
+  envelopeId?: string;
   route: ShadowTurnCall["route"];
   scope: ObjRef;
   target: ObjRef;
@@ -309,7 +310,7 @@ export function buildShadowTurnIntentEnvelope(input: {
   return {
     v: 2,
     type: body.kind,
-    id: input.id ?? `${input.node}:turn`,
+    id: input.envelopeId ?? input.id ?? `${input.node}:turn`,
     from: input.node,
     actor: input.actor,
     session: input.session,
@@ -324,12 +325,13 @@ export function buildShadowTurnExecEnvelope(input: {
   session: string;
   token: string;
   id?: string;
+  envelopeId?: string;
   body: ShadowTurnExecRequest;
 }): ShadowEnvelope<ShadowTurnExecRequest> {
   return {
     v: 2,
     type: input.body.kind,
-    id: input.id ?? `${input.node}:turn`,
+    id: input.envelopeId ?? input.id ?? `${input.node}:turn`,
     from: input.node,
     actor: input.actor,
     session: input.session,

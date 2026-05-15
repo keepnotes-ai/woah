@@ -172,6 +172,14 @@ live-observation-only declare `arg_spec.command.persistence: "live"`; verbs
 without that declaration are treated as durable so arbitrary catalog mutations
 are committed instead of silently simulated.
 
+Distributed implementations that use a CommitScopeDO-style v2 commit authority
+SHOULD keep REST itself request-response while reusing an internal relay per
+commit scope. The first call for a scope opens the relay with an authoritative
+serialized snapshot; later calls for the same hot scope send only the
+authority-bearing v2 envelope. REST clients still see the R6 request/response
+contract and MUST NOT depend on full-world snapshots being transferred per
+verb call.
+
 The natural agent shape is sequenced: `POST /api/objects/$task_42/calls/transition` with body `{ args: ["design-review"], space: "$task_registry" }`. The same call without `space` is rejected because `:transition` is not direct-callable. This makes "mutate through a space" the obvious path, not something callers must remember to wrap.
 
 For backward compatibility with the wire format, calling `:call` directly on a `$space`-descended object (`POST /api/objects/$task_registry/calls/call` with body `{ args: [{target, verb, args}] }`) is also sequenced — equivalent to setting `space` on the body of the inner target. The body-level `space` form is preferred in agent code.

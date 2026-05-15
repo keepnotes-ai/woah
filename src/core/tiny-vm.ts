@@ -171,7 +171,8 @@ export const BUILTIN_NAMES = [
   // outright because the wrapper-level atomicity guarantees can't
   // hold across a host boundary; they call this builtin first and
   // raise E_CROSS_HOST_WRITE before reaching SET_PROP.
-  "is_remote_object"
+  "is_remote_object",
+  "presence_status"
 ];
 
 export async function runTinyVm(ctx: CallContext, bytecode: TinyBytecode, args: WooValue[]): Promise<WooValue> {
@@ -289,11 +290,15 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
       push(value);
       return;
     }
+    caller.ctx.world.recordTurnDispatch(obj, name, startAt, definer, verb);
     pushFrame(callCtx, verb.bytecode, callArgs);
   };
 
   while (frames.length > 0) {
     const current = frame();
+    // Internal bytecode calls do not re-enter world.dispatch(), so publish the
+    // active frame here before any VM op can mutate recorded state.
+    current.ctx.world.setTurnRecorderFrame(current.ctx);
     if (current.pc >= current.bytecode.ops.length) {
       returnFromFrame(null);
       continue;
@@ -912,7 +917,7 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
       case "abs":
         return Math.abs(numeric(builtinArgs[0], "abs argument"));
       case "now":
-        return Date.now();
+        return frame.ctx.world.logicalNow("now");
       case "create": {
         chargeTicks(frame, 45);
         const parent = assertObj(builtinArgs[0]);
@@ -969,7 +974,11 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
       case "idle_seconds": {
         if (builtinArgs.length !== 1) throw wooError("E_INVARG", "idle_seconds expects one actor");
         const at = frame.ctx.world.actorLastInputAt(assertObj(builtinArgs[0]));
-        return at === null ? null : Math.max(0, Math.floor((Date.now() - at) / 1000));
+        return at === null ? null : Math.max(0, Math.floor((frame.ctx.world.logicalNow("idle_seconds.now") - at) / 1000));
+      }
+      case "presence_status": {
+        if (builtinArgs.length !== 1) throw wooError("E_INVARG", "presence_status expects one actor");
+        return frame.ctx.world.actorPresenceStatus(assertObj(builtinArgs[0]), frame.ctx.world.logicalNow("presence_status.now"));
       }
       case "isa": {
         if (builtinArgs.length !== 2) throw wooError("E_INVARG", "isa expects object and ancestor");
@@ -991,21 +1000,20 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
       case "random": {
         const n = numeric(builtinArgs[0], "random argument");
         if (!Number.isInteger(n) || n <= 0) throw wooError("E_INVARG", "random(n) requires a positive integer", builtinArgs[0]);
-        return Math.floor(Math.random() * n);
+        return frame.ctx.world.logicalRandomInt(n, "random");
       }
       case "contents": {
-        const obj = frame.ctx.world.object(assertObj(builtinArgs[0]));
-        return Array.from(obj.contents);
+        return frame.ctx.world.contentsOf(assertObj(builtinArgs[0]));
       }
       case "location": {
         if (builtinArgs.length !== 1) throw wooError("E_INVARG", "location expects one object");
         const obj = assertObj(builtinArgs[0]);
-        if (obj === frame.ctx.actor && frame.ctx.session) return frame.ctx.world.currentLocationForSession(frame.ctx.session);
+        if (obj === frame.ctx.actor && frame.ctx.session) return frame.ctx.world.activeScopeForSession(frame.ctx.session);
         return await frame.ctx.world.objectLocationChecked(obj, frame.ctx.hostMemo);
       }
       case "current_location": {
         if (builtinArgs.length !== 0) throw wooError("E_INVARG", "current_location expects no arguments");
-        return frame.ctx.world.currentLocationForSession(frame.ctx.session);
+        return frame.ctx.world.activeScopeForSession(frame.ctx.session);
       }
       case "current_session": {
         if (builtinArgs.length !== 0) throw wooError("E_INVARG", "current_session expects no arguments");
@@ -1013,7 +1021,7 @@ async function runVmFrames(frames: VmFrame[]): Promise<VmRunResult> {
       }
       case "session_location": {
         if (builtinArgs.length !== 1) throw wooError("E_INVARG", "session_location expects one session id");
-        return frame.ctx.world.currentLocationForSession(String(builtinArgs[0] ?? ""));
+        return frame.ctx.world.activeScopeForSession(String(builtinArgs[0] ?? ""));
       }
       case "all_locations": {
         if (builtinArgs.length !== 1) throw wooError("E_INVARG", "all_locations expects one object");

@@ -42,3 +42,10 @@ jobs:
       - run: npm ci
       - name: npm audit --audit-level=moderate
         run: npm audit --audit-level=moderate
+      # Provenance check: every package in the lockfile must have a signed
+      # publish attestation from its npm publisher. Catches shai-hulud-class
+      # supply-chain attacks where a hijacked publish token ships an
+      # unattested malicious version. Cheap (~5s) and runs alongside the
+      # advisory audit on every PR.
+      - name: npm audit signatures
+        run: npm audit signatures

@@ -90,6 +90,14 @@ Multiple tasks awaiting reads on the same player are queued; first-in-first-out.
 
 ### 16.7 Fork and suspend caps
 
+> **v2 note:** The v1 SUSPEND/FORK mechanics above operate within a single
+> host. In the v2 protocol, time-driven periodic behavior uses scope-local
+> *scheduled turns* instead of SUSPEND loops. See
+> [spec/protocol/v2-turn-network.md §VTN18](../protocol/v2-turn-network.md#vtn18-scheduled-turns-draftproposed)
+> for the proposed design.
+
+
+
 Suspended-task hoarding is bounded at the task and object level here; per-owner caps are part of storage quota in [permissions.md §11.7](permissions.md#117-storage-quotas-and-accounting).
 
 | Level | Default | Description |

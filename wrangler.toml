@@ -1,4 +1,4 @@
-name = "woo"
+name = "woah"
 main = "src/worker/index.ts"
 compatibility_date = "2026-04-01"
 compatibility_flags = ["nodejs_compat"]
@@ -8,12 +8,19 @@ enabled = true
 head_sampling_rate = 1.0
 
 [vars]
-# Cloudflare deploys start as a clean core world by default. To auto-install
-# bundled local catalogs at bootstrap, set a comma-separated list here before
-# first deploy. Foundational catalogs (help, chat, note, prog) ship classes
-# only; demoworld + dubspace + pinboard + tasks ship the bundled demo
-# instances. For foundational-only: "help,chat,note,prog". For the full demo:
-# "chat,demoworld,dubspace,help,note,pinboard,prog,tasks,blocks-demo".
+# Cloudflare deploys auto-install the bundled local catalogs listed here
+# at first-light bootstrap (empty storage). The list runs once and the
+# resulting bundle is persisted forever; flipping this variable on an
+# existing deploy does not remove already-installed catalogs.
+#
+# The shipped default is the full demo bundle so that a fresh fork-and-
+# deploy lands a populated world matching woah.inguz.workers.dev. For
+# faster first-light on operator deployments that don't want the demo
+# content, use the foundational-only subset — classes only, no bundled
+# instances; first-light cost drops from a few seconds to tens of ms:
+#   WOO_AUTO_INSTALL_CATALOGS = "chat,help,note,prog"
+# For an entirely clean core world (no auto-install), set the empty
+# string. See DEPLOY.md §WOO_AUTO_INSTALL_CATALOGS for details.
 WOO_AUTO_INSTALL_CATALOGS = "chat,demoworld,dubspace,help,note,pinboard,prog,tasks,blocks-demo"
 
 # Static assets: the bundled SPA is built to dist/ via `npm run build`.
@@ -32,6 +39,10 @@ class_name = "PersistentObjectDO"
 name = "DIRECTORY"
 class_name = "DirectoryDO"
 
+[[durable_objects.bindings]]
+name = "COMMIT_SCOPE"
+class_name = "CommitScopeDO"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["PersistentObjectDO"]
@@ -40,24 +51,9 @@ new_sqlite_classes = ["PersistentObjectDO"]
 tag = "v2"
 new_sqlite_classes = ["DirectoryDO"]
 
-# v3-v5 are the wipe dance. v3 created fresh SQLite storage under temporary
-# V3 names, v4 dropped the original empty classes, v5 renames the V3 storage
-# back to the clean names. The class names in code are unchanged; the version
-# tags are CF-side bookkeeping only.
 [[migrations]]
-tag = "v3-create-2026-05-02"
-new_sqlite_classes = ["PersistentObjectV3DO", "DirectoryV3DO"]
-
-[[migrations]]
-tag = "v4-drop-old-2026-05-02"
-deleted_classes = ["PersistentObjectDO", "DirectoryDO"]
-
-[[migrations]]
-tag = "v5-rename-back-2026-05-02"
-renamed_classes = [
-  { from = "PersistentObjectV3DO", to = "PersistentObjectDO" },
-  { from = "DirectoryV3DO", to = "DirectoryDO" }
-]
+tag = "cf-do-0006"
+new_sqlite_classes = [ "CommitScopeDO" ]
 
 # Optional staging slot. Uncomment, rename to taste, and deploy with:
 #   wrangler deploy --env staging
@@ -66,7 +62,7 @@ renamed_classes = [
 # See DEPLOY.md "Pre-deploy testing" for usage.
 #
 # [env.staging]
-# name = "woo-staging"
+# name = "woah-staging"
 #
 # [[env.staging.durable_objects.bindings]]
 # name = "WOO"
@@ -76,12 +72,17 @@ renamed_classes = [
 # name = "DIRECTORY"
 # class_name = "DirectoryDO"
 #
+# [[env.staging.durable_objects.bindings]]
+# name = "COMMIT_SCOPE"
+# class_name = "CommitScopeDO"
+#
 # [env.staging.assets]
 # directory = "./dist"
 # binding = "ASSETS"
 # not_found_handling = "single-page-application"
 #
 # [env.staging.vars]
-# # Foundational only: "help,chat,note,prog"
-# # Full demo: "chat,demoworld,dubspace,help,note,pinboard,prog,tasks,blocks-demo"
-# WOO_AUTO_INSTALL_CATALOGS = "chat,demoworld,dubspace,help,note,pinboard,prog,tasks,blocks-demo"
+# # Inherits the production default (full demo). Override here to run
+# # foundational-only or a custom bundle in staging:
+# # WOO_AUTO_INSTALL_CATALOGS = "chat,help,note,prog"
+# # WOO_AUTO_INSTALL_CATALOGS = "chat,demoworld,dubspace,help,note,pinboard,prog,tasks,blocks-demo"

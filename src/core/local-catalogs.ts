@@ -56,6 +56,7 @@ const LOCAL_CATALOG_CHAT_EXIT_ALIAS_REPAIR_MIGRATION = "2026-05-02-chat-exit-ali
 const LOCAL_CATALOG_CHAT_STALE_CLASS_VERBS_REPAIR_MIGRATION = "2026-05-02-chat-stale-class-verbs-repair";
 const LOCAL_CATALOG_CHAT_LOOK_SKIP_PRESENCE_MIGRATION = "2026-05-02-chat-look-skip-presence";
 const LOCAL_CATALOG_CHAT_COMMAND_PLAN_SOURCE_REPAIR_MIGRATION = "2026-05-03-chat-command-plan-source-repair";
+const LOCAL_CATALOG_CHAT_COMMAND_PLAN_SKIP_PRESENCE_MIGRATION = "2026-05-13-chat-command-plan-skip-presence";
 const LOCAL_CATALOG_CHAT_ACTOR_HUH_SOURCE_REPAIR_MIGRATION = "2026-05-06-chat-actor-huh-source-repair";
 const LOCAL_CATALOG_CHAT_LOOK_AT_COMMAND_REPAIR_MIGRATION = "2026-05-06-chat-look-at-command-repair";
 const LOCAL_CATALOG_CHAT_LOOK_AT_TRY_MIGRATION = "2026-05-03-chat-look-at-collect-prop-try";
@@ -109,6 +110,20 @@ const LOCAL_CATALOG_TASK_REGISTRY_ROOM_PARENT_MIGRATION = "2026-05-09-task-regis
 // instance and class are recycled, then the registry record is stripped.
 // Idempotent — gates on local presence at each step.
 const LOCAL_CATALOG_TASKSPACE_DROP_MIGRATION = "2026-05-10-taskspace-drop";
+const LOCAL_CATALOG_DUBSPACE_V2_CONTROL_PRESENCE_MIGRATION = "2026-05-13-dubspace-v2-control-presence";
+const LOCAL_CATALOG_DUBSPACE_V2_CONTROL_AUTHORITY_MIGRATION = "2026-05-13-dubspace-v2-control-authority";
+const LOCAL_CATALOG_CHAT_V2_COMMAND_PERSISTENCE_MIGRATION = "2026-05-13-chat-v2-command-persistence";
+const LOCAL_CATALOG_CHAT_ROOM_ROSTER_MIGRATION = "2026-05-14-chat-room-roster";
+const LOCAL_CATALOG_PINBOARD_ROOM_ROSTER_MIGRATION = "2026-05-14-pinboard-room-roster";
+const LOCAL_CATALOG_DUBSPACE_ROOM_ROSTER_MIGRATION = "2026-05-14-dubspace-room-roster";
+// Repair pass: deployed satellites recorded
+// LOCAL_CATALOG_CHAT_V2_COMMAND_PERSISTENCE_MIGRATION as applied while the
+// reconciler was still emitting the pre-rename `commit_policy` field, so the
+// stored arg_spec.command map for $chatroom direction verbs ended up missing
+// the `persistence: "durable"` hint the v2 plan reads. The browser then
+// defaults the move to `live`, the commit never fires, and the H1 stays put.
+// A new migration id forces one more reconcile against the current manifest.
+const LOCAL_CATALOG_CHAT_V2_COMMAND_PERSISTENCE_RECONCILE_MIGRATION = "2026-05-14-chat-v2-command-persistence-reconcile";
 const CATALOG_MIGRATION_RECORD_LIMIT = 200;
 
 export const DEFAULT_LOCAL_CATALOGS = bundledCatalogAliases();
@@ -146,6 +161,7 @@ const LOCAL_CATALOG_MIGRATION_INDEX: Array<{ id: string; only?: string }> = [
   { id: LOCAL_CATALOG_CHAT_STALE_CLASS_VERBS_REPAIR_MIGRATION, only: "chat" },
   { id: LOCAL_CATALOG_CHAT_LOOK_SKIP_PRESENCE_MIGRATION, only: "chat" },
   { id: LOCAL_CATALOG_CHAT_COMMAND_PLAN_SOURCE_REPAIR_MIGRATION, only: "chat" },
+  { id: LOCAL_CATALOG_CHAT_COMMAND_PLAN_SKIP_PRESENCE_MIGRATION, only: "chat" },
   { id: LOCAL_CATALOG_CHAT_ACTOR_HUH_SOURCE_REPAIR_MIGRATION, only: "chat" },
   { id: LOCAL_CATALOG_CHAT_LOOK_AT_COMMAND_REPAIR_MIGRATION, only: "chat" },
   { id: LOCAL_CATALOG_CHAT_LOOK_AT_TRY_MIGRATION, only: "chat" },
@@ -166,7 +182,14 @@ const LOCAL_CATALOG_MIGRATION_INDEX: Array<{ id: string; only?: string }> = [
   { id: LOCAL_CATALOG_DISPENSED_NOTE_MOVETO_REPAIR_MIGRATION, only: "dispenser" },
   { id: LOCAL_CATALOG_WIZ_PROGRAMMER_PARENT_MIGRATION, only: "prog" },
   { id: LOCAL_CATALOG_TASKS_TRACKED_BACKFILL_MIGRATION, only: "tasks" },
-  { id: LOCAL_CATALOG_TASK_REGISTRY_ROOM_PARENT_MIGRATION, only: "tasks" }
+  { id: LOCAL_CATALOG_TASK_REGISTRY_ROOM_PARENT_MIGRATION, only: "tasks" },
+  { id: LOCAL_CATALOG_DUBSPACE_V2_CONTROL_PRESENCE_MIGRATION, only: "dubspace" },
+  { id: LOCAL_CATALOG_DUBSPACE_V2_CONTROL_AUTHORITY_MIGRATION, only: "dubspace" },
+  { id: LOCAL_CATALOG_CHAT_V2_COMMAND_PERSISTENCE_MIGRATION, only: "chat" },
+  { id: LOCAL_CATALOG_CHAT_ROOM_ROSTER_MIGRATION, only: "chat" },
+  { id: LOCAL_CATALOG_PINBOARD_ROOM_ROSTER_MIGRATION, only: "pinboard" },
+  { id: LOCAL_CATALOG_DUBSPACE_ROOM_ROSTER_MIGRATION, only: "dubspace" },
+  { id: LOCAL_CATALOG_CHAT_V2_COMMAND_PERSISTENCE_RECONCILE_MIGRATION, only: "chat" }
 ];
 
 export function bundledCatalogAliases(): string[] {
@@ -382,6 +405,7 @@ function runLocalCatalogMigrations(world: WooWorld, names: readonly string[], cl
   run(LOCAL_CATALOG_CHAT_STALE_CLASS_VERBS_REPAIR_MIGRATION, { allowImplementationHints: true, reconcileClassVerbs: true, only: "chat" });
   runChatLookSkipPresenceMigration(world, names);
   run(LOCAL_CATALOG_CHAT_COMMAND_PLAN_SOURCE_REPAIR_MIGRATION, { allowImplementationHints: true, only: "chat" });
+  runChatCommandPlanSkipPresenceMigration(world, names);
   run(LOCAL_CATALOG_CHAT_ACTOR_HUH_SOURCE_REPAIR_MIGRATION, { allowImplementationHints: true, only: "chat" });
   run(LOCAL_CATALOG_CHAT_LOOK_AT_COMMAND_REPAIR_MIGRATION, { allowImplementationHints: true, only: "chat" });
   run(LOCAL_CATALOG_CHAT_LOOK_AT_TRY_MIGRATION, { allowImplementationHints: true, only: "chat" });
@@ -404,6 +428,13 @@ function runLocalCatalogMigrations(world: WooWorld, names: readonly string[], cl
   runTasksTrackedBackfillMigration(world, names);
   runTaskRegistryRoomParentMigration(world, names);
   runTaskspaceCatalogDropMigration(world);
+  runDubspaceV2ControlPresenceMigration(world, names);
+  run(LOCAL_CATALOG_DUBSPACE_V2_CONTROL_AUTHORITY_MIGRATION, { allowImplementationHints: true, reconcileClassVerbs: true, only: "dubspace" });
+  run(LOCAL_CATALOG_CHAT_V2_COMMAND_PERSISTENCE_MIGRATION, { allowImplementationHints: true, reconcileClassVerbs: true, only: "chat" });
+  run(LOCAL_CATALOG_CHAT_ROOM_ROSTER_MIGRATION, { allowImplementationHints: true, reconcileClassVerbs: true, only: "chat" });
+  run(LOCAL_CATALOG_PINBOARD_ROOM_ROSTER_MIGRATION, { allowImplementationHints: true, reconcileClassVerbs: true, only: "pinboard" });
+  run(LOCAL_CATALOG_DUBSPACE_ROOM_ROSTER_MIGRATION, { allowImplementationHints: true, reconcileClassVerbs: true, only: "dubspace" });
+  run(LOCAL_CATALOG_CHAT_V2_COMMAND_PERSISTENCE_RECONCILE_MIGRATION, { allowImplementationHints: true, reconcileClassVerbs: true, only: "chat" });
   return covered;
 }
 
@@ -471,9 +502,23 @@ function runHostScopedSchemaPlans(world: WooWorld, host: string, freshSeed: bool
     // Verify even when this manifest's previous plan completed. A host slice
     // can retain stale catalog metadata after a gateway repair, and the plan
     // id alone cannot prove the local slice is still in sync.
+    //
+    // reconcileClassVerbs walks every class verb on this slice against the
+    // bundled manifest's arg_spec / source / aliases / flags and writes only
+    // when storage drifts. Without it, a verb metadata change that landed on
+    // the gateway after this satellite's last bootstrap-style migration ID
+    // (e.g. an arg_spec.command.persistence hint added by a chat-v2 manifest
+    // bump) was unreachable: the satellite's own bootstrap migration list
+    // does not run on cold-load (only the gateway runs that), and the
+    // host-seed merge alone could miss it when the gateway's seed cache had
+    // been built before the gateway's reconcile (addVerb does not bump
+    // mutationCounter, so the hostSeedCache stayed valid). Reconciling on
+    // every cold-load is idempotent — empty diff means no writes — and is
+    // the substrate's self-heal for stale satellite verb shapes.
     const result = runLocalCatalogSchemaPlan(world, name, manifest, "host", host, {
       allowImplementationHints: true,
       reconcileSeedHooks: true,
+      reconcileClassVerbs: true,
       skipMissingSeedHooks: true
     });
     if (result.status === "failed") {
@@ -1052,6 +1097,50 @@ function runChatLookSkipPresenceMigration(world: WooWorld, names: readonly strin
   }
   markMigrationApplied(world, LOCAL_CATALOG_CHAT_LOOK_SKIP_PRESENCE_MIGRATION);
 }
+
+function runChatCommandPlanSkipPresenceMigration(world: WooWorld, names: readonly string[]): void {
+  if (!names.includes("chat")) return;
+  if (!localCatalogInstalled(world, "chat")) return;
+  if (migrationApplied(world, LOCAL_CATALOG_CHAT_COMMAND_PLAN_SKIP_PRESENCE_MIGRATION)) return;
+  const commandPlan = world.objects.has("$conversational") ? world.ownVerbExact("$conversational", "command_plan") : null;
+  if (commandPlan && commandPlan.skip_presence_check !== true) {
+    // Browser v2 can ask a space to parse text before durable/live presence has
+    // been reconciled into that scope. Planning is read-only and authority is
+    // enforced on the planned target verb, so it should not consume presence.
+    world.addVerb("$conversational", { ...commandPlan, skip_presence_check: true, version: commandPlan.version + 1 });
+  }
+  markMigrationApplied(world, LOCAL_CATALOG_CHAT_COMMAND_PLAN_SKIP_PRESENCE_MIGRATION);
+}
+
+function runDubspaceV2ControlPresenceMigration(world: WooWorld, names: readonly string[]): void {
+  if (!names.includes("dubspace")) return;
+  if (!localCatalogInstalled(world, "dubspace")) return;
+  if (migrationApplied(world, LOCAL_CATALOG_DUBSPACE_V2_CONTROL_PRESENCE_MIGRATION)) return;
+  // Browser v2 treats Dubspace enter/leave as direct live presence, while
+  // committed control writes go through the Dubspace commit scope. Existing
+  // worlds therefore need these durable control verbs repaired so the old
+  // room-presence gate does not reject commit-scope turns before recording.
+  const controls = [
+    "set_control",
+    "start_loop",
+    "stop_loop",
+    "set_drum_step",
+    "set_tempo",
+    "start_transport",
+    "stop_transport",
+    "save_scene",
+    "recall_scene"
+  ];
+  if (world.objects.has("$dubspace")) {
+    for (const name of controls) {
+      const verb = world.ownVerbExact("$dubspace", name);
+      if (!verb || verb.skip_presence_check === true) continue;
+      world.addVerb("$dubspace", { ...verb, skip_presence_check: true, version: verb.version + 1 });
+    }
+  }
+  markMigrationApplied(world, LOCAL_CATALOG_DUBSPACE_V2_CONTROL_PRESENCE_MIGRATION);
+}
+
 
 // v0.1 of $note declared `text: list<str>`. v0.2 retypes the same property
 // to `text: str` (markdown). Walk every $note descendant on whichever host

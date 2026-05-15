@@ -6,7 +6,7 @@
 https://<deployment>/mcp
 ```
 
-The reference deployment is `https://woo.hughpyle.workers.dev/mcp`.
+The reference deployment is `https://woah.inguz.workers.dev/mcp`.
 
 This is **streamable HTTP MCP**. The first request carries your token;
 subsequent requests carry an `Mcp-Session-Id` header that the server
@@ -26,7 +26,7 @@ If your client only supports bearer-token auth:
 Authorization: Bearer guest:<any-name>
 ```
 
-The bearer envelope is just transport syntax — the Port token (`guest:...`,
+The bearer envelope is just transport syntax — the woah token (`guest:...`,
 `bearer:<jwt>`, `apikey:<id>:<secret>`, etc.) goes inside it.
 
 | Token | Purpose |
@@ -48,9 +48,9 @@ frame) — picking MCP doesn't change which tokens you have.
 The server resolves your token to a **session** + **actor** pair:
 
 - **Session**: the live binding between your connection and the world.
-  Your session has its own `current_location`, observation queue, and
-  focus list.
-- **Actor**: a normal Port object. Has properties (name, description,
+  Your session has its own `active_scope`, observation queue, and focus
+  list.
+- **Actor**: a normal woah object. Has properties (name, description,
   inventory, etc.), verbs (`focus`, `wait`, `unfocus`, plus whatever
   the actor's class chain adds), and an owner.
 

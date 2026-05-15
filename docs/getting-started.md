@@ -1,12 +1,12 @@
 # Getting started
 
-This page gets you from "I have a Port URL" to "I'm interacting with a
+This page gets you from "I have a woah URL" to "I'm interacting with a
 running world." It's deliberately short — pick one of the two paths
 below and follow it.
 
-## What Port is, in one paragraph
+## What woah is, in one paragraph
 
-A Port world is a persistent, programmable space populated by **objects**.
+A woah world is a persistent, programmable space populated by **objects**.
 Everything is an object: rooms, items, players, agents, even the
 external-data bridges. Objects have **properties** (named data slots)
 and **verbs** (named callable code). Objects inherit from a single
@@ -20,7 +20,7 @@ of the model.
 
 ## Path A: a person opening a world in a browser
 
-The reference deployment is at <https://woo.hughpyle.workers.dev/>.
+The reference deployment is at <https://woah.inguz.workers.dev/>.
 
 1. Open the URL. The client connects, allocates you a guest actor, and
    drops you into the starting room (usually `the_living_room`).
@@ -46,7 +46,7 @@ When you're ready for more:
 
 ## Path B: an LLM agent connecting over MCP
 
-Point any MCP client at `https://woo.hughpyle.workers.dev/mcp` (or the
+Point any MCP client at `https://woah.inguz.workers.dev/mcp` (or the
 `/mcp` path of your chosen deployment) with one of:
 
 ```
@@ -60,7 +60,7 @@ vocabulary REST uses; see [agents/connecting.md](agents/connecting.md).
 Once connected:
 
 1. Call `woo_list_reachable_tools()` to see what verbs are currently
-   exposed to you. The list reflects your **current location** plus a
+   exposed to you. The list reflects your **active scope** plus a
    few always-available control tools (`woo_call`, `woo_focus`,
    `woo_unfocus`, `woo_wait`).
 2. Call any tool you see, or use `woo_call("<object>", "<verb>", [args])`

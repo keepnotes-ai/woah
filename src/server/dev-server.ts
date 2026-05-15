@@ -1,5 +1,5 @@
 import http from "node:http";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { parse } from "node:url";
 import { createServer as createViteServer } from "vite";
 import { WebSocket, WebSocketServer } from "ws";
@@ -22,6 +22,25 @@ import {
 import { installGitHubTap, updateGitHubTap } from "./github-taps";
 import { LocalSQLiteRepository } from "./sqlite-repository";
 import { McpGateway } from "../mcp/gateway";
+import {
+  buildShadowBrowserSessionAuth,
+  buildShadowBrowserDeltaTransfer,
+  createShadowBrowserClient,
+  createShadowBrowserRelayShim,
+  disposeShadowBrowserNode,
+  handleShadowBrowserTurnExecEnvelope,
+  mergeShadowBrowserSessionState,
+  openShadowBrowserScope,
+  receiveShadowBrowserEnvelopeReceipt,
+  shadowBrowserSessionBearer,
+  shadowBrowserSessionClaimsValue,
+  shadowLiveEventsForTranscript,
+  shadowBrowserTransportHello,
+  type ShadowBrowserRelayShim
+} from "../core/shadow-browser-node";
+import { buildTransportErrorEnvelope, encodeEnvelope, type ShadowEnvelope } from "../core/shadow-envelope";
+import type { ShadowCommitAccepted } from "../core/shadow-commit-scope";
+import { parseShadowScopeHeadJson } from "../core/shadow-scope-head";
 
 // Local dev server only: HTTP authoring endpoints require a session and then
 // defer to the world's object-authoring permission checks.
@@ -31,6 +50,8 @@ ensureLocaldevWizardApiKey();
 if (process.env.WOO_METRICS !== "off") {
   world.setMetricsHook((event) => console.log("woo.metric", JSON.stringify({ ...event, ts: Date.now(), host_key: "dev" })));
 }
+const v2RelaysByScope = new Map<ObjRef, ShadowBrowserRelayShim>();
+const v2SocketsByNode = new Map<string, WebSocket>();
 const mcpGateway = new McpGateway(world, {
   serverName: "woo-dev",
   broadcasts: {
@@ -62,6 +83,15 @@ const server = http.createServer(async (req, res) => {
       const webResponse = await mcpGateway.handle(webRequest);
       await writeWebResponseToNode(webResponse, res);
       return;
+    }
+    if (req.method === "POST" && url.pathname === "/v2/session/mint") {
+      const body = await readJson(req);
+      const token = String(body.token ?? "");
+      const session = authenticateToken(token);
+      return json(res, {
+        token: shadowBrowserSessionBearer(session),
+        claims: shadowBrowserSessionClaimsValue(session, "local-dev", [session.actor])
+      });
     }
     const protocol = await handleRestProtocolRequest(nodeRestRequest(req, url.pathname ?? ""), {
       world,
@@ -166,7 +196,21 @@ const server = http.createServer(async (req, res) => {
   vite.middlewares(req, res);
 });
 
-const wss = new WebSocketServer({ server, path: "/ws" });
+const wss = new WebSocketServer({ noServer: true });
+const v2wss = new WebSocketServer({
+  noServer: true,
+  handleProtocols: (protocols) => protocols.has("woo-v2.turn-network.json") ? "woo-v2.turn-network.json" : false
+});
+
+server.on("upgrade", (req, socket, head) => {
+  const pathname = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`).pathname;
+  const target = pathname === "/ws" ? wss : pathname === "/v2/turn-network/ws" ? v2wss : null;
+  if (!target) {
+    socket.destroy();
+    return;
+  }
+  target.handleUpgrade(req, socket, head, (ws) => target.emit("connection", ws, req));
+});
 
 wss.on("connection", (ws) => {
   const socketId = `ws-${socketCounter++}`;
@@ -226,6 +270,96 @@ wss.on("connection", (ws) => {
   });
 });
 
+v2wss.on("connection", (ws, req) => {
+  if (ws.protocol !== "woo-v2.turn-network.json") {
+    ws.close(1002, "missing woo-v2.turn-network.json subprotocol");
+    return;
+  }
+  const url = new URL(req.url ?? "/v2/turn-network/ws", `http://${req.headers.host ?? "localhost"}`);
+  const token = url.searchParams.get("token") ?? "";
+  const node = url.searchParams.get("node") || `browser:dev:${socketCounter++}`;
+  const requestedScope = url.searchParams.get("scope") as ObjRef | null;
+  const lastKnownHead = parseShadowScopeHeadJson(url.searchParams.get("last_known_head"));
+  let session: Session;
+  try {
+    if (!token) throw wooError("E_NOSESSION", "token query parameter is required");
+    session = authenticateToken(token);
+  } catch (err) {
+    ws.close(1008, normalizeError(err).message);
+    return;
+  }
+  const scope = requestedScope || session.actor;
+
+  const socketId = `v2-ws-${socketCounter++}`;
+  world.attachSocket(session.id, socketId);
+  sockets.set(ws, { sessionId: session.id, actor: session.actor, socketId });
+  // The local WebSocket shim keeps one browser node for the connection, matching
+  // the Worker path's socket-lifetime idempotency and cache behavior.
+  const browser = v2ShadowBrowser(node, token, session, scope || session.actor);
+  ensureDevV2SerializedSession(browser.relay, session);
+  v2SocketsByNode.set(browser.node, ws);
+  const hello = shadowBrowserTransportHello(browser);
+  ws.send(encodeEnvelope({
+    v: 2,
+    type: hello.kind,
+    id: `dev-relay:hello:${randomUUID()}`,
+    from: browser.relay.node,
+    to: browser.node,
+    actor: session.actor,
+    session: session.id,
+    auth: { mode: "session", token },
+    body: hello
+  } satisfies ShadowEnvelope<typeof hello>));
+  // Match the Worker binding: the first frame is TransportHello, followed by a
+  // verified state-plane projection or catch-up delta for the requested scope.
+  void openShadowBrowserScope(browser, {
+    preseed_catalog_pages: true,
+    ...(lastKnownHead ? { last_known_head: lastKnownHead } : {})
+  }).then((opened) => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    ws.send(encodeEnvelope({
+      v: 2,
+      type: opened.transfer.kind,
+      id: `dev-relay:state:${randomUUID()}`,
+      from: browser.relay.node,
+      to: browser.node,
+      actor: session.actor,
+      session: session.id,
+      auth: { mode: "session", token },
+      body: opened.transfer
+    } satisfies ShadowEnvelope<typeof opened.transfer>));
+  }).catch((err) => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    ws.send(encodeEnvelope(buildTransportErrorEnvelope({
+      id: `dev-relay:error:${randomUUID()}`,
+      from: browser.relay.node,
+      to: node,
+      actor: session.actor,
+      session: session.id,
+      auth: { mode: "session", token },
+      code: "E_PROTOCOL",
+      message: normalizeError(err).message ?? "v2 open failed"
+    })));
+  });
+
+  ws.on("message", (raw) => {
+    if (rawDataSize(raw) > 1024 * 1024) {
+      ws.close(1009, "frame too large");
+      return;
+    }
+    void handleV2ShadowFrame(ws, node, token, session, browser, String(raw));
+  });
+  ws.on("close", () => {
+    world.detachSocket(session.id, socketId);
+    sockets.delete(ws);
+    // The browser worker reuses its node id across scope changes. A previous
+    // scope socket can close after the replacement socket has registered, so
+    // only remove the node mapping if this close still owns it.
+    if (v2SocketsByNode.get(browser.node) === ws) v2SocketsByNode.delete(browser.node);
+    disposeShadowBrowserNode(browser);
+  });
+});
+
 server.listen(port, () => {
   console.log(`woo dev server http://localhost:${port}`);
 });
@@ -262,6 +396,197 @@ function attachedSession(ws: WebSocket): AttachedSocket | null {
   if (world.sessionAlive(session.sessionId)) return session;
   expireAttachedSessions([session.sessionId]);
   return null;
+}
+
+function v2ShadowBrowser(node: string, token: string, session: Session, scope: ObjRef): ReturnType<typeof createShadowBrowserClient> {
+  const relay = v2RelayForScope(scope);
+  return createShadowBrowserClient({
+    node,
+    scope,
+    actor: session.actor,
+    session: session.id,
+    relay,
+    token
+  });
+}
+
+function v2RelayForScope(scope: ObjRef): ShadowBrowserRelayShim {
+  let relay = v2RelaysByScope.get(scope);
+  if (!relay) {
+    relay = createShadowBrowserRelayShim({
+      node: "node:dev:relay",
+      scope,
+      serialized: world.exportWorld(),
+      deployment: "local-dev"
+    });
+    v2RelaysByScope.set(scope, relay);
+    return relay;
+  }
+  // Dev mirrors the Worker/CommitScopeDO lifetime: one relay per commit scope,
+  // many browser sockets. Refresh session auth from the live gateway world
+  // without replacing scope-local committed state such as v2-entered session
+  // locations.
+  refreshDevV2RelaySessions(relay);
+  return relay;
+}
+
+function refreshDevV2RelaySessions(relay: ShadowBrowserRelayShim): void {
+  const auth = buildShadowBrowserSessionAuth({
+    sessions: world.exportSessions(),
+    scope: relay.commit_scope.scope,
+    deployment: relay.deployment
+  });
+  relay.session_auth = auth.session_auth;
+  relay.session_revs = auth.session_revs;
+  for (const browser of relay.browsers.values()) {
+    if (!browser.session || !browser.session_token) continue;
+    const claims = relay.session_auth.get(shadowBrowserSessionBearer({ id: browser.session, actor: browser.actor }));
+    if (claims) relay.session_auth.set(browser.session_token, claims);
+  }
+  relay.commit_scope.serialized.sessions = mergeShadowBrowserSessionState(relay.commit_scope.serialized.sessions, world.exportSessions());
+}
+
+function ensureDevV2SerializedSession(relay: ShadowBrowserRelayShim, session: Session): void {
+  // Existing dev relays can outlive the local world snapshot they were opened
+  // with. The accepted socket session must be present in the scope snapshot
+  // before planning, or the turn fails before the recorder can produce a
+  // useful transcript.
+  //
+  // Do not merely check for presence: a reused commit-scope relay can already
+  // have a row for this session with stale detach/expiry metadata. Refresh the
+  // gateway-owned liveness fields while preserving the scope-owned committed
+  // session location when one has already been advanced by a v2 turn.
+  const serialized = {
+    id: session.id,
+    actor: session.actor,
+    started: session.started,
+    expiresAt: session.expiresAt,
+    lastDetachAt: session.lastDetachAt ?? null,
+    tokenClass: session.tokenClass,
+    activeScope: session.activeScope,
+    apikeyId: session.apikeyId
+  };
+  const index = relay.commit_scope.serialized.sessions.findIndex((item) => item.id === session.id);
+  if (index < 0) {
+    relay.commit_scope.serialized.sessions.push(serialized);
+    refreshDevV2SerializedSessionActor(relay, session.actor);
+    return;
+  }
+  const existing = relay.commit_scope.serialized.sessions[index];
+  relay.commit_scope.serialized.sessions[index] = {
+    ...serialized,
+    activeScope: existing.actor === session.actor && existing.activeScope !== undefined
+      ? existing.activeScope
+      : serialized.activeScope
+  };
+  refreshDevV2SerializedSessionActor(relay, session.actor);
+}
+
+function refreshDevV2SerializedSessionActor(relay: ShadowBrowserRelayShim, actor: ObjRef): void {
+  const [record] = world.exportObjects([actor]);
+  if (!record) return;
+  const index = relay.commit_scope.serialized.objects.findIndex((obj) => obj.id === actor);
+  if (index < 0) {
+    relay.commit_scope.serialized.objects.push(record);
+    relay.commit_scope.serialized.objects.sort((a, b) => a.id.localeCompare(b.id));
+    return;
+  }
+  relay.commit_scope.serialized.objects[index] = record;
+}
+
+async function handleV2ShadowFrame(
+  ws: WebSocket,
+  node: string,
+  token: string,
+  session: Session,
+  browser: ReturnType<typeof createShadowBrowserClient>,
+  encoded: string
+): Promise<void> {
+  try {
+    refreshDevV2RelaySessions(browser.relay);
+    ensureDevV2SerializedSession(browser.relay, session);
+    const receipt = receiveShadowBrowserEnvelopeReceipt(browser, encoded);
+    const reply = await handleShadowBrowserTurnExecEnvelope(browser, receipt);
+    if (reply?.body.ok === true && reply.body.commit && reply.body.transcript) {
+      world.applyCommittedShadowTranscript(reply.body.transcript);
+    }
+    if (reply) {
+      ws.send(encodeEnvelope(reply));
+      sendDevV2Fanout(browser, reply);
+    }
+  } catch (err) {
+    ws.send(encodeEnvelope(buildTransportErrorEnvelope({
+      id: `dev-relay:error:${Date.now()}`,
+      from: "node:dev:relay",
+      to: node,
+      actor: session.actor,
+      session: session.id,
+      auth: { mode: "session", token },
+      code: "E_PROTOCOL",
+      message: normalizeError(err).message ?? "v2 transport error"
+    })));
+  }
+}
+
+function sendDevV2Fanout(
+  origin: ReturnType<typeof createShadowBrowserClient>,
+  reply: NonNullable<Awaited<ReturnType<typeof handleShadowBrowserTurnExecEnvelope>>>
+): void {
+  const body = reply.body;
+  if (body.ok !== true || !body.transcript) return;
+  if (!body.commit) {
+    sendDevV2LiveFanout(origin, reply);
+    return;
+  }
+  for (const browser of origin.relay.browsers.values()) {
+    if (browser.node === origin.node) continue;
+    if (origin.relay.subscriptions.get(body.commit.position.scope)?.has(browser.node) !== true) continue;
+    const socket = v2SocketsByNode.get(browser.node);
+    if (!socket || socket.readyState !== WebSocket.OPEN) continue;
+    const transfer = buildShadowBrowserDeltaTransfer(origin.relay, body.commit as ShadowCommitAccepted, body.transcript, browser.node, {
+      actor: browser.actor,
+      session: browser.session
+    });
+    socket.send(encodeEnvelope({
+      v: 2,
+      type: transfer.kind,
+      id: `${origin.relay.node}:state:${body.commit.position.seq}:${browser.node}`,
+      from: origin.relay.node,
+      to: browser.node,
+      actor: browser.actor,
+      ...(browser.session ? { session: browser.session } : {}),
+      auth: { mode: "session", token: browser.session_token ?? "" },
+      body: transfer
+    } satisfies ShadowEnvelope<typeof transfer>));
+  }
+}
+
+function sendDevV2LiveFanout(
+  origin: ReturnType<typeof createShadowBrowserClient>,
+  reply: NonNullable<Awaited<ReturnType<typeof handleShadowBrowserTurnExecEnvelope>>>
+): void {
+  const body = reply.body;
+  if (body.ok !== true || !body.transcript) return;
+  for (const event of shadowLiveEventsForTranscript(origin, body.transcript)) {
+    const scope = event.audience?.scope ?? event.scope;
+    for (const browser of origin.relay.browsers.values()) {
+      if (browser.node === origin.node) continue;
+      if (typeof scope === "string" && origin.relay.subscriptions.get(scope)?.has(browser.node) !== true) continue;
+      const socket = v2SocketsByNode.get(browser.node);
+      if (!socket || socket.readyState !== WebSocket.OPEN) continue;
+      socket.send(encodeEnvelope({
+        v: 2,
+        type: event.kind,
+        id: `${event.id}:${browser.node}`,
+        from: origin.relay.node,
+        to: browser.node,
+        actor: browser.actor,
+        ...(browser.session ? { session: browser.session } : {}),
+        auth: { mode: "session", token: browser.session_token ?? "" },
+        body: event
+      } satisfies ShadowEnvelope<typeof event>));
+    }
+  }
 }
 
 function expireAttachedSessions(sessionIds: string[]): void {

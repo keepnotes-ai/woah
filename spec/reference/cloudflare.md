@@ -524,7 +524,11 @@ Required event types (cardinality budget per DO):
 
 Cost: one AE write per call is fine at v1 traffic levels; budget revisits at scale.
 
-Startup storage instrumentation is emitted by the DO/repository wrapper before the `WooWorld` metrics hook exists. It covers repository schema migration, repository load/save, host-seed fetch, Directory schema setup, Directory object-route registration (`directory_register_objects`), and Directory session-route registration (`directory_register_session`). Both Directory register phases include a `writes` count distinguishing diff-deduped no-ops (`writes: 0`) from actual row writes; downstream metric consumers can monitor that ratio to confirm dedup is healthy.
+Startup storage instrumentation is emitted by the DO/repository wrapper before the `WooWorld` metrics hook exists. It covers repository schema migration, repository load/save, host-seed fetch (`host_seed_fetch`), Directory schema setup, Directory object-route registration (`directory_register_objects`), and Directory session-route registration (`directory_register_session`). Both Directory register phases include a `writes` count distinguishing diff-deduped no-ops (`writes: 0`) from actual row writes; downstream metric consumers can monitor that ratio to confirm dedup is healthy.
+
+Cold-restart skip paths emit dedicated phases when the gateway recognizes that no work is needed:
+
+- `directory_register_objects_skip` — gateway computed a SHA-256 of its current object-route set, found it identical to the persisted `published_routes_digest` meta value, and bypassed the Directory `register-objects` RPC entirely. Carries `routes` (count compared) but no `writes`. Absence of any `directory_register_objects` metric on a cold restart with this skip emitted is the actual savings (~one signed RPC + Directory transaction per cold gateway boot).
 
 ### R10.2 Structured logs
 
@@ -612,7 +616,7 @@ Unresolvable identifiers → `404 E_OBJNF`.
 
 ### R11.3 Auth at the edge
 
-The Worker validates `Authorization: Session <id>` against the Sessions surface (a singleton SessionsDO or per-player session table — see R11.4). Successful resolution yields `{actor, expires_at, current_location}`. The actor, current session location, and correlation id flow into the DO RPC envelope.
+The Worker validates `Authorization: Session <id>` against the Sessions surface (a singleton SessionsDO or per-player session table — see R11.4). Successful resolution yields `{actor, expires_at, active_scope}`. The actor, current session active scope, and correlation id flow into the DO RPC envelope. Transitional envelopes may also carry `current_location` as a legacy alias.
 
 Token classes (`guest:`, `session:`, `bearer:`, `apikey:`) are validated here. Rejected tokens return `400 E_INVARG` or `401 E_NOSESSION` without ever touching DOs.
 
@@ -626,7 +630,7 @@ Two reasonable shapes; pick at impl time, not at spec time:
 
 Lean: **Option A with embedded player ULID**. Avoids a singleton bottleneck and matches identity.md's "session is per-actor."
 
-The Directory's session routing row is a routing cache, not the canonical session record, but it mirrors `current_location` so object-routed REST calls can seed the target host's session record before dispatch. WebSocket and internal host-to-host calls carry the same value in the forwarded call body/context.
+The Directory's session routing row is a routing cache, not the canonical session record, but it mirrors the session's `active_scope` so object-routed REST calls can seed the target host's session record before dispatch. The current SQLite column name remains `current_location` until a storage migration is justified. WebSocket and internal host-to-host calls carry the same value in the forwarded call body/context.
 
 ---
 
@@ -635,7 +639,7 @@ The Directory's session routing row is a routing cache, not the canonical sessio
 Skeleton `wrangler.toml`:
 
 ```toml
-name = "woo"
+name = "woah"
 main = "src/worker/index.ts"
 compatibility_date = "2026-04-01"
 compatibility_flags = ["nodejs_als"]
@@ -707,14 +711,15 @@ That is the entire required surface. Optional bindings (Workers Analytics Engine
 
 ### R14.2 Required configuration
 
-Two secrets must be set before first deploy. They are single-string values and go through `wrangler secret put` (never the `[vars]` block in `wrangler.toml`).
+Two secrets must be set before first deploy. A third secret is required before enabling self-service signup. They are single-string values and go through `wrangler secret put` (never the `[vars]` block in `wrangler.toml`).
 
 | Secret | Purpose |
 |---|---|
 | `WOO_INITIAL_WIZARD_TOKEN` | One-time token presented at first auth to claim the `$wiz` binding. Consumed on use; subsequent auths cannot present the same value. See §R14.4. |
 | `WOO_INTERNAL_SECRET` | HMAC key for gateway/Directory/cluster-host internal requests. Unsigned or tampered internal requests are rejected before forwarded session, actor, or `progr` fields are trusted. |
+| `TURNSTILE_SECRET_KEY` | Cloudflare Turnstile siteverify secret for `/api/signup`. Required only for self-service signup; requests fail closed when unset. |
 
-The Worker checks these at startup. A missing required secret is a `503` with a clear remediation message — see §R14.7.
+The Worker checks bootstrap/internal secrets at startup. A missing signup secret is reported on `/api/signup` with `E_PERM` — see §R14.7.
 
 For local development, the value lives in `.dev.vars` (gitignored) with a sane default. A `.dev.vars.example` file in the repo root shows the shape; operators copy it to `.dev.vars` and edit.
 
@@ -762,6 +767,13 @@ Seeded deterministic ULID allocation remains deferred. Until it lands, `WOO_SEED
 2. First request triggers bootstrap (per [§R9](#r9-bootstrap-on-cloudflare)).
 3. Operator runs the wizard-bootstrap exchange (§R14.4).
 4. World is live.
+
+Fresh Worker namespaces must not include historical `deleted_classes` or
+`renamed_classes` entries for classes that were never deployed in that
+namespace. Those entries are valid only as append-only upgrade history for the
+specific Worker that previously created the source classes. A renamed or
+replacement namespace such as the reference `woah` deployment starts with a
+create-only class ledger for its current Durable Object bindings.
 
 **Pulling upstream changes**:
 

@@ -1,10 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { installVerb, installVerbAs } from "../src/core/authoring";
 import { createWorld } from "../src/core/bootstrap";
 import { McpHost, type McpTool } from "../src/mcp/host";
 import { McpGateway } from "../src/mcp/gateway";
 import { buildServerInstructions, createMcpServer } from "../src/mcp/server";
-import type { Observation, ObjRef, RemoteToolDescriptor, VerbDef, WooValue } from "../src/core/types";
+import type { EffectTranscript } from "../src/core/effect-transcript";
+import { applyShadowTranscriptToCommittedState } from "../src/core/shadow-commit-scope";
+import type { MetricEvent, Observation, ObjRef, RemoteToolDescriptor, VerbDef, WooValue } from "../src/core/types";
 import type { CallContext, HostBridge, MoveObjectResult, RoomSnapshot, ScopedObjectSummary, WooWorld } from "../src/core/world";
 
 function bootstrapWorld() {
@@ -564,6 +566,210 @@ describe("McpHost", () => {
     aliceInstance.dispose();
   });
 
+  it("refreshes tool lists for v2 accepted-frame observers", async () => {
+    const world = bootstrapWorld();
+    world.setProp("$system", "guest_initial_room", null);
+    const alice = world.auth("guest:mcp-v2-refresh-alice");
+    const bob = world.auth("guest:mcp-v2-refresh-bob");
+    const host = new McpHost(world);
+    const bobInstance = createMcpServer({ world, host, actor: bob.actor, sessionId: bob.id });
+    let bobNotifications = 0;
+    (bobInstance.server as unknown as { notification: (notification: unknown) => Promise<void> }).notification = async () => { bobNotifications += 1; };
+    await host.refreshToolList(bob.id, bob.actor);
+
+    world.applyCommittedShadowTranscript({
+      kind: "woo.effect_transcript.shadow.v1",
+      id: "mcp-v2-observer-refresh",
+      route: "direct",
+      scope: "the_chatroom",
+      seq: -1,
+      session: alice.id,
+      call: { actor: alice.actor, target: "the_chatroom", verb: "enter", args: [] },
+      reads: [],
+      writes: [
+        { cell: { kind: "prop", object: "the_chatroom", name: "subscribers" }, value: [bob.actor, alice.actor], op: "set" },
+        { cell: { kind: "prop", object: "the_chatroom", name: "session_subscribers" }, value: [
+          { session: bob.id, actor: bob.actor },
+          { session: alice.id, actor: alice.actor }
+        ], op: "set" },
+        { cell: { kind: "location", object: bob.actor }, value: "the_chatroom", op: "move" },
+        { cell: { kind: "location", object: alice.actor }, value: "the_chatroom", op: "move" }
+      ],
+      creates: [],
+      moves: [
+        { object: bob.actor, from: "$nowhere", to: "the_chatroom" },
+        { object: alice.actor, from: "$nowhere", to: "the_chatroom" }
+      ],
+      observations: [{ type: "entered", actor: alice.actor, room: "the_chatroom", text: "Alice entered.", ts: 1 }],
+      logicalInputs: [],
+      untrackedEffects: [],
+      result: true,
+      complete: true,
+      incompleteReasons: [],
+      hash: "mcp-v2-observer-refresh"
+    });
+    expect(world.activeScopeForSession(alice.id)).toBe("the_chatroom");
+    host.routeShadowAcceptedFrame({
+      kind: "woo.commit.accepted.shadow.v1",
+      id: "mcp-v2-observer-refresh",
+      position: { kind: "woo.scope_head.shadow.v1", scope: "the_chatroom", epoch: 1, seq: 1, hash: "head" },
+      transcript_hash: "mcp-v2-observer-refresh",
+      post_state_hash: "post",
+      observations: [{ type: "entered", actor: alice.actor, room: "the_chatroom", text: "Alice entered.", ts: 1 }],
+      receipt: {
+        kind: "woo.commit_receipt.shadow.v1",
+        id: "mcp-v2-observer-refresh",
+        route: "direct",
+        scope: "the_chatroom",
+        seq: -1,
+        transcript_hash: "mcp-v2-observer-refresh",
+        pre_state_hash: "pre",
+        post_state_hash: "post",
+        accepted: true,
+        errors: []
+      }
+    }, alice.id);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(bobNotifications).toBe(1);
+    bobInstance.dispose();
+  });
+
+  it("applies v2 accepted transcript logs, counters, and modified times through the gateway cache", () => {
+    const world = bootstrapWorld();
+    world.setProp("$system", "guest_initial_room", null);
+    const session = world.auth("guest:mcp-v2-cache-apply");
+    const otherSession = world.auth("guest:mcp-v2-cache-apply-other");
+    const metrics: MetricEvent[] = [];
+    world.setMetricsHook((event) => metrics.push(event));
+    world.attachSocket(session.id, "socket:mcp-v2-cache-apply");
+    world.attachSocket(otherSession.id, "socket:mcp-v2-cache-apply-other");
+    world.touchSessionInput(otherSession.id, 123_456);
+    const before = world.exportWorld().objectCounter;
+    const created = `mcp_cache_obj_${before + 10}`;
+    const modifiedBefore = world.object(session.actor).modified;
+    const transcript: EffectTranscript = {
+      kind: "woo.effect_transcript.shadow.v1",
+      id: "mcp-v2-cache-apply",
+      route: "sequenced",
+      scope: "the_chatroom",
+      seq: 3,
+      session: session.id,
+      call: { actor: session.actor, target: "the_chatroom", verb: "cache_apply_probe", args: [] },
+      reads: [],
+      writes: [
+        { cell: { kind: "prop", object: session.actor, name: "cache_probe" }, value: "updated", op: "set" }
+      ],
+      creates: [
+        { object: created, name: "cache probe", parent: "$thing", owner: session.actor, location: "the_chatroom", anchor: null, flags: {}, writer: { progr: "$wiz", definer: "$thing", verb: "cache_apply_probe", thisObj: "the_chatroom", caller: session.actor, callerPerms: session.actor } }
+      ],
+      moves: [],
+      observations: [{ type: "cache_apply_probe", actor: session.actor, source: "the_chatroom", text: "probe", ts: 1 }],
+      logicalInputs: [],
+      untrackedEffects: [],
+      result: true,
+      complete: true,
+      incompleteReasons: [],
+      hash: "mcp-v2-cache-apply"
+    };
+    const beforeApply = world.exportWorld();
+    const timestamp = Date.now() + 1_000;
+    let expected = applyShadowTranscriptToCommittedState(beforeApply, transcript, { objectTimestamp: timestamp });
+    expected = applyShadowTranscriptToCommittedState(expected, transcript, { objectTimestamp: timestamp });
+
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(timestamp);
+      world.applyCommittedShadowTranscript(transcript);
+      world.applyCommittedShadowTranscript(transcript);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const after = world.exportWorld();
+    expect(after.objects).toEqual(expected.objects);
+    expect(after.sessions).toEqual(expected.sessions);
+    expect(after.logs).toEqual(expected.logs);
+    expect(after.objectCounter).toBe(expected.objectCounter);
+    const chatLog = after.logs.find(([space]) => space === "the_chatroom")?.[1] ?? [];
+    expect(chatLog.filter((entry) => entry.seq === 3)).toHaveLength(1);
+    expect(after.objectCounter).toBeGreaterThanOrEqual(before + 11);
+    expect(world.sessions.get(session.id)?.attachedSockets.has("socket:mcp-v2-cache-apply")).toBe(true);
+    expect(world.sessions.get(session.id)?.attachedSockets.has("socket:mcp-v2-cache-apply-other")).toBe(false);
+    expect(world.sessions.get(otherSession.id)?.attachedSockets.has("socket:mcp-v2-cache-apply-other")).toBe(true);
+    expect(world.sessions.get(otherSession.id)?.attachedSockets.has("socket:mcp-v2-cache-apply")).toBe(false);
+    expect(world.sessions.get(otherSession.id)?.lastInputAt).toBe(123_456);
+    expect(world.object(created).created).toBeGreaterThan(0);
+    expect(world.object(created).modified).toBeGreaterThan(0);
+    expect(world.object(session.actor).modified).toBeGreaterThanOrEqual(modifiedBefore);
+    const gatewayApplyMetrics = metrics.filter((event) => event.kind === "shadow_gateway_apply_step");
+    expect(gatewayApplyMetrics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "shadow_gateway_apply_step", phase: "apply_creates", scope: "the_chatroom", route: "sequenced" }),
+      expect.objectContaining({ kind: "shadow_gateway_apply_step", phase: "collect_writes", scope: "the_chatroom", route: "sequenced" }),
+      expect.objectContaining({ kind: "shadow_gateway_apply_step", phase: "apply_writes", scope: "the_chatroom", route: "sequenced" }),
+      expect.objectContaining({ kind: "shadow_gateway_apply_step", phase: "sort_objects", scope: "the_chatroom", route: "sequenced" }),
+      expect.objectContaining({ kind: "shadow_gateway_apply_step", phase: "apply_session", scope: "the_chatroom", route: "sequenced" }),
+      expect.objectContaining({ kind: "shadow_gateway_apply_step", phase: "apply_log", scope: "the_chatroom", route: "sequenced" }),
+      expect.objectContaining({ kind: "shadow_gateway_apply_step", phase: "counters", scope: "the_chatroom", route: "sequenced" }),
+      expect.objectContaining({ kind: "shadow_gateway_apply_step", phase: "total", scope: "the_chatroom", route: "sequenced" })
+    ]));
+    expect(gatewayApplyMetrics.find((event) => event.phase === "total")).toMatchObject({
+      objects: expect.any(Number),
+      properties: expect.any(Number),
+      sessions: expect.any(Number),
+      logs: expect.any(Number),
+      creates: 1,
+      writes: 1
+    });
+  });
+
+  it("matches the serialized applier for write-only v2 accepted transcripts", () => {
+    const world = bootstrapWorld();
+    world.setProp("$system", "guest_initial_room", null);
+    const session = world.auth("guest:mcp-v2-cache-write-only");
+    const beforeApply = world.exportWorld();
+    const transcript: EffectTranscript = {
+      kind: "woo.effect_transcript.shadow.v1",
+      id: "mcp-v2-cache-write-only",
+      route: "sequenced",
+      scope: "the_chatroom",
+      seq: 4,
+      session: session.id,
+      call: { actor: session.actor, target: "the_chatroom", verb: "cache_write_only_probe", args: [] },
+      reads: [],
+      writes: [
+        { cell: { kind: "prop", object: session.actor, name: "cache_probe" }, value: "write-only", op: "set" },
+        { cell: { kind: "location", object: session.actor }, value: "the_lobby", op: "set" },
+        { cell: { kind: "contents", object: "the_chatroom" }, value: ["$wiz", session.actor], op: "set" }
+      ],
+      creates: [],
+      moves: [],
+      observations: [{ type: "cache_write_only_probe", actor: session.actor, source: "the_chatroom", text: "write-only", ts: 1 }],
+      logicalInputs: [],
+      untrackedEffects: [],
+      result: true,
+      complete: true,
+      incompleteReasons: [],
+      hash: "mcp-v2-cache-write-only"
+    };
+    const timestamp = Date.now() + 1_000;
+    const expected = applyShadowTranscriptToCommittedState(beforeApply, transcript, { objectTimestamp: timestamp });
+
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(timestamp);
+      world.applyCommittedShadowTranscript(transcript);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const after = world.exportWorld();
+    expect(after.objects).toEqual(expected.objects);
+    expect(after.sessions).toEqual(expected.sessions);
+    expect(after.logs).toEqual(expected.logs);
+    expect(after.objectCounter).toBe(expected.objectCounter);
+  });
+
   it("does not enumerate remote tools while sending post-call list_changed hints", async () => {
     const world = bootstrapWorld();
     // The bridge below declares the_chatroom remote; the lazy-refresh contract
@@ -772,7 +978,7 @@ describe("McpGateway", () => {
     const actor = wooSession?.actor;
     expect(actor).toBeTruthy();
     home.object(actor!).location = "remote_gallery";
-    wooSession!.currentLocation = "remote_gallery";
+    wooSession!.activeScope = "remote_gallery";
     home.object("remote_gallery").contents.add(actor!);
     remote.setSpaceSubscriber("remote_gallery", actor!, true, wooSession!.id);
 
@@ -1020,6 +1226,24 @@ describe("McpGateway", () => {
     const body = await response.json() as { jsonrpc: string; id: number; error: { code: number; data?: { code?: string } } };
     expect(body.jsonrpc).toBe("2.0");
     expect(body.id).toBe(9);
+    expect(body.error.code).toBe(-32001);
+    expect(body.error.data?.code).toBe("E_NOSESSION");
+  });
+
+  it("rejects first-request MCP tokens outside the woo auth token vocabulary", async () => {
+    const world = bootstrapWorld();
+    const gateway = new McpGateway(world);
+    const response = await gateway.handle(jsonRpcRequest("http://t/mcp", {
+      jsonrpc: "2.0",
+      id: 91,
+      method: "initialize",
+      params: {}
+    }, { "mcp-token": "not-a-real-token" }));
+
+    expect(response.status).toBe(401);
+    const body = await response.json() as { jsonrpc: string; id: number; error: { code: number; data?: { code?: string } } };
+    expect(body.jsonrpc).toBe("2.0");
+    expect(body.id).toBe(91);
     expect(body.error.code).toBe(-32001);
     expect(body.error.data?.code).toBe("E_NOSESSION");
   });

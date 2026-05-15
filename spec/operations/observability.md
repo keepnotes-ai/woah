@@ -62,11 +62,26 @@ Each persistent host emits standard metrics:
 - `storage_bytes_used` (gauge)
 - `storage_flush_slices` (histogram/counter by slice kind: objects, properties, sessions, tasks, counters)
 - `startup_storage` events for cold-init repository migration/load/save work, host-seed fetches, and Directory route registration (both object-route and session-route registration; the per-call `writes` count separates diff-deduped no-ops from actual row writes). These are emitted before `WooWorld` finishes initialization, so startup write amplification is visible even when the ordinary world metrics hook is not installed yet.
+- Durable Object lifecycle events: `do_constructor` records constructor-body wallclock by DO class, and `do_handler` records method/route handler wallclock by DO class. These split a cold request tail into isolate/constructor time versus actual handler work (for example `/__internal/room-snapshot`). `host_key` is the object host key for `PersistentObjectDO`, the directory key for `DirectoryDO`, and the scope key for `CommitScopeDO`.
+- v2 turn-network events: `v2_open` records commit-scope open latency/status and transfer mode; `v2_envelope` records envelope latency/status, idempotency freshness, reply class, fanout, and full-save use; `shadow_commit_accepted` and `shadow_commit_rejected` split commit outcomes into tail-queryable counters so operators can answer "is v2 healthy?" without inferring from generic request or cross-host RPC traffic.
+- `shadow_apply_step` events partition authoritative shadow transcript application, including `clone_world`, object indexing, write collection/application, log application, counters, and total time. Operators use these to explain expensive `/v2/envelope` commits without guessing whether `structuredClone(SerializedWorld)` dominated.
+- `shadow_gateway_apply_step` events partition the gateway-cache side of an accepted v2 transcript: runtime-session capture, `exportWorld`, the serialized applier phases, `importWorld`, runtime-session restore, and total time. These are the production probe for the temporary export → serialized apply → import path; they include object/property/session/log counts so operators can confirm whether gateway cache apply cost scales with whole-world size rather than transcript size.
 - `parked_tasks` (gauge)
 - `inbound_rate_drops` (counter)
 - `outbound_overflow_drops` (counter)
 
 These are scraped per host on a fixed interval (default 30s). Aggregated up to per-cluster, per-deployment views.
+
+### Long-poll requests
+
+The MCP `woo_wait` tool ([protocol/mcp.md §M4](../protocol/mcp.md#m4-actor-control)) holds the worker request open for up to its `timeout_ms` budget when the per-actor observation queue is empty. In `wrangler tail` these appear as `/mcp` requests with `wallTime ≈ timeout_ms` (commonly ~1000ms in MCP smoke runs) and `cpuTime ≈ 0` — pure idle holds, not CPU work.
+
+When investigating warm-path tail latency (`/mcp` p95 ≫ p50), partition by `cpuTime / wallTime`:
+
+- `cpuTime ≈ wallTime` → real handler work; investigate the route.
+- `cpuTime ≪ wallTime` → idle hold; almost always `woo_wait` or another long-poll. Not a perf bug; do not chase.
+
+The dominant warm CPU cost on v2 commits lives at `/v2/envelope` (CommitScopeDO) and `/v2/open`, where `cpuTime ≈ wallTime`. Long-poll holds on `/mcp` should be excluded from any "is the v2 commit path slow?" measurement.
 
 ---
 

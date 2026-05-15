@@ -40,6 +40,21 @@ SPA host supplies scoped projection data, verb-call services, and the current
 pinboard view; drag/resize gesture plumbing remains host-owned until the frame
 action model carries those gestures directly.
 
+Browser clients route Pinboard through v2. Enter/leave commit because durable
+board presence is the authorization precondition for sequenced note/layout
+edits. Viewport telemetry and read-only note hydration execute on the v2 direct
+plane with `live`; create, edit, recolor, layout, take, and drop execute
+on the commit plane. The embedded mini-chat also uses the catalog command
+planner over v2 so command aliases remain catalog-owned instead of being parsed
+in client code.
+
+Pinboard `enter`/`leave` return only the board room and subscriber lists. They
+intentionally do not request a full `here` payload: v2 commit validation treats
+post-commit projection reads as ordinary transcript reads, and a board-mounted
+parent-room snapshot can otherwise read the board's post-increment `next_seq`
+while validating against the pre-commit head. The browser already refreshes the
+board overlay through the v2 state plane.
+
 ## Class graph
 
 Two independent inheritance trees, each rooted under `$thing`:
@@ -238,11 +253,19 @@ Kanban invariants:
       ]
     }, …
   ],
-  present_actors: [ObjRef]          // current subscribers
+  present_actors: [ObjRef]          // compatibility actor ids for existing clients
 }
 ```
 
 `list_columns` returns just the `columns` field above (same per-card joined view).
+
+`room_roster()` is the canonical v2 presentation roster. Pinboard is a
+workspace, not an embodied room, so its roster rows are distinct actors from
+`session_subscribers`, enriched as `{id, name, presence, idle_seconds?}`.
+`live_audience(observation?)` is the separate delivery contract and returns
+live subscribed session ids after the substrate observation routing rules run.
+Future UI/API code should prefer `room_roster()` over `present_actors` or
+`subscribers`.
 
 **Unreadable cards.** When the calling actor cannot read a card's text
 (`note:is_readable_by(actor) → false`), the card still appears in the

@@ -18,6 +18,8 @@ import * as weatherUiModule from "../../catalogs/weather/ui/weather-badge";
 import { appliedFrameErrorObservations, chatErrorText } from "./chat-errors";
 import { createWooClientFramework, escapeHtml, liveProjectionKey, ProjectionFieldFiller, type CatalogUiPackage, type ProjectionCallOptions, type ProjectionPatch, type WooContext, type WooElement } from "./framework";
 import { advanceProjectionCursor, idsFromRefsOrSummaries, presentActorsFromObservation, scopedHerePresentActors, scopedModelWithMoveResult, type ScopedProjectionStateModel } from "./scoped-projection";
+import { v2ProjectionSnapshotFromMessage, type V2AppliedFrameMessage, type V2ProjectionMessage, type V2TurnResultMessage } from "./v2-browser-messages";
+import { sessionActiveScopeFromRecord } from "../core/types";
 import type { ChatLine, ChatSpaceData, ChatTitleBadge, SpaceChatPanelData } from "../../catalogs/chat/ui/chat-space";
 import type { DubspaceData } from "../../catalogs/dubspace/ui/dubspace-workspace";
 import type { PinboardData } from "../../catalogs/pinboard/ui/pinboard-board";
@@ -35,6 +37,7 @@ type AppState = {
   tab: "chat" | "dubspace" | "pinboard" | "tasks" | "ide";
   world?: any;
   scopedProjection?: ScopedProjectionStateModel;
+  v2Projection?: V2ProjectionMessage;
   scopedObjectSummaries: Record<string, any>;
   routedSubjects: Partial<Record<"dubspace" | "pinboard" | "tasks", string>>;
   audioOn: boolean;
@@ -173,6 +176,7 @@ const legacyPinboardChatHeightKey = "woo.pinboard.chatHeight";
 const spaceChatHeightsKey = "woo.spaceChat.heights";
 const spaceChatCollapsedKey = "woo.spaceChat.collapsed";
 const scopedProjectionSmokeEnabled = new URLSearchParams(location.search).has("scopedProjectionSmoke");
+const v2TestHooksEnabled = new URLSearchParams(location.search).has("v2TestHooks");
 let scopedProjectionEnabled = (() => {
   const params = new URLSearchParams(location.search);
   if (params.get("api") === "state" || params.has("legacyState")) return false;
@@ -195,7 +199,7 @@ const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", 
 const directThrottle = new Map<string, number>();
 const pendingDirect = new Map<string, (result: any) => void>();
 const pendingFrameErrors = new Map<string, (error: any) => void>();
-const pendingCommands = new Map<string, { space: string; text: string }>();
+const pendingCommands = new Map<string, { space: string; text: string; action?: ChatCommandUiAction }>();
 let pinboardNotesRefreshPending = false;
 const pendingOverlaySnapshots = new Map<string, Promise<void>>();
 let scopedProjectionLocalRevision = 0;
@@ -245,6 +249,9 @@ let chatHistoryCursor = chatHistory.length;
 let chatHistoryDraft = "";
 let startupRoute: RouteLocation | null = parseLocationRoute(location.pathname, location.search);
 let routeInitialized = false;
+let v2BrowserWorker: Worker | undefined;
+let v2BrowserWorkerScope = "";
+let taskspaceComponentEventsBound = false;
 state.spaceChatHeights = loadSpaceChatHeights();
 const persistedSpaceChatCollapsed = readStorage(spaceChatCollapsedKey);
 state.spaceChatCollapsed = persistedSpaceChatCollapsed === "1" || persistedSpaceChatCollapsed === "true";
@@ -300,77 +307,17 @@ function connect() {
         render();
       }
       requestReplay(socket);
+      ensureV2BrowserWorker();
       if (!scopedProjectionEnabled && shouldAutoEnterDefaultChatRoom()) ensureSpacePresence(chatRoom(), () => render(), () => render());
     }
     if (frame.op === "applied") {
-      ui.ingestAppliedFrame(frame);
-      applyScopedMoveResult(frame.result);
-      const observations = frame.observations ?? [];
-      const frameErrors = appliedFrameErrorObservations({ observations });
-      receiveAppliedFrameErrors(frame, observations);
-      // Sequenced verb raises arrive as `$error` observations inside applied
-      // frames, so keep the pending handler until those observations route.
-      if (typeof frame.id === "string") {
-        const commandContext = pendingCommands.get(frame.id);
-        if (frameErrors.length > 0) ui.failOptimisticCall(frame.id);
-        else {
-          ui.completeOptimisticCall(frame.id);
-          if (commandContext) renderChatCommandResult(chatCommandUiActionFromMessage(frame.message), frame.result, commandContext.text);
-        }
-        pendingCommands.delete(frame.id);
-        pendingFrameErrors.delete(frame.id);
-      }
-      const pinboardAnimations = capturePinboardAnimations(observations);
-      const needsPinboardNotesRefresh = observations.some((observation: any) => isPinboardObservation(observation) && pinboardObservationNeedsNotesRefresh(String(observation?.type ?? "")));
-      if (needsPinboardNotesRefresh) pinboardNotesRefreshPending = false;
-      if (!scopedProjectionEnabled) {
-        // Legacy /api/state mode still folds confirmed placement observations
-        // into its pinboard note array. Scoped mode gets the same fields
-        // through the framework reducer above.
-        for (const observation of observations) {
-          const type = String(observation?.type ?? "");
-          if (type === "pin_moved" || type === "pin_resized" || type === "note_moved" || type === "note_resized") {
-            const pinId = String(observation?.pin ?? observation?.id ?? "");
-            if (pinId) applyPinboardPlacementObservation(observation);
-          }
-        }
-      }
-      forgetLiveControls(observations);
-      if (observations.some((observation: any) => isDubspaceStateObservation(observation))) syncDubspaceProjectionEffects();
-      for (const observation of observations) if (isChatObservation(observation)) receiveChatEvent(observation, false);
-      state.observations.unshift({ seq: frame.seq, space: frame.space, observations, message: frame.message });
-      trimObservations();
-      rememberSeq(frame.space, frame.seq);
-      scheduleLegacyStateRefresh();
-      render();
-      if (needsPinboardNotesRefresh) refreshPinboardNotes();
-      animatePinboardNotes(pinboardAnimations);
+      receiveAppliedFrame(frame);
     }
     if (frame.op === "event") {
       ui.ingestLiveObservation(frame.observation);
       receiveLiveEvent(frame.observation);
     }
-    if (frame.op === "result") {
-      const handler = pendingDirect.get(frame.id);
-      if (typeof frame.id === "string") pendingFrameErrors.delete(frame.id);
-      for (const observation of frame.observations ?? []) {
-        ui.ingestLiveObservation(observation);
-        receiveLiveEvent(observation);
-      }
-      applyScopedMoveResult(frame.result);
-      if (typeof frame.id === "string") ui.completeOptimisticCall(frame.id);
-      if (handler) {
-        pendingDirect.delete(frame.id);
-        if (typeof frame.id === "string") pendingCommands.delete(frame.id);
-        handler(frame.result);
-      } else if (typeof frame.id === "string") {
-        const commandContext = pendingCommands.get(frame.id);
-        if (commandContext) {
-          pendingCommands.delete(frame.id);
-          renderChatCommandResult(chatCommandUiActionFromPlan(frame.command), frame.result, commandContext.text);
-        }
-      }
-    }
+    if (frame.op === "result") receiveDirectResultFrame(frame);
     if (frame.op === "task") {
       state.observations.unshift({ task: frame.task, space: frame.space, observations: frame.observations });
       trimObservations();
@@ -390,32 +337,7 @@ function connect() {
       scheduleLegacyStateRefresh();
       render();
     }
-    if (frame.op === "error") {
-      const errorHandler = typeof frame.id === "string" ? pendingFrameErrors.get(frame.id) : undefined;
-      if (typeof frame.id === "string") {
-        ui.failOptimisticCall(frame.id);
-        pendingDirect.delete(frame.id);
-        pendingCommands.delete(frame.id);
-        pendingFrameErrors.delete(frame.id);
-      }
-      if (frame.error?.code === "E_NOSESSION") {
-        clearSession();
-        if (socket.readyState === WebSocket.OPEN) socket.close();
-        if (readAuthMethod() === "guest") {
-          void loginAsGuest({ silent: true });
-        } else {
-          state.actor = undefined;
-          state.session = undefined;
-          state.authStatus = "anonymous";
-          render();
-        }
-        return;
-      }
-      state.observations.unshift({ error: frame.error });
-      trimObservations();
-      if (errorHandler) errorHandler(frame.error);
-      else render();
-    }
+    if (frame.op === "error") receiveErrorFrame(frame, socket);
   });
   socket.addEventListener("close", () => {
     if (state.socket !== socket) return;
@@ -428,6 +350,205 @@ function connect() {
   socket.addEventListener("error", () => {
     if (state.socket === socket && socket.readyState !== WebSocket.CLOSED) socket.close();
   });
+}
+
+function ensureV2BrowserWorker() {
+  if (v2BrowserWorker) {
+    syncV2BrowserWorkerScope();
+    return;
+  }
+  if (!state.session || !state.actor) return;
+  if (!("Worker" in window) || !("indexedDB" in window)) return;
+  const token = authToken();
+  if (!token) return;
+  // The v2 worker owns the durable browser-side cache and reconnect loop. The
+  // legacy `/ws` UI path remains active while v2 reaches feature parity.
+  v2BrowserWorker = new Worker(new URL("./v2-browser-worker.ts", import.meta.url), { type: "module" });
+  if (v2TestHooksEnabled) (window as unknown as { __wooV2BrowserWorker?: Worker }).__wooV2BrowserWorker = v2BrowserWorker;
+  v2BrowserWorker.addEventListener("message", (event) => {
+    if (event.data?.kind === "status") console.debug("woo.v2", event.data.status);
+    if (event.data?.kind === "projection") {
+      state.v2Projection = event.data as V2ProjectionMessage;
+      applyV2ProjectionMessage(state.v2Projection);
+      window.dispatchEvent(new CustomEvent("woo.v2.projection", { detail: state.v2Projection }));
+      console.debug("woo.v2.projection", state.v2Projection);
+    }
+    if (event.data?.kind === "applied_frame") {
+      const message = event.data as V2AppliedFrameMessage;
+      window.dispatchEvent(new CustomEvent("woo.v2.applied_frame", { detail: message }));
+      if (message.applied) receiveAppliedFrame(message.applied);
+      console.debug("woo.v2.applied_frame", event.data);
+    }
+    if (event.data?.kind === "turn_result") {
+      const message = event.data as V2TurnResultMessage;
+      window.dispatchEvent(new CustomEvent("woo.v2.turn_result", { detail: message }));
+      if (v2TestHooksEnabled) console.debug("woo.v2.turn_result", message);
+      if (message.frame.op === "result") receiveDirectResultFrame(message.frame);
+      else receiveErrorFrame(message.frame);
+    }
+    if (event.data?.kind === "live_event") {
+      const observation = event.data.event?.observation;
+      if (observation) {
+        ui.ingestLiveObservation(observation);
+        receiveLiveEvent(observation);
+      }
+    }
+    // Frame/error messages are exposed now so the worker-cache wire path can be
+    // inspected during the migration; UI reducers will consume them directly
+    // once the legacy `/ws` path is retired.
+    if (event.data?.kind === "frame") {
+      window.dispatchEvent(new CustomEvent("woo.v2.frame", { detail: event.data.envelope }));
+      console.debug("woo.v2.frame", event.data.envelope);
+      if (event.data.envelope?.type === "woo.transport.error.v1") console.warn("woo.v2.transport.error", event.data.envelope.body);
+    }
+    if (event.data?.kind === "error") console.warn("woo.v2.error", event.data.error);
+  });
+  syncV2BrowserWorkerScope();
+}
+
+function syncV2BrowserWorkerScope(scopeOverride?: string) {
+  if (!v2BrowserWorker || !state.session || !state.actor) return;
+  const token = authToken();
+  if (!token) return;
+  const scope = scopeOverride || desiredV2BrowserScope();
+  const connectionKey = `${token}\u0000${state.actor}\u0000${state.session}\u0000${scope}`;
+  if (!scope || v2BrowserWorkerScope === connectionKey) return;
+  v2BrowserWorkerScope = connectionKey;
+  v2BrowserWorker.postMessage({
+    kind: "connect",
+    token,
+    scope,
+    actor: state.actor,
+    session: state.session
+  });
+}
+
+function receiveDirectResultFrame(frame: any) {
+  const handler = pendingDirect.get(frame.id);
+  if (typeof frame.id === "string") pendingFrameErrors.delete(frame.id);
+  for (const observation of frame.observations ?? []) {
+    ui.ingestLiveObservation(observation);
+    receiveLiveEvent(observation);
+  }
+  applyScopedMoveResult(frame.result);
+  if (typeof frame.id === "string") ui.completeOptimisticCall(frame.id);
+  if (handler) {
+    pendingDirect.delete(frame.id);
+    if (typeof frame.id === "string") pendingCommands.delete(frame.id);
+    handler(frame.result);
+  } else if (typeof frame.id === "string") {
+    const commandContext = pendingCommands.get(frame.id);
+    if (commandContext) {
+      pendingCommands.delete(frame.id);
+      renderChatCommandResult(commandContext.action ?? chatCommandUiActionFromPlan(frame.command), frame.result, commandContext.text);
+    }
+  }
+}
+
+function receiveErrorFrame(frame: any, socket?: WebSocket) {
+  const errorHandler = typeof frame.id === "string" ? pendingFrameErrors.get(frame.id) : undefined;
+  if (typeof frame.id === "string") {
+    ui.failOptimisticCall(frame.id);
+    pendingDirect.delete(frame.id);
+    pendingCommands.delete(frame.id);
+    pendingFrameErrors.delete(frame.id);
+  }
+  if (frame.error?.code === "E_NOSESSION") {
+    clearSession();
+    if (socket?.readyState === WebSocket.OPEN) socket.close();
+    if (readAuthMethod() === "guest") {
+      void loginAsGuest({ silent: true });
+    } else {
+      state.actor = undefined;
+      state.session = undefined;
+      state.authStatus = "anonymous";
+      render();
+    }
+    return;
+  }
+  state.observations.unshift({ error: frame.error });
+  trimObservations();
+  if (errorHandler) errorHandler(frame.error);
+  else render();
+}
+
+function receiveAppliedFrame(frame: any) {
+  ui.ingestAppliedFrame(frame);
+  applyScopedMoveResult(frame.result);
+  const needsScopedDeferredLook = scopedProjectionEnabled
+    && frame.result
+    && typeof frame.result === "object"
+    && !Array.isArray(frame.result)
+    && frame.result.look_deferred === true
+    && typeof frame.result.room === "string";
+  const observations = frame.observations ?? [];
+  const frameErrors = appliedFrameErrorObservations({ observations });
+  receiveAppliedFrameErrors(frame, observations);
+  // Sequenced verb raises arrive as `$error` observations inside applied
+  // frames, so keep the pending handler until those observations route.
+  if (typeof frame.id === "string") {
+    const commandContext = pendingCommands.get(frame.id);
+    const resultHandler = pendingDirect.get(frame.id);
+    if (frameErrors.length > 0) ui.failOptimisticCall(frame.id);
+    else {
+      ui.completeOptimisticCall(frame.id);
+      if (resultHandler) resultHandler(frame.result);
+      if (commandContext) renderChatCommandResult(chatCommandUiActionFromMessage(frame.message), frame.result, commandContext.text);
+    }
+    pendingDirect.delete(frame.id);
+    pendingCommands.delete(frame.id);
+    pendingFrameErrors.delete(frame.id);
+  }
+  const pinboardAnimations = capturePinboardAnimations(observations);
+  const needsPinboardNotesRefresh = observations.some((observation: any) => isPinboardObservation(observation) && pinboardObservationNeedsNotesRefresh(String(observation?.type ?? "")));
+  if (needsPinboardNotesRefresh) pinboardNotesRefreshPending = false;
+  if (!scopedProjectionEnabled) {
+    // Legacy /api/state mode still folds confirmed placement observations
+    // into its pinboard note array. Scoped mode gets the same fields through
+    // the framework reducer above.
+    for (const observation of observations) {
+      const type = String(observation?.type ?? "");
+      if (type === "pin_moved" || type === "pin_resized" || type === "note_moved" || type === "note_resized") {
+        const pinId = String(observation?.pin ?? observation?.id ?? "");
+        if (pinId) applyPinboardPlacementObservation(observation);
+      }
+    }
+  }
+  forgetLiveControls(observations);
+  for (const observation of observations) applyDubspaceObservationSideEffects(observation);
+  if (observations.some((observation: any) => isDubspaceStateObservation(observation))) syncDubspaceProjectionEffects();
+  for (const observation of observations) if (isChatObservation(observation)) receiveChatEvent(observation, false);
+  state.observations.unshift({ seq: frame.seq, space: frame.space, observations, message: frame.message });
+  trimObservations();
+  rememberSeq(frame.space, frame.seq);
+  scheduleLegacyStateRefresh();
+  render();
+  if (needsScopedDeferredLook) void refresh().then(() => focusChatInput());
+  if (needsPinboardNotesRefresh) refreshPinboardNotes();
+  animatePinboardNotes(pinboardAnimations);
+}
+
+function applyDubspaceObservationSideEffects(observation: any) {
+  if (!isDubspaceObservation(observation)) return;
+  if (String(observation?.actor ?? "") !== state.actor) return;
+  if (observation?.type === "dubspace_entered") {
+    addDubspaceOperator(state.actor);
+    markNestedSpaceDeparture(dubspaceSpace());
+    if (state.tab !== "dubspace") setTab("dubspace", { mode: "push", leaveCurrent: false });
+    requestSpaceChatFocus(dubspaceSpace());
+  } else if (observation?.type === "dubspace_left") {
+    removeDubspaceOperator(state.actor);
+    if (state.tab === "dubspace") setTab("chat", { mode: "push", leaveCurrent: false });
+  }
+}
+
+function desiredV2BrowserScope(): string {
+  // The browser state plane is display-oriented. Use the routed object as the
+  // visible scope instead of branching on catalog-specific surfaces; actor
+  // scope is only a bootstrap fallback before any object route is known.
+  const route = startupRoute ?? parseLocationRoute(location.pathname, location.search);
+  if (route?.objectId) return route.objectId;
+  return activeChatRoom() || state.actor || "";
 }
 
 function sendSocket(socket: WebSocket, frame: Record<string, unknown>) {
@@ -605,6 +726,10 @@ async function logout() {
   const sessionId = state.session;
   state.socket?.close();
   state.socket = undefined;
+  v2BrowserWorker?.postMessage({ kind: "disconnect" });
+  v2BrowserWorker?.terminate();
+  v2BrowserWorker = undefined;
+  v2BrowserWorkerScope = "";
   if (sessionId) {
     try {
       await fetch("/api/session", { method: "DELETE", headers: { authorization: `Session ${sessionId}` } });
@@ -831,6 +956,7 @@ function setTab(tab: AppState["tab"], options: { mode?: "replace" | "push"; leav
     if (state.tab !== tab) state.tab = tab;
     syncUrlFromCurrentState(mode);
     if (typeof done === "function") done();
+    syncV2BrowserWorkerScope();
     render();
     requestTasksChatFocusIfPending();
     if (scopedProjectionEnabled && tab !== "chat" && tab !== "ide") {
@@ -844,6 +970,7 @@ function setTab(tab: AppState["tab"], options: { mode?: "replace" | "push"; leav
   if (current === tab) {
     syncUrlFromCurrentState(mode);
     if (typeof done === "function") done();
+    syncV2BrowserWorkerScope();
     render();
     return;
   }
@@ -919,6 +1046,7 @@ async function refresh() {
   }
   audio?.sync(effectiveDubspace(), state.clockOffset);
   hydratePinboardNotesTextIfNeeded(pinboardModel());
+  syncV2BrowserWorkerScope();
   render();
 }
 
@@ -1036,12 +1164,16 @@ function scopedToolSubject(surface: "dubspace" | "pinboard" | "tasks"): string {
     const handleSurface = typeof (handle as any)?.surface === "string" ? (handle as any).surface : "";
     if (subject && handleSurface === surface) return subject;
   }
-  const current = state.scopedProjection?.session?.current_location;
+  const current = sessionActiveScope(state.scopedProjection?.session);
   if (typeof current === "string" && isCatalogObjectSummary(ui.observe(current), surface, className)) return current;
   for (const item of arrayOfObjects(state.scopedProjection?.here?.contents)) {
     if (isCatalogObjectSummary(item, surface, className)) return String(item.id ?? "");
   }
   return "";
+}
+
+function sessionActiveScope(session: any): string | undefined {
+  return sessionActiveScopeFromRecord(session) ?? undefined;
 }
 
 function applyScopedOverlaySnapshot(key: string, snapshot: any) {
@@ -1068,6 +1200,33 @@ function applyScopedOverlaySnapshot(key: string, snapshot: any) {
   }
 }
 
+function applyV2ProjectionMessage(message: V2ProjectionMessage) {
+  if (!scopedProjectionEnabled) return;
+  const snapshot = v2ProjectionSnapshotFromMessage(message);
+  if (!snapshot) return;
+  if (!state.scopedProjection) state.scopedProjection = { inventory: [], overlays: {} };
+  if (snapshot.objects.length > 0) {
+    // v2 projection objects follow the same catalog-neutral summary contract as
+    // `/api/me`. Ingest them into the client projection cache, but keep the
+    // legacy scoped model as the rendering authority until the v2 worker owns
+    // turn submission and committed-frame reduction.
+    ui.ingestSnapshot(`v2:${snapshot.scope}:${message.head.seq}`, snapshot.objects);
+  }
+  const projection = message.projection && typeof message.projection === "object" && !Array.isArray(message.projection)
+    ? message.projection as any
+    : {};
+  const self = projection.self && typeof projection.self === "object" && !Array.isArray(projection.self) ? projection.self : state.scopedProjection.self;
+  const session = projection.session && typeof projection.session === "object" && !Array.isArray(projection.session) ? projection.session : state.scopedProjection.session;
+  const inventory = Array.isArray(projection.inventory) ? projection.inventory : state.scopedProjection.inventory;
+  let cursor = state.scopedProjection.cursor;
+  for (const [space, record] of Object.entries(snapshot.cursor?.spaces ?? {})) {
+    const nextSeq = Number(record?.next_seq);
+    if (Number.isFinite(nextSeq)) cursor = advanceProjectionCursor(cursor, space, nextSeq - 1);
+  }
+  state.scopedProjection = { ...state.scopedProjection, cursor, self, session, inventory };
+  render();
+}
+
 async function applyScopedProjectionSnapshot(me: any, catalogs: any) {
   const previousChatRoom = lastObservedChatRoom;
   const inventory = Array.isArray(me?.inventory) ? me.inventory : [];
@@ -1086,6 +1245,7 @@ async function applyScopedProjectionSnapshot(me: any, catalogs: any) {
     overlaySnapshots
   };
   ingestScopedSnapshots(me);
+  await hydrateCurrentLocationSummary(me);
   const currentChatRoom = chatRoom();
   if (previousChatRoom && previousChatRoom !== currentChatRoom) pushChatSeparator(previousChatRoom, false);
   lastObservedChatRoom = currentChatRoom;
@@ -1103,6 +1263,15 @@ async function applyScopedProjectionSnapshot(me: any, catalogs: any) {
   } else {
     syncUrlFromCurrentState("replace");
   }
+}
+
+async function hydrateCurrentLocationSummary(me: any): Promise<void> {
+  const current = typeof me?.session?.current_location === "string" ? me.session.current_location : "";
+  if (!current || String(me?.here?.id ?? "") === current) return;
+  // Remote room snapshots can degrade to a session-only location; hydrate the
+  // room title before the first scoped chat render so H1 never falls back to
+  // the generic component default.
+  await fetchScopedObjectSummary(current).catch(() => undefined);
 }
 
 function ingestScopedSnapshots(me: any) {
@@ -1425,7 +1594,32 @@ function projectedObjectView(id: string | undefined) {
       props: { ...(projected.props ?? {}) }
     };
   }
-  if (scopedProjectionEnabled) return null;
+  if (scopedProjectionEnabled) {
+    const here = state.scopedProjection?.here;
+    if (String(here?.id ?? "") === id) {
+      const summary = roomSnapshotAsObjectSummary(here);
+      return {
+        id,
+        name: summary.name ?? id,
+        owner: summary.owner,
+        parent: summary.parent,
+        location: summary.location,
+        props: { ...(summary.props ?? {}) }
+      };
+    }
+    const summary = state.scopedObjectSummaries[id];
+    if (summary) {
+      return {
+        id,
+        name: summary.name ?? id,
+        owner: summary.owner,
+        parent: summary.parent,
+        location: summary.location,
+        props: { ...(summary.props ?? {}) }
+      };
+    }
+    return null;
+  }
   const fallback = state.world?.dubspace?.[id] ?? objectView(state.world, id);
   if (!fallback) return null;
   return {
@@ -1579,7 +1773,7 @@ function scopedPinboardPresentActors(boardId: string, props: Record<string, unkn
   // Last-resort local fallback: before the first overlay/presence frame lands,
   // show the user in their own active pinboard rather than an empty presence
   // map. This is not an authoritative subscriber list.
-  return state.actor && state.scopedProjection?.session?.current_location === boardId ? [state.actor] : [];
+  return state.actor && sessionActiveScope(state.scopedProjection?.session) === boardId ? [state.actor] : [];
 }
 
 function pinboardLayoutFromBoard(board: any): Record<string, any> {
@@ -1726,7 +1920,7 @@ function hydratePinboardNotesTextIfNeeded(pinboard: any) {
   const board = pinboard?.board;
   const boardId = typeof board?.id === "string" ? board.id : "";
   const notes = Array.isArray(pinboard?.notes) ? pinboard.notes : [];
-  if (!canSendDirect()) return;
+  if (!canSendPinboardV2()) return;
   if (!pinboardActorPresent()) return;
   if (!pinboardNotesHaveMissingText(notes)) return;
   if (!boardId) return;
@@ -1767,11 +1961,12 @@ function buildChatMeta(world: any) {
   const rooms = objectsByParent(world, catalogClass(chat, "$chatroom"));
   const pinned = chatRoomPin && chatRoomPin.expiresAt > Date.now() && rooms.includes(chatRoomPin.room) ? chatRoomPin.room : undefined;
   if (chatRoomPin && !pinned) chatRoomPin = null;
-  const currentLocation = typeof world?.session?.current_location === "string" && rooms.includes(world.session.current_location) ? world.session.current_location : undefined;
+  const sessionScope = sessionActiveScope(world?.session);
+  const activeScope = typeof sessionScope === "string" && rooms.includes(sessionScope) ? sessionScope : undefined;
   const occupied = rooms.find((id) => Array.isArray(world.objects?.[id]?.props?.subscribers) && world.objects[id].props.subscribers.includes(state.actor));
   const seededEntry = Object.values(demo?.seeds ?? {}).find((id) => typeof id === "string" && rooms.includes(id));
   const defaultRoom = seededEntry ?? rooms[0];
-  const current = pinned ?? currentLocation ?? occupied ?? seededEntry ?? rooms[0];
+  const current = pinned ?? activeScope ?? occupied ?? seededEntry ?? rooms[0];
   return { room: current, rooms, defaultRoom };
 }
 
@@ -1826,12 +2021,16 @@ function tasksSpace() {
 function chatRoom() {
   // Migration note: new selectors should make the scoped branch primary.
   // The `state.world` branch is the temporary `/api/state` compatibility tail.
-  if (scopedProjectionEnabled) return String(state.scopedProjection?.here?.id ?? "");
+  if (scopedProjectionEnabled) {
+    const here = String(state.scopedProjection?.here?.id ?? "");
+    if (here) return here;
+    return String(state.scopedProjection?.session?.current_location ?? "");
+  }
   return String(state.world?.chatMeta?.room ?? "");
 }
 
 function defaultChatRoom() {
-  if (scopedProjectionEnabled) return String(state.scopedProjection?.here?.id ?? "");
+  if (scopedProjectionEnabled) return chatRoom();
   return String(state.world?.chatMeta?.defaultRoom ?? "");
 }
 
@@ -1844,14 +2043,128 @@ function activeChatRoom() {
 function call(space: string, target: string, verb: string, args: unknown[] = [], options?: ProjectionCallOptions) {
   const id = crypto.randomUUID();
   ui.applyOptimisticCall(id, options);
+  if (canSendV2Browser() && sendV2TurnIntent({ id, route: "sequenced", scope: space, target, verb, args })) return id;
   if (!sendFrame({ op: "call", id, space, message: { target, verb, args } })) ui.failOptimisticCall(id);
   return id;
+}
+
+type V2TurnInput = {
+  id?: string;
+  route: "direct" | "sequenced";
+  scope: string;
+  target: string;
+  verb: string;
+  args?: unknown[];
+  persistence?: "durable" | "live";
+  options?: ProjectionCallOptions;
+  onResult?: (result: any) => void;
+  onError?: (error: any) => void;
+};
+
+function sendV2TurnIntent(input: Required<Pick<V2TurnInput, "id" | "route" | "scope" | "target" | "verb">> & Pick<V2TurnInput, "args" | "persistence">): boolean {
+  ensureV2BrowserWorker();
+  syncV2BrowserWorkerScope(input.scope);
+  if (!v2BrowserWorker || !state.actor || !state.session) return false;
+  v2BrowserWorker.postMessage({
+    kind: "call",
+    id: input.id,
+    route: input.route,
+    scope: input.scope,
+    target: input.target,
+    verb: input.verb,
+    args: input.args ?? [],
+    ...(input.persistence ? { persistence: input.persistence } : {})
+  });
+  return true;
+}
+
+function v2Turn(input: V2TurnInput): string {
+  if (!input.scope) return "";
+  const id = input.id ?? crypto.randomUUID();
+  ui.applyOptimisticCall(id, input.options);
+  if (input.onResult) pendingDirect.set(id, input.onResult);
+  if (input.onError) pendingFrameErrors.set(id, input.onError);
+  if (!sendV2TurnIntent({
+    id,
+    route: input.route,
+    scope: input.scope,
+    target: input.target,
+    verb: input.verb,
+    args: input.args ?? [],
+    persistence: input.persistence
+  })) {
+    ui.failOptimisticCall(id);
+    pendingDirect.delete(id);
+    pendingFrameErrors.delete(id);
+    return "";
+  }
+  return id;
+}
+
+function v2PlanAndExecuteCommand(space: string, text: string, onError?: (error: any) => void): string {
+  const planId = crypto.randomUUID();
+  if (onError) pendingFrameErrors.set(planId, onError);
+  const handlePlan = (plan: any) => {
+    pendingFrameErrors.delete(planId);
+    if (!plan || plan.ok !== true) {
+      render();
+      return;
+    }
+    const target = String(plan.target ?? space);
+    const verb = String(plan.verb ?? "");
+    let route: "direct" | "sequenced" = plan.route === "sequenced" ? "sequenced" : "direct";
+    if (!verb) {
+      render();
+      return;
+    }
+    const id = crypto.randomUUID();
+    const args = Array.isArray(plan.args) ? plan.args : [];
+    const persistence = plan.persistence === "durable" || plan.persistence === "live"
+      ? plan.persistence
+      : route === "direct" ? "live" : "durable";
+    ui.applyOptimisticCall(id, undefined);
+    pendingCommands.set(id, { space, text, action: { target, verb } });
+    if (onError) pendingFrameErrors.set(id, onError);
+    if (!sendV2TurnIntent({
+      id,
+      route,
+      scope: space,
+      target,
+      verb,
+      args,
+      persistence
+    })) {
+      ui.failOptimisticCall(id);
+      pendingCommands.delete(id);
+      pendingFrameErrors.delete(id);
+    }
+  };
+  // Catalog command text is parsed in-world so aliases such as Dubspace's
+  // `bpm 146` stay catalog-owned while the browser sends only generic v2 turn
+  // intents. The first direct turn plans; the second executes the
+  // catalog-selected target/verb through the appropriate v2 plane.
+  pendingDirect.set(planId, handlePlan);
+  if (!sendV2TurnIntent({
+    id: planId,
+    route: "direct",
+    scope: space,
+    target: space,
+    verb: "command_plan",
+    args: [text],
+    persistence: "live"
+  })) {
+    pendingFrameErrors.delete(planId);
+    pendingDirect.delete(planId);
+    return "";
+  }
+  return planId;
 }
 
 function callWithError(space: string, target: string, verb: string, args: unknown[] = [], onError?: (error: any) => void, options?: ProjectionCallOptions) {
   const id = crypto.randomUUID();
   ui.applyOptimisticCall(id, options);
   if (onError) pendingFrameErrors.set(id, onError);
+  if (canSendV2Browser() && sendV2TurnIntent({ id, route: "sequenced", scope: space, target, verb, args })) return id;
   if (!sendFrame({ op: "call", id, space, message: { target, verb, args } })) {
     ui.failOptimisticCall(id);
     pendingFrameErrors.delete(id);
@@ -1875,17 +2188,17 @@ function actorPresentInSpace(space: string) {
   const actor = state.actor;
   if (!actor) return false;
   if (scopedProjectionEnabled) {
-    if (state.scopedProjection?.session?.current_location === space) return true;
+    if (sessionActiveScope(state.scopedProjection?.session) === space) return true;
     if (state.scopedProjection?.here?.id === space && state.chatPresent.includes(actor)) return true;
     return actorPresenceList(actor).includes(space);
   }
-  if (state.world?.session?.current_location === space) return true;
+  if (sessionActiveScope(state.world?.session) === space) return true;
   return actorPresenceList(actor).includes(space);
 }
 
 function shouldAutoEnterDefaultChatRoom() {
   if (scopedProjectionEnabled) return false;
-  const location = state.world?.session?.current_location;
+  const location = sessionActiveScope(state.world?.session);
   if (typeof location === "string" && location && location !== "$nowhere") {
     const room = chatRoom();
     const subscribers = state.world?.objects?.[room]?.props?.subscribers;
@@ -1938,6 +2251,26 @@ function canSendDirect() {
   return Boolean(state.actor && state.session && state.socket?.readyState === WebSocket.OPEN);
 }
 
+function canSendChat() {
+  return canSendChatV2() || canSendDirect();
+}
+
+function canSendV2Browser() {
+  return Boolean(state.actor && state.session && authToken());
+}
+
+function canSendChatV2() {
+  return canSendV2Browser();
+}
+
+function canSendDubspaceV2() {
+  return canSendV2Browser();
+}
+
+function canSendPinboardV2() {
+  return canSendV2Browser();
+}
+
 function liveKey(target: string, name: string) {
   return `${target}:${name}`;
 }
@@ -1972,7 +2305,7 @@ function sendPreviewControl(target: string, name: string, value: any) {
   if (Date.now() - last < 35) return;
   directThrottle.set(key, Date.now());
   const space = dubspaceSpace();
-  if (space) direct(space, "preview_control", [target, name, value]);
+  v2Turn({ scope: space, route: "direct", target: space, verb: "preview_control", args: [target, name, value], persistence: "live" });
 }
 
 function dubspaceOptimisticProps(target: string, props: Record<string, unknown>, id = `${target}:${Object.keys(props).sort().join(",")}`): ProjectionCallOptions | undefined {
@@ -1997,8 +2330,7 @@ function patchDubspaceProjectionProps(target: string, props: Record<string, unkn
 
 function callDubspaceMutation(verb: string, args: unknown[], options?: ProjectionCallOptions) {
   const space = dubspaceSpace();
-  if (!space) return "";
-  const id = call(space, space, verb, args, options);
+  const id = v2Turn({ scope: space, route: "sequenced", target: space, verb, args, options });
   audio?.sync(effectiveDubspace(), state.clockOffset);
   if (state.tab === "dubspace") render();
   return id;
@@ -2043,8 +2375,7 @@ function commitCueControls(target: string) {
     const numeric = Number(value);
     if (Number.isFinite(numeric)) values.set(name, numeric);
   }
-  const space = dubspaceSpace();
-  for (const [name, value] of values) if (space) call(space, space, "set_control", [target, name, value]);
+  for (const [name, value] of values) callDubspaceMutation("set_control", [target, name, value]);
 }
 
 function receiveLiveEvent(observation: any) {
@@ -2142,7 +2473,10 @@ function syncDubspaceProjectionEffects(observation?: any) {
     const name = String(observation.name ?? "");
     const input = findControlInput(target, name);
     const projected = target && name ? projectedObjectView(target)?.props?.[name] : undefined;
-    if (input && document.activeElement !== input) setControlInputValue(input, projected ?? observation.value);
+    // Direct v2 control gestures use live persistence, so the durable projection can
+    // legitimately lag the live observation. Applied frames call this without an
+    // observation and use the projected value after the commit lands.
+    if (input && document.activeElement !== input) setControlInputValue(input, observation ? observation.value : projected);
   }
   audio?.sync(effectiveDubspace(), state.clockOffset);
 }
@@ -2275,8 +2609,8 @@ function renderLogin() {
     <div class="login-shell">
       <form class="card login-card" data-login-form autocomplete="on">
         <div class="login-brand">
-          <h1 class="login-brand-name">Port</h1>
-          <p class="login-brand-tagline">Coordination Space</p>
+          <h1 class="login-brand-name">woah</h1>
+          <p class="login-brand-tagline">World of Agents and Humans</p>
         </div>
         <button type="button" class="login-guest" data-login-guest ${pending ? "disabled" : ""}>
           ${pending ? "Connecting..." : "Continue as guest"}
@@ -2532,7 +2866,7 @@ function mountDubspaceComponent() {
     operators,
     actor: state.actor ?? null,
     inSpace: Boolean(state.actor && operators.includes(state.actor)),
-    canSend: canSendDirect(),
+    canSend: canSendDubspaceV2(),
     audioOn: state.audioOn,
     cueSlots: state.cueSlots,
     cuePlaying: state.cuePlaying
@@ -2609,8 +2943,7 @@ function bindDubspaceComponentEvents(element: WooElement) {
       setCueControl(target, name, value);
       return;
     }
-    const space = dubspaceSpace();
-    if (space) call(space, space, "set_control", [target, name, value], dubspaceOptimisticProps(target, { [name]: value }, `${target}:${name}`));
+    callDubspaceMutation("set_control", [target, name, value], dubspaceOptimisticProps(target, { [name]: value }, `${target}:${name}`));
   });
   element.addEventListener("woo-dubspace-transport", (event) => {
     const mode = String((event as CustomEvent<{ mode?: unknown }>).detail?.mode ?? "");
@@ -2635,13 +2968,11 @@ function bindDubspaceComponentEvents(element: WooElement) {
     callDubspaceMutation("set_drum_step", [voice, step, enabled], dubspaceOptimisticProps(drum, { pattern }, `${drum}:pattern`));
   });
   element.addEventListener("woo-dubspace-save-scene", () => {
-    const space = dubspaceSpace();
-    if (space) call(space, space, "save_scene", [`Scene ${new Date().toLocaleTimeString()}`]);
+    callDubspaceMutation("save_scene", [`Scene ${new Date().toLocaleTimeString()}`]);
   });
   element.addEventListener("woo-dubspace-recall-scene", () => {
-    const space = dubspaceSpace();
     const scene = dubspaceMeta().scene;
-    if (space && scene) call(space, space, "recall_scene", [scene]);
+    if (scene) callDubspaceMutation("recall_scene", [scene]);
   });
 }
 
@@ -2653,20 +2984,31 @@ function bindDubspace() {
 
 function enterDubspace() {
   const space = dubspaceSpace();
-  if (!space || !canSendDirect()) return;
-  direct(space, "enter", [], (result) => {
-    applyScopedMoveResult(result);
-    setDubspaceOperators(result);
-    void ensureScopedOverlayForTab("dubspace").then(() => {
+  if (!space || !canSendDubspaceV2()) return;
+  v2Turn({
+    scope: space,
+    route: "direct",
+    target: space,
+    verb: "enter",
+    args: [],
+    persistence: "durable",
+    onResult: (result) => {
+      setDubspaceOperators(result);
+      void ensureScopedOverlayForTab("dubspace").then(() => {
+        if (state.tab === "dubspace") render();
+      });
+      requestSpaceChatFocus(space);
+    },
+    onError: () => {
+      removeDubspaceOperator(state.actor);
       if (state.tab === "dubspace") render();
-    });
-    requestSpaceChatFocus(space);
+    }
   });
 }
 
 function leaveDubspace(done?: () => void) {
   const space = dubspaceSpace();
-  if (!space || !canSendDirect()) {
+  if (!space || !canSendDubspaceV2()) {
     done?.();
     return;
   }
@@ -2674,12 +3016,22 @@ function leaveDubspace(done?: () => void) {
     done?.();
     return;
   }
-  direct(space, "leave", [], (result) => {
-    applyScopedMoveResult(result);
-    setDubspaceOperators(result);
-    done?.();
-    void ensureScopedOverlayForTab("dubspace");
-    if (state.tab === "dubspace") render();
+  v2Turn({
+    scope: space,
+    route: "direct",
+    target: space,
+    verb: "leave",
+    args: [],
+    persistence: "durable",
+    onResult: (result) => {
+      setDubspaceOperators(result);
+      done?.();
+      void ensureScopedOverlayForTab("dubspace");
+      if (state.tab === "dubspace") render();
+    },
+    onError: () => {
+      if (state.tab === "dubspace") render();
+    }
   });
 }
 
@@ -2776,15 +3128,20 @@ function renderStepRow(voice: string, label: string, row: boolean[]) {
 
 function enterChat() {
   const room = activeChatRoom();
-  if (!room || !canSendDirect()) return;
+  if (!room || !canSendChat()) return;
   const onError = chatErrorHandler(room);
-  direct(room, "enter", [], (result) => {
+  const onResult = (result: any) => {
     applyScopedMoveResult(result);
     setCurrentChatRoom(room);
     setChatPresent(result);
     if (!scopedProjectionEnabled && result?.look_deferred === true) direct(room, "look", [], applyLookResult, onError);
     if (state.tab === "chat") render();
-  }, onError);
+  };
+  if (canSendChatV2()) {
+    v2Turn({ scope: room, route: "direct", target: room, verb: "enter", args: [], persistence: "durable", onResult, onError });
+    return;
+  }
+  direct(room, "enter", [], onResult, onError);
 }
 
 function isChatObservation(observation: any) {
@@ -3058,6 +3415,7 @@ function applyScopedMoveResult(result: any) {
   state.scopedProjection = scopedModelWithMoveResult(state.scopedProjection, result);
   if (typeof result.room === "string" || (result.here && typeof result.here === "object" && !Array.isArray(result.here))) {
     scopedProjectionLocalRevision += 1;
+    syncV2BrowserWorkerScope();
   }
   applyScopedProjectionModel();
 }
@@ -3360,7 +3718,7 @@ function mountChatComponent() {
     present,
     draft: state.chatDraft,
     inRoom,
-    canSend: canSendDirect()
+    canSend: canSendChat()
   }, () => scrollChatFeedToEnd(element.querySelector<HTMLElement>(".chat-feed") ?? ".chat-feed"));
 }
 
@@ -3568,6 +3926,10 @@ function sendChatInput(space: string, text: string) {
   // Local-only echo so the feed reads as a transcript; never emitted server-side.
   pushChatLine({ kind: "input", source: space, text, ts: Date.now() });
   const onError = chatErrorHandler(space);
+  if (canSendChatV2()) {
+    v2PlanAndExecuteCommand(space, text, onError);
+    return;
+  }
   ensureSpacePresence(space, () => {
     command(space, text, undefined, onError);
   }, onError);
@@ -3646,6 +4008,7 @@ function renderChatCommandResult(action: ChatCommandUiAction, result: any, origi
     setChatPresent(result);
     if (!scopedProjectionEnabled && result.look_deferred === true) direct(room, "look", [], applyLookResult, chatErrorHandler(room));
     if (!scopedProjectionEnabled) void refresh();
+    else if (result.look_deferred === true) void refresh().then(() => focusChatInput());
     else render();
     return;
   }
@@ -3654,6 +4017,7 @@ function renderChatCommandResult(action: ChatCommandUiAction, result: any, origi
     setChatPresent(result);
     if (!scopedProjectionEnabled && result?.look_deferred === true && target) direct(target, "look", [], applyLookResult, chatErrorHandler(target));
     if (!scopedProjectionEnabled) void refresh();
+    else if (result?.look_deferred === true) void refresh().then(() => focusChatInput());
     else render();
     return;
   }
@@ -3929,7 +4293,7 @@ function mountPinboardComponent() {
     view: normalizedPinboardView(),
     actor: state.actor ?? null,
     inBoard: pinboardActorPresent(),
-    canSend: canSendDirect(),
+    canSend: canSendPinboardV2(),
     newText: state.pinboardNewText,
     newColor: state.pinboardNewColor,
     viewports: state.pinboardViewports
@@ -3943,6 +4307,7 @@ function bindPinboardComponentEvents(element: WooElement) {
   if (element.dataset.pinboardEventsBound === "true") return;
   element.dataset.pinboardEventsBound = "true";
   element.addEventListener("woo-pinboard-enter", enterPinboard);
+  element.addEventListener("woo-pinboard-leave", () => leavePinboard());
   element.addEventListener("woo-pinboard-create", (event) => {
     const detail = (event as CustomEvent<{ text?: unknown; color?: unknown }>).detail ?? {};
     const text = String(detail.text ?? state.pinboardNewText).trim();
@@ -4357,7 +4722,7 @@ function beginPinboardViewAnimation(stage: HTMLElement | null, canvas: HTMLEleme
 }
 
 function schedulePinboardViewportPublish() {
-  if (!pinboardActorPresent() || state.tab !== "pinboard" || !canSendDirect()) return;
+  if (!pinboardActorPresent() || state.tab !== "pinboard" || !canSendPinboardV2()) return;
   if (pinboardViewportTimer !== undefined) return;
   const wait = Math.max(0, PINBOARD_VIEWPORT_MIN_MS - (Date.now() - lastPinboardViewportPublishAt));
   pinboardViewportTimer = window.setTimeout(() => {
@@ -4367,13 +4732,22 @@ function schedulePinboardViewportPublish() {
 }
 
 function publishPinboardViewport() {
-  if (!pinboardActorPresent() || state.tab !== "pinboard" || !canSendDirect()) return;
+  if (!pinboardActorPresent() || state.tab !== "pinboard" || !canSendPinboardV2()) return;
   const viewport = currentPinboardViewport();
   if (!viewport || !pinboardViewportChanged(viewport, lastPinboardViewportSent)) return;
   lastPinboardViewportSent = viewport;
   lastPinboardViewportPublishAt = Date.now();
   const board = pinboardSpace();
-  if (board) direct(board, "viewport", [viewport.x, viewport.y, viewport.w, viewport.h, viewport.scale]);
+  if (board) {
+    v2Turn({
+      scope: board,
+      route: "direct",
+      target: board,
+      verb: "viewport",
+      args: [viewport.x, viewport.y, viewport.w, viewport.h, viewport.scale],
+      persistence: "live"
+    });
+  }
 }
 
 function currentPinboardViewport(): (PinNoteBox & { scale: number }) | undefined {
@@ -4404,8 +4778,8 @@ function pinboardViewportChanged(next: PinNoteBox & { scale: number }, prev: (Pi
 
 function pinboardActorPresent() {
   const board = pinboardSpace();
-  const currentLocation = scopedProjectionEnabled ? state.scopedProjection?.session?.current_location : state.world?.session?.current_location;
-  return Boolean(state.actor && board && currentLocation === board);
+  const activeScope = scopedProjectionEnabled ? sessionActiveScope(state.scopedProjection?.session) : sessionActiveScope(state.world?.session);
+  return Boolean(state.actor && board && activeScope === board);
 }
 
 function panPinboardBy(dx: number, dy: number) {
@@ -4550,21 +4924,29 @@ function bindPinNoteResize(handle: HTMLButtonElement) {
 
 function enterPinboard() {
   const board = pinboardSpace();
-  if (!board || !canSendDirect()) return;
-  direct(board, "enter", [], (result) => {
-    applyScopedMoveResult(result);
-    setPinboardPresent(result);
-    void ensureScopedOverlayForTab("pinboard", { force: true }).then(() => {
-      if (state.tab === "pinboard") render();
-    });
-    refreshPinboardNotes({ force: true });
-    requestSpaceChatFocus(board);
+  if (!board || !canSendPinboardV2()) return;
+  v2Turn({
+    scope: board,
+    route: "sequenced",
+    target: board,
+    verb: "enter",
+    args: [],
+    persistence: "durable",
+    onResult: (result) => {
+      applyScopedMoveResult(result);
+      setPinboardPresent(result);
+      void ensureScopedOverlayForTab("pinboard", { force: true }).then(() => {
+        if (state.tab === "pinboard") render();
+      });
+      refreshPinboardNotes({ force: true });
+      requestSpaceChatFocus(board);
+    }
   });
 }
 
 function leavePinboard(done?: () => void) {
   const board = pinboardSpace();
-  if (!board || !canSendDirect()) {
+  if (!board || !canSendPinboardV2()) {
     done?.();
     return;
   }
@@ -4572,16 +4954,28 @@ function leavePinboard(done?: () => void) {
     done?.();
     return;
   }
-  direct(board, "leave", [], (result) => {
-    applyScopedMoveResult(result);
-    setPinboardPresent(result);
-    clearPinboardViewports();
-    done?.();
-    // Legacy mode still needs a projection refresh after feature-space leave;
-    // scoped mode consumes the move-shaped `here` result above.
-    if (!scopedProjectionEnabled) void refresh();
-    void ensureScopedOverlayForTab("pinboard", { force: true });
-    if (state.tab === "pinboard") render();
+  v2Turn({
+    scope: board,
+    route: "sequenced",
+    target: board,
+    verb: "leave",
+    args: [],
+    persistence: "durable",
+    onResult: (result) => {
+      applyScopedMoveResult(result);
+      setPinboardPresent(result);
+      clearPinboardViewports();
+      done?.();
+      // Legacy mode still needs a projection refresh after feature-space leave;
+      // scoped mode consumes the move-shaped `here` result above.
+      if (!scopedProjectionEnabled) void refresh();
+      void ensureScopedOverlayForTab("pinboard", { force: true });
+      if (state.tab === "pinboard") render();
+    },
+    onError: () => {
+      done?.();
+      if (state.tab === "pinboard") render();
+    }
   });
 }
 
@@ -4611,32 +5005,41 @@ function setPinboardPresent(result: any) {
 
 function pinboardCall(verb: string, args: any[] = [], options?: ProjectionCallOptions) {
   const board = pinboardSpace();
-  if (board) call(board, board, verb, args, options);
+  if (board) v2Turn({ scope: board, route: "sequenced", target: board, verb, args, options });
 }
 
 function pinboardTargetCall(target: string, verb: string, args: any[] = [], options?: ProjectionCallOptions) {
   const board = pinboardSpace();
-  if (board && target) call(board, target, verb, args, options);
+  if (board && target) v2Turn({ scope: board, route: "sequenced", target, verb, args, options });
 }
 
 function refreshPinboardNotes(options: { force?: boolean } = {}) {
   const board = pinboardSpace();
-  if (!board || !canSendDirect()) return;
+  if (!board || !canSendPinboardV2()) return;
   if (pinboardNotesRefreshPending && options.force !== true) return;
   pinboardNotesRefreshPending = true;
   window.setTimeout(() => {
     pinboardNotesRefreshPending = false;
   }, 2500);
-  direct(board, "list_notes", [], (result) => {
-    pinboardNotesRefreshPending = false;
-    if (!Array.isArray(result)) return;
-    applyPinboardNotesCanonical(board, result);
-    if (state.tab === "pinboard") render();
-  }, () => {
-    pinboardNotesRefreshPending = false;
-    // Allow the next /api/state arrival to retry hydration if a transient
-    // failure (cold remote DO, network blip) ate this list_notes call.
-    pinboardTextHydrationRequested = false;
+  v2Turn({
+    scope: board,
+    route: "direct",
+    target: board,
+    verb: "list_notes",
+    args: [],
+    persistence: "live",
+    onResult: (result) => {
+      pinboardNotesRefreshPending = false;
+      if (!Array.isArray(result)) return;
+      applyPinboardNotesCanonical(board, result);
+      if (state.tab === "pinboard") render();
+    },
+    onError: () => {
+      pinboardNotesRefreshPending = false;
+      // Allow the next projection arrival to retry hydration if a transient
+      // failure (cold remote DO, network blip) ate this list_notes call.
+      pinboardTextHydrationRequested = false;
+    }
   });
 }
 

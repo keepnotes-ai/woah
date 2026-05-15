@@ -43,6 +43,39 @@ they have no place in the merge channel. Counters in the seed must be
 neutral defaults derived from the slice; a counter bump elsewhere in
 the cluster MUST NOT force a satellite snapshot.
 
+### HS1.1 Verb authoring metadata
+
+Verbs in the delivered seed have `line_map` stripped to the empty
+object `{}`. `line_map` is consumed only by stack-trace formatting in
+the runtime and is large enough to dominate the seed payload on
+worlds with many compiled verbs (~half of the default-world seed JSON
+on local sizing). The per-verb merge comparison (`normalizeVerbForCompare`)
+already ignores `line_map`, so the stripped delivery is merge-equivalent
+to a populated one. Receivers may recompile `line_map` locally — the
+bundled-catalog repair path inside `runHostScopedLocalCatalogLifecycle`
+does this for catalog-shipped verbs after the merge — or accept the
+soft degradation (stack traces from non-bundled-source verbs lose
+line/column info on the satellite, but the receiver can still ask the
+gateway for full source via authoring endpoints).
+
+`verb.source` is preserved in the delivered seed.
+
+### HS1.2 Seed digest
+
+`/__internal/host-seed` includes an `x-woo-seed-digest` response header:
+a stable SHA-256 over a canonical form of the seed body (per-object
+arrays sorted by key, JSON object keys sorted). The wire body is left
+in its existing insertion-order layout — the digest's canonical form
+is computed separately to stay stable across the gateway's own
+hibernation/reload, where re-hydration produces alphabetical SQL
+ORDER BY layouts rather than runtime insertion order.
+
+Receivers MAY persist the digest after a successful merge and use it
+as a "stored slice is consistent with gateway-at-digest-D" assertion
+for future probes. The merge protocol itself does not depend on the
+digest; it is metadata for cold-load wire-savings strategies layered
+on top.
+
 ---
 
 ## HS2. Per-subject merge
@@ -84,6 +117,14 @@ Never participate in merge, on any subject:
   provide actual ordering for property updates.
 - `created` — set once at create; immutable.
 - `id` — the subject key.
+
+Credential-bearing `$account` objects are additionally redacted before
+delivery to satellite hosts: `password_hash`, `password_salt`, and
+`oauth_identities` are omitted from the delivered object's `properties`
+and `propertyVersions`. Credential verification is gateway-local; a
+satellite may need account identity/quota metadata for object graph
+consistency, but it must not receive reusable password or OAuth
+material through host-seed propagation.
 
 **Deletions.** The seed's per-object property loop only adds and
 updates. To propagate gateway-side deletes/renames, after applying the

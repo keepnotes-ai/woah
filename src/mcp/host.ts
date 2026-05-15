@@ -8,6 +8,7 @@
 
 import type { CallContext, NativeHandler, WooWorld } from "../core/world";
 import type { AppliedFrame, DirectResultFrame, ErrorFrame, Message, ObjRef, Observation, RemoteToolDescriptor, WooValue } from "../core/types";
+import type { ShadowCommitAccepted } from "../core/shadow-commit-scope";
 import { directedRecipients, wooError } from "../core/types";
 
 // Broadcast hooks the runtime wires into the MCP host so that MCP-initiated
@@ -80,7 +81,7 @@ export type McpInvocationResult = {
 };
 
 export type McpDispatchHooks = {
-  direct?: (sessionId: string, actor: ObjRef, target: ObjRef, verb: string, args: WooValue[]) => DirectResultFrame | ErrorFrame | Promise<DirectResultFrame | ErrorFrame>;
+  direct?: (sessionId: string, actor: ObjRef, target: ObjRef, verb: string, args: WooValue[], scope?: ObjRef | null) => DirectResultFrame | ErrorFrame | Promise<DirectResultFrame | ErrorFrame>;
   call?: (sessionId: string, actor: ObjRef, space: ObjRef, message: Message) => AppliedFrame | ErrorFrame | Promise<AppliedFrame | ErrorFrame>;
 };
 
@@ -175,6 +176,35 @@ export class McpHost {
     }
   }
 
+  // v2 commit-scope accepted frames are the pure-v2 observation source. They
+  // do not carry legacy AppliedFrame audience metadata, so route by directed
+  // observation recipients first and then by scope subscription/presence.
+  routeShadowAcceptedFrame(frame: ShadowCommitAccepted, originSessionId?: string | null): void {
+    if (!frame.observations.length) return;
+    const refreshSessions = new Set<string>();
+    for (const observation of frame.observations) {
+      const directed = directedRecipients(observation);
+      const directedActors = new Set<ObjRef>();
+      if (directed.to) directedActors.add(directed.to);
+      if (directed.from) directedActors.add(directed.from);
+      for (const [sessionId, queue] of this.queues) {
+        if (originSessionId && sessionId === originSessionId) continue;
+        const sessionLocation = this.world.activeScopeForSession(sessionId);
+        const shouldDeliver = directedActors.size > 0
+          ? directedActors.has(queue.actor)
+          : this.actorSubscribes(queue.actor, frame.position.scope) || sessionLocation === frame.position.scope;
+        if (shouldDeliver) {
+          this.enqueueFor(sessionId, observation);
+          refreshSessions.add(sessionId);
+        }
+      }
+    }
+    for (const sessionId of refreshSessions) {
+      const queue = this.queues.get(sessionId);
+      if (queue) void this.refreshToolList(sessionId, queue.actor).catch(() => {});
+    }
+  }
+
   private implicitAudience(observation: Observation, fallback: ObjRef | null): ObjRef[] | null {
     const directed = directedRecipients(observation);
     if (directed.to) return directed.from ? [directed.to, directed.from] : [directed.to];
@@ -224,10 +254,10 @@ export class McpHost {
     add(actor, "self");
     const actorObj = this.world.objects.has(actor) ? this.world.object(actor) : null;
     const activeLocations = this.world.allLocationsForActor(actor);
-    const currentLocation = actorObj?.location ?? activeLocations[0] ?? null;
-    if (currentLocation) add(currentLocation, "location", false);
-    if (currentLocation && this.world.objects.has(currentLocation) && this.descendsFrom(currentLocation, "$space")) {
-      for (const id of this.world.object(currentLocation).contents) {
+    const activeScope = actorObj?.location ?? activeLocations[0] ?? null;
+    if (activeScope) add(activeScope, "location", false);
+    if (activeScope && this.world.objects.has(activeScope) && this.descendsFrom(activeScope, "$space")) {
+      for (const id of this.world.object(activeScope).contents) {
         if (this.actorCanSee(actor, id)) add(id, "contents");
       }
     }
@@ -235,7 +265,7 @@ export class McpHost {
       if (this.isOtherActor(actor, id)) continue;
       if (this.actorCanSee(actor, id)) add(id, "inventory");
     }
-    for (const id of activeLocations) if (id !== currentLocation) add(id, "presence", false);
+    for (const id of activeLocations) if (id !== activeScope) add(id, "presence", false);
     const focusList = this.focusListOf(actor);
     for (const id of focusList) {
       if (this.world.objects.has(id)) {
@@ -368,7 +398,7 @@ export class McpHost {
     const remoteExpandCandidates = new Set<ObjRef>();
     const actorObj = this.world.objects.has(actor) ? this.world.object(actor) : null;
     const activeLocations = this.world.allLocationsForActor(actor);
-    const currentLocation = actorObj?.location ?? activeLocations[0] ?? null;
+    const activeScope = actorObj?.location ?? activeLocations[0] ?? null;
     const focus = this.focusListOf(actor);
     const reachable = this.reachable(actor);
     const reachableOrigins = new Map(reachable.map((entry) => [entry.id, entry.origin]));
@@ -383,7 +413,7 @@ export class McpHost {
     };
     const addIfReachable = (id: ObjRef | null | undefined): void => {
       if (!id) return;
-      if (id === actor || id === currentLocation || reachableIds.has(id) || activeLocations.includes(id) || focus.includes(id)) {
+      if (id === actor || id === activeScope || reachableIds.has(id) || activeLocations.includes(id) || focus.includes(id)) {
         add(id, true, reachableOrigins.get(id) === "contents" && !focus.includes(id) ? "obvious" : "tools");
       }
     };
@@ -400,15 +430,15 @@ export class McpHost {
     switch (scope) {
       case "active":
         add(actor, false);
-        add(currentLocation);
+        add(activeScope);
         if (actorObj) for (const id of actorObj.contents) addIfReachable(id);
         for (const id of activeLocations) add(id);
         for (const id of focus) add(id);
         break;
       case "here":
-        add(currentLocation);
-        addContents(currentLocation);
-        expandRemoteContents(currentLocation);
+        add(activeScope);
+        addContents(activeScope);
+        expandRemoteContents(activeScope);
         break;
       case "focus":
         for (const id of focus) add(id);
@@ -417,7 +447,7 @@ export class McpHost {
         if (object) addIfReachable(object);
         break;
       case "space": {
-        const target = object ?? currentLocation;
+        const target = object ?? activeScope;
         addIfReachable(target);
         addContents(target);
         expandRemoteContents(target);
@@ -431,7 +461,7 @@ export class McpHost {
         for (const id of focus) {
           add(id);
         }
-        expandRemoteContents(currentLocation);
+        expandRemoteContents(activeScope);
         break;
     }
 
@@ -644,7 +674,7 @@ export class McpHost {
     return lines.join("\n");
   }
 
-  private enclosingSpaceFor(target: ObjRef): ObjRef | null {
+  enclosingSpaceFor(target: ObjRef): ObjRef | null {
     let cursor: ObjRef | null = target;
     while (cursor && this.world.objects.has(cursor)) {
       if (this.descendsFrom(cursor, "$space")) return cursor;
@@ -672,8 +702,10 @@ export class McpHost {
       const previous = CURRENT_WAIT_SESSION_ID;
       CURRENT_WAIT_SESSION_ID = sessionId;
       try {
-        const result = this.dispatchHooks.direct
-          ? await this.dispatchHooks.direct(sessionId, actor, tool.object, tool.verb, args)
+        const result = this.isMcpControlTool(actor, tool)
+          ? await this.world.directCall(undefined, actor, tool.object, tool.verb, args, { sessionId })
+          : this.dispatchHooks.direct
+          ? await this.dispatchHooks.direct(sessionId, actor, tool.object, tool.verb, args, tool.enclosingSpace)
           : await this.world.directCall(undefined, actor, tool.object, tool.verb, args, { sessionId });
         if (result.op === "error") throw fromError(result.error);
         // Self observations are returned in the call result; do NOT route them
@@ -706,6 +738,10 @@ export class McpHost {
       observations: frame.observations,
       applied: { space: frame.space, seq: frame.seq, ts: frame.ts }
     };
+  }
+
+  private isMcpControlTool(actor: ObjRef, tool: McpTool): boolean {
+    return tool.object === actor && ["wait", "focus", "unfocus", "focus_list"].includes(tool.verb);
   }
 
   // ----- $actor:wait / focus / unfocus / focus_list handlers -----

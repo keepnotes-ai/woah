@@ -41,14 +41,19 @@ import {
   type RestProtocolRequest
 } from "../core/protocol";
 import type { MetricEvent, ObjRef, Observation, RemoteToolDescriptor, Session, WooValue } from "../core/types";
-import { directedRecipients, publicAppliedFrame, wooError } from "../core/types";
+import { directedRecipients, publicAppliedFrame, sessionActiveScopeFromRecord, wooError } from "../core/types";
 import type { AppliedFrame, CommandFrame, DirectResultFrame, ErrorFrame, LiveEventFrame, Message } from "../core/types";
-import type { SeedWorld, SerializedWorld, TombstoneRecord } from "../core/repository";
+import type { SeedWorld, SerializedObject, SerializedSession, SerializedWorld, TombstoneRecord } from "../core/repository";
 import { createHostOperationMemo, normalizeError, type ParkedTaskRun } from "../core/world";
 import { installGitHubTap, updateGitHubTap, type CatalogTapLogEvent } from "../core/catalog-taps";
+import { shadowBrowserSessionBearer, shadowBrowserSessionClaimsValue, type ShadowBrowserStateTransfer } from "../core/shadow-browser-node";
+import { parseShadowScopeHeadJson } from "../core/shadow-scope-head";
+import { buildTransportErrorEnvelope, decodeEnvelope, encodeEnvelope, type ShadowEnvelope } from "../core/shadow-envelope";
+import type { ShadowTurnExecReply } from "../core/shadow-turn-exec";
 import { CFObjectRepository } from "./cf-repository";
-import { McpGateway } from "../mcp/gateway";
+import { McpGateway, type McpV2EnvelopeResult, type McpV2OpenResult } from "../mcp/gateway";
 import { signInternalRequest, verifyInternalRequest } from "./internal-auth";
+import { hashSource } from "../core/source-hash";
 
 // Re-import WooWorld type. Note `import type` must reach the world module
 // without dragging Node-only deps into the Worker bundle.
@@ -57,14 +62,53 @@ import type { CallContext, DeferredHostEffect, HostBridge, HostObjectSummary, Ho
 export interface Env {
   WOO: DurableObjectNamespace;
   DIRECTORY: DurableObjectNamespace;
+  COMMIT_SCOPE?: DurableObjectNamespace;
   ASSETS?: Fetcher;
   WOO_INITIAL_WIZARD_TOKEN?: string;
   WOO_INTERNAL_SECRET?: string;
+  TURNSTILE_SECRET_KEY?: string;
   WOO_AUTO_INSTALL_CATALOGS?: string;
   WOO_HOST_READ_TIMEOUT_MS?: string;
   WOO_HOST_WRITE_TIMEOUT_MS?: string;
   WOO_HOST_OUT_FETCH_CONCURRENCY?: string;
 }
+
+type CommitScopeOpenResponse = {
+  ok: true;
+  relay: string;
+  head?: {
+    kind: "woo.scope_head.shadow.v1";
+    scope: ObjRef;
+    epoch: number;
+    seq: number;
+    hash: string;
+  };
+  hello: {
+    kind: "woo.transport.hello.v1";
+    relay: string;
+    session: string;
+    actor: ObjRef;
+    server_time: number;
+    max_message_bytes: number;
+    idempotency_window_ms: number;
+    planes: Array<"execution" | "commit" | "state" | "live">;
+    features: string[];
+  };
+  transfer: ShadowBrowserStateTransfer;
+};
+
+type CommitScopeEnvelopeResponse = {
+  ok: true;
+  reply: string | null;
+  fanout?: Array<{ node: string; envelope: string }>;
+  head?: {
+    kind: "woo.scope_head.shadow.v1";
+    scope: ObjRef;
+    epoch: number;
+    seq: number;
+    hash: string;
+  };
+};
 
 const WORLD_HOST = "world";
 const REMOTE_ROUTE_SYNC_TTL_MS = 60_000;
@@ -118,6 +162,29 @@ function raceAgainstAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<
   });
 }
 
+function webSocketProtocols(request: Request): string[] {
+  return (request.headers.get("sec-websocket-protocol") ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function sessionActorObjects(world: WooWorld, sessions: SerializedSession[]): SerializedObject[] {
+  return world.exportObjects(sessions.map((session) => session.actor));
+}
+
+function v2SessionAuthorityPayload(world: WooWorld): { sessions: SerializedSession[]; session_objects: SerializedObject[] } {
+  // CommitScopeDO only needs fresh bearer authority and actor records on the
+  // hot path. Keep this payload narrow so WebSocket envelopes do not smuggle a
+  // full world snapshot back across the DO boundary.
+  const sessions = world.exportSessions();
+  return { sessions, session_objects: sessionActorObjects(world, sessions) };
+}
+
 // Internal RPC routes that are pure reads of world state and therefore safe
 // to coalesce: while one fetch is in flight, identical concurrent requests
 // (same host + path + body) attach to the same Promise rather than each
@@ -146,6 +213,19 @@ const INHERIT_TOMBSTONES_BATCH_SIZE = 1000;
 // Meta key under which the §RC11.2 host-teardown state is persisted.
 const HOST_STATE_META_KEY = "host_state";
 const HOST_STATE_TEARING_DOWN = "tearing_down";
+// Last gateway-supplied host-seed digest the satellite successfully merged.
+// On a subsequent cold-load, the satellite probes the gateway for the
+// current digest and skips the full seed transfer when it matches — see
+// createHostScopedWorld below.
+const HOST_SEED_DIGEST_META_KEY = "host_seed_digest";
+// SHA-256 of the (id|host|anchor) triples this DO last successfully
+// published to the Directory, sorted by id. On gateway cold-restart we
+// recompute the digest from the current route set and skip the
+// register-objects RPC entirely when it matches — see
+// registerObjectRoutes. Assumes Directory state persists; an
+// independently-wiped Directory recovers on the next route mutation,
+// which bumps the digest and triggers a fresh publish.
+const PUBLISHED_ROUTES_DIGEST_META_KEY = "published_routes_digest";
 
 export class PersistentObjectDO {
   private state: DurableObjectState;
@@ -201,53 +281,61 @@ export class PersistentObjectDO {
   private teardownScheduled = false;
 
   constructor(state: DurableObjectState, env: Env) {
+    const constructorStartedAt = Date.now();
     this.state = state;
     this.env = env;
     this.repo = new CFObjectRepository(state, (event) => this.emitMetric(event, this.durableHostKey()));
+    console.log("woo.metric", JSON.stringify({ kind: "do_constructor", class: "PersistentObjectDO", ms: Date.now() - constructorStartedAt, ts: Date.now(), host_key: this.durableHostKey() }));
   }
 
   async fetch(request: Request): Promise<Response> {
+    const handlerStartedAt = Date.now();
+    let pathname = "";
+    let hostKey = this.durableHostKey();
+    let handlerStatus: "ok" | "error" = "ok";
+    let handlerError: string | undefined;
     // Operator-bootstrap precondition check (cloudflare.md §R14.7).
-    if (!this.env.WOO_INITIAL_WIZARD_TOKEN) {
-      return jsonResponse(
-        { error: { code: "E_BOOTSTRAP_TOKEN_MISSING", message: "set WOO_INITIAL_WIZARD_TOKEN via wrangler secret put" } },
-        503
-      );
-    }
-    if (!this.env.WOO_INTERNAL_SECRET) {
-      return jsonResponse(
-        { error: { code: "E_BOOTSTRAP_TOKEN_MISSING", message: "set WOO_INTERNAL_SECRET via wrangler secret put" } },
-        503
-      );
-    }
-
-    const url = new URL(request.url);
-    const pathname = url.pathname;
-    const hostKey = request.headers.get("x-woo-host-key") || this.durableHostKey();
-    const gatewayHost = hostKey === WORLD_HOST;
-    const internalRequest = pathname.startsWith("/__internal/");
-
-    if (internalRequest) await verifyInternalRequest(this.env, request);
-
-    // §RC11.5 teardown gate. Once host_state is "tearing_down", this DO
-    // refuses all inbound work with E_HOST_RECYCLED until deleteAll has
-    // run. If teardown is in progress but no waitUntil is currently
-    // running it (e.g. a wake from hibernation between batches), schedule
-    // a resume so the sequence completes idempotently.
-    if (!gatewayHost && this.getHostState() === HOST_STATE_TEARING_DOWN) {
-      this.ensureTeardownScheduled(this.durableHostKey());
-      return jsonResponse(
-        { error: { code: "E_HOST_RECYCLED", message: "host is tearing down" } },
-        410
-      );
-    }
-
-    if (!gatewayHost && (pathname === "/api/auth" || pathname === "/ws")) {
-      return jsonResponse({ error: { code: "E_NOTAPPLICABLE", message: `${pathname} is only available on the world gateway host` } }, 404);
-    }
-
-    let postHandlerWorld: WooWorld | null = null;
     try {
+      if (!this.env.WOO_INITIAL_WIZARD_TOKEN) {
+        return jsonResponse(
+          { error: { code: "E_BOOTSTRAP_TOKEN_MISSING", message: "set WOO_INITIAL_WIZARD_TOKEN via wrangler secret put" } },
+          503
+        );
+      }
+      if (!this.env.WOO_INTERNAL_SECRET) {
+        return jsonResponse(
+          { error: { code: "E_BOOTSTRAP_TOKEN_MISSING", message: "set WOO_INTERNAL_SECRET via wrangler secret put" } },
+          503
+        );
+      }
+
+      const url = new URL(request.url);
+      pathname = url.pathname;
+      hostKey = request.headers.get("x-woo-host-key") || this.durableHostKey();
+      const gatewayHost = hostKey === WORLD_HOST;
+      const internalRequest = pathname.startsWith("/__internal/");
+
+      if (internalRequest) await verifyInternalRequest(this.env, request);
+
+      // §RC11.5 teardown gate. Once host_state is "tearing_down", this DO
+      // refuses all inbound work with E_HOST_RECYCLED until deleteAll has
+      // run. If teardown is in progress but no waitUntil is currently
+      // running it (e.g. a wake from hibernation between batches), schedule
+      // a resume so the sequence completes idempotently.
+      if (!gatewayHost && this.getHostState() === HOST_STATE_TEARING_DOWN) {
+        this.ensureTeardownScheduled(this.durableHostKey());
+        return jsonResponse(
+          { error: { code: "E_HOST_RECYCLED", message: "host is tearing down" } },
+          410
+        );
+      }
+
+      if (!gatewayHost && (pathname === "/api/auth" || pathname === "/ws" || pathname === "/v2/turn-network/ws")) {
+        return jsonResponse({ error: { code: "E_NOTAPPLICABLE", message: `${pathname} is only available on the world gateway host` } }, 404);
+      }
+
+      let postHandlerWorld: WooWorld | null = null;
+      try {
       const world = await this.getWorld(hostKey);
       postHandlerWorld = world;
 
@@ -270,6 +358,10 @@ export class PersistentObjectDO {
         return new Response(null, { status: 101, webSocket: client });
       }
 
+      if (gatewayHost && pathname === "/v2/turn-network/ws") {
+        return await this.acceptV2TurnNetworkWebSocket(request, world);
+      }
+
       if (request.method === "GET" && pathname === "/healthz") {
         return jsonResponse({ ok: true, ts: Date.now(), objects: world.objects.size });
       }
@@ -279,6 +371,16 @@ export class PersistentObjectDO {
       if (gatewayHost && pathname === "/mcp") {
         const gateway = this.getMcpGateway(world);
         return await gateway.handle(request);
+      }
+
+      if (gatewayHost && request.method === "POST" && pathname === "/v2/session/mint") {
+        const body = await readJsonBody(request);
+        const session = this.authenticateToken(world, String(body.token ?? ""));
+        await this.registerSessionRoute(session);
+        return jsonResponse({
+          token: shadowBrowserSessionBearer(session),
+          claims: shadowBrowserSessionClaimsValue(session, "shadow-local", [session.actor])
+        });
       }
 
       if (gatewayHost && request.method === "POST" && pathname === "/api/admin/refresh-host-seeds") {
@@ -293,6 +395,7 @@ export class PersistentObjectDO {
         world,
         authenticateToken: (token) => this.authenticateToken(world, token),
         requireSession: () => this.requireRestSession(world, request),
+        verifyTurnstile: (token, protocolRequest) => this.verifyTurnstile(token, protocolRequest),
         onAuthenticated: (session) => this.registerSessionRoute(session),
         onSessionEnded: (session) => this.unregisterSessionRoute(session.id),
         onSessionsEnded: async (sessions) => {
@@ -348,11 +451,28 @@ export class PersistentObjectDO {
       return jsonResponse({ error: { code: "E_OBJNF", message: `no route for ${request.method} ${pathname}` } }, 404);
     } catch (err) {
       const error = normalizeError(err);
+      handlerStatus = "error";
+      handlerError = error.code;
       return jsonResponse({ error }, statusForError(error));
     } finally {
       if (!gatewayHost && postHandlerWorld) {
         this.maybeStartTeardown(postHandlerWorld, this.durableHostKey());
       }
+    }
+    } catch (err) {
+      handlerStatus = "error";
+      handlerError = metricErrorCode(err);
+      throw err;
+    } finally {
+      this.emitMetric({
+        kind: "do_handler",
+        class: "PersistentObjectDO",
+        method: request.method,
+        route: pathname || "_pre_route",
+        ms: Date.now() - handlerStartedAt,
+        status: handlerStatus,
+        ...(handlerError ? { error: handlerError } : {})
+      }, hostKey);
     }
   }
 
@@ -547,43 +667,46 @@ export class PersistentObjectDO {
     }
   }
 
-  private getMcpGateway(world: WooWorld): McpGateway {
+    private getMcpGateway(world: WooWorld): McpGateway {
     if (!this.mcpGateway) {
       const initStart = Date.now();
       this.mcpGateway = new McpGateway(world, {
         serverName: "woo",
-        dispatch: {
-          call: async (sessionId, actor, space, message) => {
-            world.touchSessionInput(sessionId);
-            const session = { sessionId, actor };
-            const host = await this.resolveObjectHost(space, WORLD_HOST);
-            const result = host === WORLD_HOST
-              ? await world.call(undefined, sessionId, space, message)
-              : await this.forwardWsCall(world, host, undefined, session, space, message);
-            if (result.op === "applied" && host !== WORLD_HOST) await this.registerRemoteObjectRoutes(host);
-            return result;
+        v2: {
+          open: async (scope, body): Promise<McpV2OpenResult> => {
+            world.touchSessionInput(body.session);
+            return await this.v2CommitScopePost<CommitScopeOpenResponse>(scope, "/v2/open", body as unknown as Record<string, unknown>);
           },
-          direct: async (sessionId, actor, target, verb, args) => {
-            world.touchSessionInput(sessionId);
-            const session = { sessionId, actor };
-            const host = await this.resolveObjectHost(target, WORLD_HOST);
-            const { pure } = this.resolveDispatchPath(world, target, verb, host, WORLD_HOST);
-            return host === WORLD_HOST
-              ? await world.directCall(undefined, actor, target, verb, args)
-              : await this.forwardWsDirect(world, host, undefined, session, target, verb, args, { pure });
+          envelope: async (scope, body): Promise<McpV2EnvelopeResult> => {
+            world.touchSessionInput(body.session);
+            return await this.v2CommitScopePost<CommitScopeEnvelopeResponse>(scope, "/v2/envelope", body as unknown as Record<string, unknown>);
           }
         },
-        broadcasts: {
-          broadcastApplied: (frame, originSessionId) => this.handleAppliedFrame(world, frame, undefined, originSessionId),
-          broadcastLiveEvents: (result, originSessionId) => this.broadcastLiveEvents(world, result, originSessionId)
-        }
+        broadcasts: {}
       });
       world.recordMetric({ kind: "init", phase: "mcp_gateway", ms: Date.now() - initStart });
     }
     return this.mcpGateway;
-  }
+    }
 
-  private async getWorld(hostKey = this.durableHostKey()): Promise<WooWorld> {
+    private async verifyTurnstile(token: string, request: RestProtocolRequest): Promise<boolean> {
+      const secret = this.env.TURNSTILE_SECRET_KEY;
+      if (!secret) throw wooError("E_PERM", "TURNSTILE_SECRET_KEY is required for signup");
+      const body = new FormData();
+      body.set("secret", secret);
+      body.set("response", token);
+      const remoteIp = request.header("cf-connecting-ip") ?? request.header("x-forwarded-for")?.split(",")[0]?.trim();
+      if (remoteIp) body.set("remoteip", remoteIp);
+      const response = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+        method: "POST",
+        body
+      });
+      if (!response.ok) return false;
+      const parsed = await response.json().catch(() => null);
+      return !!(parsed && typeof parsed === "object" && !Array.isArray(parsed) && (parsed as { success?: unknown }).success === true);
+    }
+
+    private async getWorld(hostKey = this.durableHostKey()): Promise<WooWorld> {
     if (this.world) {
       if (hostKey === WORLD_HOST) await this.registerObjectRoutes(this.world);
       return this.world;
@@ -681,7 +804,20 @@ export class PersistentObjectDO {
         });
       }
     }
+    // The cold-load path stays a single signed RPC: the satellite
+    // always fetches the full seed and runs the pre/post-lifecycle
+    // merges. The seed body now carries an x-woo-seed-digest response
+    // header and the satellite persists it as host_seed_digest after
+    // each successful merge so a future change can build a
+    // probe-then-skip path on top of it — that promotion needs to
+    // either make runHostScopedLocalCatalogLifecycle
+    // gateway-authority-aware (so foreign-hosted writes from the
+    // lifecycle don't survive the skip and break the next admin push)
+    // or cache the seed body locally so the post-lifecycle merge can
+    // run without an RPC. Adding a probe round-trip ahead of the same
+    // full fetch would be pure overhead until one of those lands.
     let freshSeed: SeedWorld | null = null;
+    let freshSeedDigest: string | null = null;
     try {
       // Use the gateway's seed verbatim — re-scoping via
       // nonEmptyHostScopedWorld would import-then-re-export, which
@@ -691,7 +827,8 @@ export class PersistentObjectDO {
       // routing input the merge needs and must come from the
       // gateway's batched directory view).
       const fetched = await this.fetchHostSeed(hostKey);
-      freshSeed = fetched.objects.length > 0 ? fetched : null;
+      freshSeed = fetched.seed.objects.length > 0 ? fetched.seed : null;
+      freshSeedDigest = fetched.digest;
     } catch (err) {
       if (!scoped) throw err;
       console.warn("woo.cluster_seed_refresh_failed", { host: hostKey, error: normalizeError(err) });
@@ -719,6 +856,14 @@ export class PersistentObjectDO {
       }
     }
     if (seedMergeChanged) world.persistFullSnapshot();
+    // Record the digest only when the gateway supplied one AND we
+    // actually pulled the matching body — if we skipped the transfer
+    // the stored digest is already correct, and an unannotated
+    // response means rolling-deploy mixed versions where the next
+    // probe will simply miss.
+    if (freshSeedDigest && freshSeed) {
+      this.repo.saveMeta(HOST_SEED_DIGEST_META_KEY, freshSeedDigest);
+    }
     this.scrubStaleSubscribersOnce(world);
     return world;
   }
@@ -909,7 +1054,7 @@ export class PersistentObjectDO {
     }));
   }
 
-  private async fetchHostSeed(hostKey: ObjRef): Promise<SeedWorld> {
+  private async fetchHostSeed(hostKey: ObjRef): Promise<{ seed: SeedWorld; digest: string | null }> {
     const startedAt = Date.now();
     const id = this.env.WOO.idFromName(WORLD_HOST);
     try {
@@ -928,7 +1073,13 @@ export class PersistentObjectDO {
       }
       this.emitMetric({ kind: "startup_storage", phase: "host_seed_fetch", ms: Date.now() - startedAt, status: "ok", objects: Array.isArray((body as { objects?: unknown }).objects) ? ((body as { objects: unknown[] }).objects.length) : undefined }, hostKey);
       if (!isSeedWorld(body)) throw wooError("E_STORAGE", `host-seed response missing SeedWorld.objectHosts (spec §HS1)`, hostKey);
-      return body;
+      // The digest header lets the receiver persist the gateway's
+      // content fingerprint so its next cold-load can short-circuit
+      // the seed transfer when nothing has changed. Older gateways
+      // (rolling deploys) omit the header — treat that as "no digest
+      // known," which falls back to the full fetch every time.
+      const digest = response.headers.get("x-woo-seed-digest");
+      return { seed: body, digest: digest && digest.length > 0 ? digest : null };
     } catch (err) {
       this.emitMetric({ kind: "startup_storage", phase: "host_seed_fetch", ms: Date.now() - startedAt, status: "error", error: metricErrorCode(err) }, hostKey);
       throw err;
@@ -951,7 +1102,8 @@ export class PersistentObjectDO {
       }
     }
     for (const host of hosts) {
-      const seed = world.buildHostSeedForDelivery(host as ObjRef);
+      const built = world.buildHostSeedForDeliveryWithDigest(host as ObjRef);
+      const seed = built.seed;
       if (seed.objects.length === 0) {
         skipped.push({ host, reason: "empty_seed" });
         continue;
@@ -960,7 +1112,7 @@ export class PersistentObjectDO {
         const result = await this.forwardInternalChecked<Record<string, unknown>>(
           host,
           "/__internal/apply-host-seed",
-          { host, seed },
+          { host, seed, digest: built.digest },
           { timeoutMs: 15_000 }
         );
         refreshed.push(result);
@@ -971,7 +1123,7 @@ export class PersistentObjectDO {
     return { ok: errors.length === 0, hosts: hosts.length, refreshed, skipped, errors };
   }
 
-  private applyHostSeed(world: WooWorld, hostKey: ObjRef, seed: SeedWorld): Record<string, unknown> {
+  private applyHostSeed(world: WooWorld, hostKey: ObjRef, seed: SeedWorld, digest: string | null): Record<string, unknown> {
     // Use the gateway's seed verbatim — re-scoping would discard the
     // gateway-supplied objectHosts metadata (see spec §HS1).
     if (seed.objects.length === 0) throw wooError("E_OBJNF", `host seed does not contain ${hostKey}`, hostKey);
@@ -983,6 +1135,10 @@ export class PersistentObjectDO {
       this.hostStateCache.clear();
       this.crossHostPropCache.clear();
     }
+    // Mirror the cold-load path: any successful merge of a freshly
+    // built seed leaves the satellite's stored slice consistent with
+    // that digest, so the next cold-load probe can short-circuit.
+    if (digest) this.repo.saveMeta(HOST_SEED_DIGEST_META_KEY, digest);
     return { ok: true, host: hostKey, changed: merged.changed, objects: world.objects.size };
   }
 
@@ -991,13 +1147,44 @@ export class PersistentObjectDO {
       await this.registerIncrementalObjectRoutes(world);
       return;
     }
-    const ok = await this.registerRoutes(world.objectRoutes());
-    if (ok) this.routesRegistered = true;
+    const routes = world.objectRoutes();
+    // Cold-restart skip: if the current route set hashes to the same
+    // value the DO published last time it was awake, the Directory's
+    // SQLite tables already hold an identical row set and the RPC
+    // would write zero rows. Skipping the round-trip is worth ~one
+    // signed fetch + Directory transaction per cold gateway boot.
+    // Still populate the in-memory dedup map so subsequent incremental
+    // calls in this session don't republish the same triples.
+    const currentDigest = hashRouteSet(routes);
+    const storedDigest = this.repo.loadMeta(PUBLISHED_ROUTES_DIGEST_META_KEY);
+    if (storedDigest && storedDigest === currentDigest) {
+      for (const route of routes) {
+        this.publishedRoutes.set(route.id, route.host);
+        this.routeCache.set(route.id, route.host);
+      }
+      this.routesRegistered = true;
+      this.emitMetric({ kind: "startup_storage", phase: "directory_register_objects_skip", ms: 0, status: "ok", routes: routes.length }, this.durableHostKey());
+      return;
+    }
+    const ok = await this.registerRoutes(routes);
+    if (ok) {
+      this.routesRegistered = true;
+      this.repo.saveMeta(PUBLISHED_ROUTES_DIGEST_META_KEY, currentDigest);
+    }
   }
 
   private async registerIncrementalObjectRoutes(world: WooWorld): Promise<void> {
-    const routes = world.objectRoutes().filter((route) => this.publishedRoutes.get(route.id) !== route.host);
-    await this.registerRoutes(routes);
+    const all = world.objectRoutes();
+    const fresh = all.filter((route) => this.publishedRoutes.get(route.id) !== route.host);
+    if (fresh.length === 0) return;
+    const ok = await this.registerRoutes(fresh);
+    // Keep the persisted digest in sync with what's actually published
+    // so the cold-restart skip in registerObjectRoutes stays valid
+    // after route mutations during the session. Single-route writes via
+    // adoptLocalObjectRoute deliberately don't update the digest — they
+    // bypass `world`, so we instead let the next full registerObjectRoutes
+    // call (any request after cold-restart) recompute and refresh.
+    if (ok) this.repo.saveMeta(PUBLISHED_ROUTES_DIGEST_META_KEY, hashRouteSet(all));
   }
 
   private localObjectRoute(world: WooWorld | null | undefined, id: ObjRef): { id: ObjRef; host: string; anchor: ObjRef | null } | null {
@@ -1610,7 +1797,8 @@ export class PersistentObjectDO {
       space: ctx.space,
       seq: ctx.seq,
       session: ctx.session,
-      session_current_location: session?.currentLocation ?? null,
+      session_active_scope: session?.activeScope ?? null,
+      session_current_location: session?.activeScope ?? null,
       session_expires_at: session?.expiresAt ?? null,
       session_token_class: session?.tokenClass ?? null,
       session_apikey_id: session?.apikeyId ?? null,
@@ -1814,7 +2002,8 @@ export class PersistentObjectDO {
       if (request.method === "POST" && pathname === "/__internal/host-seed") {
         const host = String(body.host ?? "") as ObjRef;
         if (!host) throw wooError("E_INVARG", "host-seed requires host");
-        return jsonResponse(world.buildHostSeedForDelivery(host));
+        const built = world.buildHostSeedForDeliveryWithDigest(host);
+        return jsonResponse(built.seed, 200, { "x-woo-seed-digest": built.digest });
       }
 
       if (request.method === "POST" && pathname === "/__internal/apply-host-seed") {
@@ -1823,7 +2012,8 @@ export class PersistentObjectDO {
         if (!host) throw wooError("E_INVARG", "apply-host-seed requires host");
         if (host !== hostKey) throw wooError("E_INVARG", `host mismatch: ${host} != ${hostKey}`);
         if (!isSeedWorld(body.seed)) throw wooError("E_INVARG", "apply-host-seed requires a SeedWorld with objectHosts (spec §HS1)");
-        return jsonResponse(this.applyHostSeed(world, host, body.seed));
+        const digest = typeof body.digest === "string" && body.digest.length > 0 ? body.digest : null;
+        return jsonResponse(this.applyHostSeed(world, host, body.seed, digest));
       }
 
       if (request.method === "POST" && pathname === "/__internal/broadcast-applied") {
@@ -1873,7 +2063,7 @@ export class PersistentObjectDO {
           String(body.actor ?? "") as ObjRef,
           Number(body.expires_at ?? 0),
           body.token_class,
-          typeof body.current_location === "string" ? body.current_location as ObjRef : undefined,
+          sessionActiveScope(body),
           typeof body.apikey_id === "string" ? body.apikey_id : null
         );
         const raw = body.message && typeof body.message === "object" && !Array.isArray(body.message)
@@ -1898,7 +2088,7 @@ export class PersistentObjectDO {
           String(body.actor ?? "") as ObjRef,
           Number(body.expires_at ?? 0),
           body.token_class,
-          typeof body.current_location === "string" ? body.current_location as ObjRef : undefined,
+          sessionActiveScope(body),
           typeof body.apikey_id === "string" ? body.apikey_id : null
         );
         const deferredHostEffects: DeferredHostEffect[] = [];
@@ -1920,7 +2110,7 @@ export class PersistentObjectDO {
           String(body.actor ?? "") as ObjRef,
           Number(body.expires_at ?? 0),
           body.token_class,
-          typeof body.current_location === "string" ? body.current_location as ObjRef : undefined,
+          sessionActiveScope(body),
           typeof body.apikey_id === "string" ? body.apikey_id : null
         );
         const space = String(body.space ?? "") as ObjRef;
@@ -2065,7 +2255,10 @@ export class PersistentObjectDO {
             actor,
             Number(rawCtx.session_expires_at ?? 0),
             rawCtx.session_token_class,
-            typeof rawCtx.session_current_location === "string" ? rawCtx.session_current_location as ObjRef : undefined,
+            sessionActiveScope({
+              active_scope: rawCtx.session_active_scope,
+              current_location: rawCtx.session_current_location
+            }),
             typeof rawCtx.session_apikey_id === "string" ? rawCtx.session_apikey_id : null
           );
         }
@@ -2198,14 +2391,14 @@ export class PersistentObjectDO {
     actor: ObjRef,
     expiresAt: number,
     rawTokenClass: unknown,
-    currentLocation?: ObjRef | null,
+    activeScope?: ObjRef | null,
     apikeyId?: string | null
   ): Session {
     if (!sessionId || !actor) throw wooError("E_NOSESSION", "internal forwarded call requires session and actor");
     this.ensureInternalActor(world, actor);
     const tokenClass: Session["tokenClass"] = rawTokenClass === "guest" || rawTokenClass === "apikey" ? rawTokenClass : "bearer";
     const apikeyIdValue = typeof apikeyId === "string" && apikeyId.length > 0 ? apikeyId : undefined;
-    return world.ensureSessionForActor(sessionId, actor, tokenClass, Number.isFinite(expiresAt) && expiresAt > 0 ? expiresAt : undefined, currentLocation, apikeyIdValue);
+    return world.ensureSessionForActor(sessionId, actor, tokenClass, Number.isFinite(expiresAt) && expiresAt > 0 ? expiresAt : undefined, activeScope, apikeyIdValue);
   }
 
   private ensureInternalActor(world: WooWorld, actor: ObjRef): void {
@@ -2236,7 +2429,8 @@ export class PersistentObjectDO {
           actor: session.actor,
           expires_at: session.expiresAt,
           token_class: session.tokenClass,
-          current_location: session.currentLocation,
+          active_scope: session.activeScope,
+          current_location: session.activeScope,
           apikey_id: session.apikeyId ?? null
         })
       }));
@@ -2274,7 +2468,10 @@ export class PersistentObjectDO {
         internalActor as ObjRef,
         Number(request.headers.get("x-woo-internal-expires-at") ?? 0),
         request.headers.get("x-woo-internal-token-class"),
-        request.headers.get("x-woo-internal-current-location") as ObjRef | null,
+        sessionActiveScopeFromRecord({
+          active_scope: request.headers.get("x-woo-internal-active-scope"),
+          current_location: request.headers.get("x-woo-internal-current-location")
+        }) as ObjRef | null,
         request.headers.get("x-woo-internal-apikey-id")
       );
     }
@@ -2318,6 +2515,11 @@ export class PersistentObjectDO {
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     const world = await this.getWorld();
+    const existing = this.attachment(ws);
+    if (existing?.protocol === "v2-turn-network") {
+      await this.webSocketV2TurnNetworkMessage(world, ws, message);
+      return;
+    }
     const frame = parseWsProtocolFrame(message);
     if (frame.op === "error") {
       ws.send(JSON.stringify(frame));
@@ -2398,7 +2600,7 @@ export class PersistentObjectDO {
     const att = this.attachment(ws);
     if (att) {
       world.detachSocket(att.sessionId, att.socketId);
-        this.indexRemoveSocket(att.sessionId, att.actor, ws);
+      this.indexRemoveSocket(att.sessionId, att.actor, ws);
     }
     try {
       ws.close();
@@ -2412,7 +2614,167 @@ export class PersistentObjectDO {
     const att = this.attachment(ws);
     if (att) {
       world.detachSocket(att.sessionId, att.socketId);
-        this.indexRemoveSocket(att.sessionId, att.actor, ws);
+      this.indexRemoveSocket(att.sessionId, att.actor, ws);
+    }
+  }
+
+  private async acceptV2TurnNetworkWebSocket(request: Request, world: WooWorld): Promise<Response> {
+    // Public deployments rely on Cloudflare's TLS termination and route this as
+    // wss://; plaintext ws:// is only acceptable for localhost development per
+    // VTN19.
+    const upgrade = request.headers.get("upgrade");
+    if (upgrade?.toLowerCase() !== "websocket") {
+      return jsonResponse({ error: { code: "E_INVARG", message: "expected Upgrade: websocket" } }, 400);
+    }
+    if (!webSocketProtocols(request).includes("woo-v2.turn-network.json")) {
+      return jsonResponse({ error: { code: "E_PROTOCOL", message: "missing Sec-WebSocket-Protocol: woo-v2.turn-network.json" } }, 400);
+    }
+    const url = new URL(request.url);
+    const token = url.searchParams.get("token") ?? "";
+    const node = url.searchParams.get("node") || `browser:${crypto.randomUUID()}`;
+    const scope = (url.searchParams.get("scope") || "") as ObjRef;
+    const lastKnownHead = parseShadowScopeHeadJson(url.searchParams.get("last_known_head"));
+    if (!token) return jsonResponse({ error: { code: "E_NOSESSION", message: "token query parameter is required" } }, 401);
+    const session = this.authenticateToken(world, token);
+    const commitScope = scope || session.actor;
+    const socketId = `v2-${session.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    world.attachSocket(session.id, socketId);
+
+    const pair = new WebSocketPair();
+    const client = pair[0];
+    const server = pair[1];
+    server.serializeAttachment({
+      protocol: "v2-turn-network",
+      sessionId: session.id,
+      actor: session.actor,
+      socketId,
+      node,
+      scope: commitScope,
+      token
+    });
+    this.state.acceptWebSocket(server);
+    this.indexAddSocket(session.id, session.actor, server);
+
+    const sessions = world.exportSessions();
+    const sessionObjects = sessionActorObjects(world, sessions);
+    const opened = await this.v2CommitScopePost<CommitScopeOpenResponse>(commitScope, "/v2/open", {
+      scope: commitScope,
+      node,
+      token,
+      session: session.id,
+      actor: session.actor,
+      sessions,
+      session_objects: sessionObjects,
+      serialized: world.exportWorld(),
+      ...(lastKnownHead ? { last_known_head: lastKnownHead } : {})
+    });
+    const hello = opened.hello;
+    server.send(encodeEnvelope({
+      v: 2,
+      type: hello.kind,
+      id: `${this.durableHostKey()}:hello:${Date.now()}`,
+      from: opened.relay,
+      to: node,
+      actor: session.actor,
+      session: session.id,
+      auth: { mode: "session", token },
+      body: hello
+    } satisfies ShadowEnvelope<typeof hello>));
+    const transfer = opened.transfer;
+    server.send(encodeEnvelope({
+      v: 2,
+      type: transfer.kind,
+      id: `${this.durableHostKey()}:state:${crypto.randomUUID()}`,
+      from: opened.relay,
+      to: node,
+      actor: session.actor,
+      session: session.id,
+      auth: { mode: "session", token },
+      body: transfer
+    } satisfies ShadowEnvelope<typeof transfer>));
+
+    return new Response(null, {
+      status: 101,
+      webSocket: client,
+      headers: { "Sec-WebSocket-Protocol": "woo-v2.turn-network.json" }
+    });
+  }
+
+  private async webSocketV2TurnNetworkMessage(world: WooWorld, ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    const att = this.attachment(ws);
+    if (!att?.node || !att.token) {
+      ws.close(1008, "missing v2 attachment");
+      return;
+    }
+    const encoded = typeof message === "string" ? message : new TextDecoder().decode(message);
+    try {
+      const result = await this.v2CommitScopePost<CommitScopeEnvelopeResponse>(att.scope, "/v2/envelope", {
+        ...v2SessionAuthorityPayload(world),
+        scope: att.scope,
+        node: att.node,
+        token: att.token,
+        session: att.sessionId,
+        actor: att.actor,
+        envelope: encoded
+      });
+      await this.applyV2CommittedTranscript(world, result.reply, att.sessionId);
+      if (result.reply) ws.send(result.reply);
+      this.sendV2Fanout(result.fanout ?? []);
+    } catch (err) {
+      ws.send(encodeEnvelope(buildTransportErrorEnvelope({
+        id: `${this.durableHostKey()}:error:${Date.now()}`,
+        from: this.durableHostKey(),
+        to: att.node,
+        actor: att.actor,
+        session: att.sessionId,
+        auth: { mode: "session", token: att.token },
+        code: "E_PROTOCOL",
+        message: errorMessage(err)
+      })));
+    }
+  }
+
+  private async v2CommitScopePost<T>(scope: ObjRef, path: "/v2/open" | "/v2/envelope", body: Record<string, unknown>): Promise<T> {
+    if (!this.env.COMMIT_SCOPE) throw wooError("E_NOT_IMPLEMENTED", "COMMIT_SCOPE binding is required for v2 turn network");
+    const id = this.env.COMMIT_SCOPE.idFromName(String(scope));
+    const request = await signInternalRequest(this.env, new Request(`${INTERNAL_ORIGIN}${path}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-woo-host-key": `commit-scope:${scope}`
+      },
+      body: JSON.stringify(body)
+    }));
+    const response = await this.env.COMMIT_SCOPE.get(id).fetch(request);
+    const payload = await response.json() as Record<string, unknown>;
+    if (!response.ok) throw wooError("E_INTERNAL", `CommitScopeDO ${path} failed`, payload as WooValue);
+    return payload as T;
+  }
+
+  private async applyV2CommittedTranscript(world: WooWorld, replyText: string | null, sessionId: string): Promise<void> {
+    if (!replyText) return;
+    const reply = decodeEnvelope<ShadowTurnExecReply>(replyText);
+    if (reply.body.ok !== true || !reply.body.commit || !reply.body.transcript) return;
+    world.applyCommittedShadowTranscript(reply.body.transcript);
+    const session = world.sessions.get(sessionId);
+    if (session) await this.registerSessionRoute(session);
+  }
+
+  private sendV2Fanout(fanout: Array<{ node: string; envelope: string }>): void {
+    if (fanout.length === 0) return;
+    const byNode = v2FanoutEnvelopesByNode(fanout);
+    for (const ws of this.state.getWebSockets()) {
+      const att = this.attachment(ws);
+      const envelopes = att?.node ? byNode.get(att.node) : undefined;
+      if (!envelopes) continue;
+      for (const envelope of envelopes) {
+        try {
+          ws.send(envelope);
+        } catch {
+          // Socket cleanup is driven by webSocketClose/webSocketError; fan-out
+          // should not fail the originator's already-accepted commit.
+        }
+      }
     }
   }
 
@@ -2440,12 +2802,20 @@ export class PersistentObjectDO {
 
   // ---- WS helpers ----
 
-  private attachment(ws: WebSocket): { sessionId: string; actor: ObjRef; socketId: string } | null {
+  private attachment(ws: WebSocket): { sessionId: string; actor: ObjRef; socketId: string; protocol?: "v2-turn-network"; node?: string; scope: ObjRef; token?: string } | null {
     const raw = ws.deserializeAttachment();
     if (!raw || typeof raw !== "object") return null;
     const a = raw as Record<string, unknown>;
     if (typeof a.sessionId !== "string" || typeof a.actor !== "string" || typeof a.socketId !== "string") return null;
-    return { sessionId: a.sessionId, actor: a.actor as ObjRef, socketId: a.socketId };
+    return {
+      sessionId: a.sessionId,
+      actor: a.actor as ObjRef,
+      socketId: a.socketId,
+      ...(a.protocol === "v2-turn-network" ? { protocol: "v2-turn-network" as const } : {}),
+      ...(typeof a.node === "string" ? { node: a.node } : {}),
+      scope: (typeof a.scope === "string" ? a.scope : a.actor) as ObjRef,
+      ...(typeof a.token === "string" ? { token: a.token } : {})
+    };
   }
 
   private liveAttachment(world: WooWorld, ws: WebSocket): { sessionId: string; actor: ObjRef; socketId: string } | null {
@@ -2748,7 +3118,8 @@ export class PersistentObjectDO {
       actor: session.actor,
       expires_at: local?.expiresAt ?? Date.now() + 5 * 60_000,
       token_class: local?.tokenClass ?? "bearer",
-      current_location: local?.currentLocation ?? null,
+      active_scope: local?.activeScope ?? null,
+      current_location: local?.activeScope ?? null,
       ...(local?.apikeyId !== undefined ? { apikey_id: local.apikeyId } : {}),
       ...extra
     };
@@ -3009,6 +3380,10 @@ function isReadAvailabilityError(err: unknown): boolean {
   return error.code === "E_TIMEOUT" || error.code === "E_OBJNF";
 }
 
+function sessionActiveScope(record: Record<string, unknown>): ObjRef | undefined {
+  return (sessionActiveScopeFromRecord(record) as ObjRef | null) ?? undefined;
+}
+
 async function workerHashText(text: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -3021,4 +3396,25 @@ function logCatalogTapEvent(event: CatalogTapLogEvent): void {
 function metricErrorCode(err: unknown): string {
   if (err && typeof err === "object" && "code" in err) return String((err as { code: unknown }).code);
   return err instanceof Error ? err.name : "E_INTERNAL";
+}
+
+export function v2FanoutEnvelopesByNode(fanout: Array<{ node: string; envelope: string }>): Map<string, string[]> {
+  const byNode = new Map<string, string[]>();
+  for (const item of fanout) {
+    const envelopes = byNode.get(item.node);
+    if (envelopes) envelopes.push(item.envelope);
+    else byNode.set(item.node, [item.envelope]);
+  }
+  return byNode;
+}
+
+// Stable digest over a set of object routes. Used by registerObjectRoutes
+// to compare the current published-route set against what was last
+// persisted, so a cold-restart with an unchanged world skips the
+// Directory register-objects RPC entirely. Triples are sorted by id and
+// joined with delimiters that cannot appear in ObjRefs.
+function hashRouteSet(routes: ReadonlyArray<{ id: ObjRef; host: string; anchor: ObjRef | null }>): string {
+  const sorted = [...routes].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const lines = sorted.map((route) => `${route.id}\t${route.host}\t${route.anchor ?? ""}`);
+  return hashSource(lines.join("\n"));
 }

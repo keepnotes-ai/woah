@@ -35,6 +35,13 @@ import { wooError, type ErrorValue, type Message, type ObjRef, type Observation,
 
 type Row = Record<string, any>;
 
+function persistedSessionFromRow(row: Row, now: number): SerializedSession {
+  const session = sessionFromRow(row);
+  // A persisted null means "was attached when the process stopped"; after a
+  // cold reload there is no socket, so start the grace window at load time.
+  return session.lastDetachAt === null ? { ...session, lastDetachAt: now } : session;
+}
+
 export class LocalSQLiteRepository implements WorldRepository, ObjectRepository {
   private db: DatabaseSync;
   private transactionDepth = 0;
@@ -86,14 +93,9 @@ export class LocalSQLiteRepository implements WorldRepository, ObjectRepository 
       eventSchemas: (eventSchemas.get(row.id) ?? []).map((schema) => [schema.type, parseValue(schema.schema) as Record<string, WooValue>])
     }));
 
-    const sessions = (this.db.prepare("SELECT * FROM session ORDER BY id").all() as Row[]).map((row) => ({
-      id: row.id,
-      actor: row.actor,
-      started: Number(row.started),
-      expiresAt: row.expires_at === null || row.expires_at === undefined ? undefined : Number(row.expires_at),
-      lastDetachAt: row.last_detach_at === null || row.last_detach_at === undefined ? null : Number(row.last_detach_at),
-      tokenClass: row.token_class as "guest" | "bearer" | "apikey" | undefined
-    }));
+    const sessionLoadTime = Date.now();
+    const sessions = (this.db.prepare("SELECT * FROM session ORDER BY id").all() as Row[])
+      .map((row) => persistedSessionFromRow(row, sessionLoadTime));
 
     const logRows = this.db.prepare("SELECT * FROM space_message ORDER BY space_id, seq").all() as Row[];
     const logs = Array.from(groupBy(logRows, "space_id").entries()).map(([space, entries]) => [
@@ -161,7 +163,7 @@ export class LocalSQLiteRepository implements WorldRepository, ObjectRepository 
       );
       for (const session of world.sessions) {
         const values = [session.id, session.actor, session.started, session.expiresAt ?? null, session.lastDetachAt ?? null, session.tokenClass ?? "guest"];
-        const withCurrent = hasCurrentLocationColumn ? [...values, session.currentLocation ?? null] : values;
+        const withCurrent = hasCurrentLocationColumn ? [...values, session.activeScope ?? null] : values;
         insertSession.run(...(hasAttachmentColumn ? [...withCurrent, "{}"] : withCurrent));
       }
 
@@ -424,7 +426,7 @@ export class LocalSQLiteRepository implements WorldRepository, ObjectRepository 
 
   loadSession(session_id: string): SerializedSession | null {
     const row = this.db.prepare("SELECT * FROM session WHERE id = ?").get(session_id) as Row | undefined;
-    return row ? sessionFromRow(row) : null;
+    return row ? persistedSessionFromRow(row, Date.now()) : null;
   }
 
   saveSession(record: SerializedSession): void {
@@ -434,7 +436,7 @@ export class LocalSQLiteRepository implements WorldRepository, ObjectRepository 
     const hasApikeyIdColumn = cols.has("apikey_id");
     const columnList = ["id", "actor", "started", "expires_at", "last_detach_at", "token_class"];
     const values: Array<string | number | null> = [record.id, record.actor, record.started, record.expiresAt ?? null, record.lastDetachAt ?? null, record.tokenClass ?? "guest"];
-    if (hasCurrentLocationColumn) { columnList.push("current_location"); values.push(record.currentLocation ?? null); }
+    if (hasCurrentLocationColumn) { columnList.push("current_location"); values.push(record.activeScope ?? null); }
     if (hasApikeyIdColumn) { columnList.push("apikey_id"); values.push(record.apikeyId ?? null); }
     if (hasAttachmentColumn) { columnList.push("attachment"); values.push("{}"); }
     const placeholders = columnList.map(() => "?").join(", ");

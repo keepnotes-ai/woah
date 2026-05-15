@@ -1,15 +1,15 @@
-![port](public/og-image.png)
+![woah](public/og-image.png)
 
-Port is a programmable, shared, persistent object world for agents and
+Woah is a programmable, shared, persistent object world for agents and
 humans to work and play in.
 
-Inspired by LambdaMOO, closely following its object model but modernized
-and slightly decentralized, with an intention to be a good platform for
+Inspired by LambdaMOO, closely following its object model, but on a
+distributed virtual machine.  Intended to be a good platform for
 broad coordination activities.  Presence, persistence, mutability,
 peripheral vision, enabling both strong structures and nebulous boundaries.
 
-Objects, properties and verbs, permissions, a self-contained VM runtime.
-Interact with Websockets, MCP tools, and REST APIs.  Install and share
+Objects, properties and verbs, permissions, prototype inheritance.
+Interact using Websockets, MCP tools, and REST APIs.  Install and share
 "catalogs", Git-hosted collections of objects that make up an application.
 
 Catalog objects can include lightweight UI components.  The frame is not
@@ -23,12 +23,12 @@ over external data that connects through a "plug".
 Early availability and testing. Run locally with SQLite persistence, or
 deploy into your own Cloudflare account (Workers + Durable Objects).
 
-Online: https://woo.hughpyle.workers.dev/
+Online: https://woah.inguz.workers.dev/
 
 ## Connect an Agent (MCP)
 
 The world exposes an MCP server at `/mcp` (streamable HTTP). Point any MCP
-client at `https://woo.hughpyle.workers.dev/mcp` with header
+client at `https://woah.inguz.workers.dev/mcp` with header
 `mcp-token: guest:<name>` (or a wizard token). Reachable tools follow the
 actor's location and focus list; `woo_list_reachable_tools` returns the
 current set, and `woo_call(object, verb, args)` is the stable fallback
@@ -64,7 +64,7 @@ Then open <http://localhost:5173>.
 
 ## Deploy your own world
 
-`port` is fork-and-deploy — either locally, or see [DEPLOY.md](DEPLOY.md) for
+`woah` is fork-and-deploy — either locally, or see [DEPLOY.md](DEPLOY.md) for
 deploying a world to your own Cloudflare account.
 
 ## Working Rule

@@ -29,6 +29,18 @@ import { installCatalogManifest, updateCatalogManifest, type CatalogManifest, ty
 import { normalizeVerbPerms } from "./verb-perms";
 import { analyzeBytecodePurity, combineVerbPurity, compileVerb, propagateVerbPurity } from "./authoring";
 import { hashSource, randomHex, constantTimeEqual } from "./source-hash";
+import { shadowOwnerCellVersion, shadowStructuralCellVersion, type ShadowStructuralCellKind } from "./shadow-cell-version";
+import { objectCreateEvent, type ActiveTurnRecorder, type RecordedWriteAuthority, type TurnRecorder, type TurnRecorderEvent, type TurnStart } from "./turn-recorder";
+import { remoteBridgeUntrackedEffect } from "./remote-bridge-transcript-policy";
+import type { EffectTranscript, TranscriptWrite } from "./effect-transcript";
+import {
+  finalWritesByCell,
+  mergeTranscriptLogEntry,
+  nextObjectCounterForCreates,
+  serializedObjectForTranscriptCreate,
+  transcriptLogEntry,
+  transcriptSessionActiveScope
+} from "./shadow-commit-scope";
 
 export type NativeHandler = (ctx: CallContext, args: WooValue[]) => WooValue | Promise<WooValue>;
 const GUEST_SESSION_GRACE_MS = 60_000;
@@ -40,6 +52,14 @@ const SUBSCRIBER_SCRUB_FLOOR_MS = 5_000;
 // within this window". Past it, a stateless caller without a live socket
 // reads as "sleeping" — same as a WS user whose connection has dropped.
 const IDLE_PRESENCE_LIVE_WINDOW_MS = 5 * 60_000;
+const IDLE_PRESENCE_IDLE_THRESHOLD_SECONDS = 60;
+
+type ShadowGatewayApplyStats = {
+  objects: number;
+  properties: number;
+  sessions: number;
+  logs: number;
+};
 
 type ResolvedVerb = {
   definer: ObjRef;
@@ -94,10 +114,50 @@ type CommandPlan = {
   verb: string;
   args: WooValue[];
   cmd: CommandMap;
+  persistence?: "durable" | "live";
+};
+
+const PASSWORD_PBKDF2_ITERATIONS = 600_000;
+const PASSWORD_PBKDF2_KEY_BITS = 256;
+const PROVISION_STATE_TTL_MS = 5 * 60_000;
+const SIGNUP_INVITE_AUDIT_TTL_MS = 30 * 24 * 60 * 60_000;
+
+export type SignupStartResult = {
+  account: ObjRef;
+  email: string;
+  verification_token: string;
+  verification_expires_at: number;
+};
+
+export type SignupVerifyResult = {
+  account: ObjRef;
+  actor: ObjRef;
+  bearer: string;
+  session: Session;
+  promoted_guest: boolean;
+};
+
+export type PasswordAuthResult = {
+  account: ObjRef;
+  actor: ObjRef;
+  bearer: string;
+  session: Session;
+};
+
+export type HermesConnectResult = {
+  actor_id: ObjRef;
+  api_key: string;
+  mcp_url: string;
+  redirect_url: string;
+  created: boolean;
 };
 
 type CommandOptions = {
   deferHostEffect?: (effect: DeferredHostEffect) => void;
+};
+
+type PublicCommandLocationOptions = {
+  skipPresenceCheck?: boolean;
 };
 
 export type CallContext = {
@@ -185,10 +245,14 @@ export type HostOperationMemo = {
   // Read promises are scoped to one execution frame. Remote write bridges must
   // invalidate the matching key so read-after-write observes the new value.
   reads: Map<string, Promise<unknown>>;
+  // v2 shadow turn recorder. This travels with a call context so future
+  // distributed executors can keep recording explicit without relying on global
+  // world state.
+  turnRecorder?: ActiveTurnRecorder | null;
 };
 
-export function createHostOperationMemo(): HostOperationMemo {
-  return { routes: new Map(), reads: new Map() };
+export function createHostOperationMemo(turnRecorder?: ActiveTurnRecorder | null): HostOperationMemo {
+  return { routes: new Map(), reads: new Map(), turnRecorder };
 }
 
 export type MoveObjectResult = {
@@ -255,7 +319,9 @@ export type MeSnapshot = {
   session: {
     id: string;
     actor: ObjRef;
-    current_location: ObjRef | null;
+    active_scope: ObjRef | null;
+    /** Legacy alias for clients that have not migrated to `active_scope`. */
+    current_location?: ObjRef | null;
     all_locations: ObjRef[];
   };
   here: RoomSnapshot | null;
@@ -375,7 +441,7 @@ export class WooWorld {
   /** Per-host cache for buildHostSeedForDelivery. Keyed by host; valid
    * while `version === mutationCounter`. Any mutation invalidates all
    * entries (cheap: just a counter compare on lookup). */
-  private hostSeedCache: Map<ObjRef, { version: number; seed: SeedWorld }> = new Map();
+  private hostSeedCache: Map<ObjRef, { version: number; seed: SeedWorld; digest: string }> = new Map();
   private callDepth = 0;
   private guestFreePool = new Set<ObjRef>();
   private objectRepository: ObjectRepository | null;
@@ -410,10 +476,160 @@ export class WooWorld {
   private presenceIndexBuilt = false;
   private lastSubscriberScrubAt = new Map<ObjRef, number>();
 
-  constructor(private repository?: WooRepository, options: { hostBridge?: HostBridge | null } = {}) {
+  private turnRecorder: TurnRecorder | null;
+  private activeTurnRecorder: ActiveTurnRecorder | null = null;
+  private currentTurnWriter: RecordedWriteAuthority | null = null;
+  private logicalInputReplay: Map<string, WooValue[]> | null = null;
+
+  constructor(private repository?: WooRepository, options: { hostBridge?: HostBridge | null; turnRecorder?: TurnRecorder | null } = {}) {
     this.objectRepository = isObjectRepository(repository) ? repository : null;
     this.hostBridge = options.hostBridge ?? null;
+    this.turnRecorder = options.turnRecorder ?? null;
     this.registerNativeHandlers();
+  }
+
+  setTurnRecorder(recorder: TurnRecorder | null): void {
+    this.turnRecorder = recorder;
+  }
+
+  private async withTurnRecording<T>(turn: TurnStart, fn: (active: ActiveTurnRecorder) => Promise<T>): Promise<T> {
+    const recorder = this.turnRecorder;
+    if (!recorder) {
+      return await fn(this.activeTurnRecorder ?? { event: () => undefined });
+    }
+    const previous = this.activeTurnRecorder;
+    const previousWriter = this.currentTurnWriter;
+    const active = recorder.startTurn(turn);
+    this.activeTurnRecorder = active;
+    this.currentTurnWriter = null;
+    try {
+      const result = await fn(active);
+      active.event({ kind: "turn_finish", ok: true, result: result as WooValue });
+      return result;
+    } catch (err) {
+      active.event({ kind: "turn_finish", ok: false, error: normalizeError(err) });
+      throw err;
+    } finally {
+      this.activeTurnRecorder = previous;
+      this.currentTurnWriter = previousWriter;
+    }
+  }
+
+  // Called by the VM whenever execution changes frames. The recorder annotates
+  // subsequent mutations with this frame until dispatch/VM unwinds.
+  setTurnRecorderFrame(ctx: CallContext): void {
+    if (!this.activeTurnRecorder) return;
+    this.currentTurnWriter = this.turnWriterFromContext(ctx);
+  }
+
+  private async withTurnRecorderFrame<T>(ctx: CallContext, fn: () => Promise<T>): Promise<T> {
+    const previous = this.currentTurnWriter;
+    this.setTurnRecorderFrame(ctx);
+    try {
+      return await fn();
+    } finally {
+      this.currentTurnWriter = previous;
+    }
+  }
+
+  private turnWriterFromContext(ctx: CallContext): RecordedWriteAuthority {
+    return {
+      progr: ctx.progr,
+      thisObj: ctx.thisObj,
+      verb: ctx.verbName,
+      definer: ctx.definer,
+      caller: ctx.caller,
+      callerPerms: ctx.callerPerms
+    };
+  }
+
+  private recordTurnEvent(event: TurnRecorderEvent): void {
+    this.activeTurnRecorder?.event(this.recordedEventWithWriter(event));
+  }
+
+  // Local bytecode-to-bytecode calls bypass dispatch(), so the VM uses this
+  // hook to keep verb metadata reads complete for transcript validation.
+  recordTurnDispatch(target: ObjRef, verbName: string, startAt: ObjRef | null | undefined, definer: ObjRef, verb: VerbDef): void {
+    this.recordTurnEvent({
+      kind: "dispatch",
+      target,
+      verb: verbName,
+      startAt,
+      definer,
+      implementation: verb.kind,
+      owner: verb.owner,
+      version: verb.version,
+      source_hash: verb.source_hash,
+      direct_callable: verb.direct_callable,
+      ...(verb.kind === "native" ? { native: verb.native } : {})
+    });
+  }
+
+  private recordedEventWithWriter(event: TurnRecorderEvent): TurnRecorderEvent {
+    if (!this.currentTurnWriter) return event;
+    switch (event.kind) {
+      case "cell_write":
+      case "prop_write":
+      case "object_create":
+      case "object_move":
+        return event.writer ? event : { ...event, writer: this.currentTurnWriter };
+      default:
+        return event;
+    }
+  }
+
+  private propertyVersionForRecording(objRef: ObjRef, name: string): number | string | undefined {
+    const obj = this.objects.get(objRef);
+    if (!obj) return undefined;
+    if (name === "owner") return shadowOwnerCellVersion(objRef, obj.owner);
+    return obj.propertyVersions.get(name) ?? 0;
+  }
+
+  private structuralVersionForRecording(kind: ShadowStructuralCellKind, objRef: ObjRef): string | undefined {
+    const obj = this.objects.get(objRef);
+    return obj ? shadowStructuralCellVersion(kind, obj) : undefined;
+  }
+
+  private recordUntrackedEffect(name: string, detail?: Record<string, WooValue>): void {
+    this.recordTurnEvent({
+      kind: "untracked_effect",
+      name,
+      ...(detail ? { detail } : {})
+    });
+  }
+
+  setLogicalInputsForReplay(inputs: Array<{ name: string; value: WooValue }>): void {
+    const queued = new Map<string, WooValue[]>();
+    for (const input of inputs) {
+      const list = queued.get(input.name) ?? [];
+      list.push(cloneValue(input.value));
+      queued.set(input.name, list);
+    }
+    this.logicalInputReplay = queued;
+  }
+
+  private takeReplayLogicalInput(name: string): WooValue | undefined {
+    const queued = this.logicalInputReplay?.get(name);
+    if (!queued || queued.length === 0) return undefined;
+    const value = queued.shift();
+    if (queued.length === 0) this.logicalInputReplay?.delete(name);
+    return value;
+  }
+
+  logicalNow(name = "now"): number {
+    const replayed = this.takeReplayLogicalInput(name);
+    const value = typeof replayed === "number" ? replayed : Date.now();
+    this.recordTurnEvent({ kind: "logical_input", name, value });
+    return value;
+  }
+
+  logicalRandomInt(n: number, name = "random"): number {
+    const replayed = this.takeReplayLogicalInput(name);
+    const value = typeof replayed === "number" && Number.isInteger(replayed) && replayed >= 0 && replayed < n
+      ? replayed
+      : Math.floor(Math.random() * n);
+    this.recordTurnEvent({ kind: "logical_input", name, value });
+    return value;
   }
 
   enableIncrementalPersistence(): void {
@@ -559,6 +775,7 @@ export class WooWorld {
     if (obj.parent) this.persistObject(obj.parent);
     if (obj.location) this.persistObject(obj.location);
     this.persist();
+    this.recordTurnEvent(objectCreateEvent(obj));
     return obj;
   }
 
@@ -763,15 +980,40 @@ export class WooWorld {
     this.assertOrdinaryPropertyName(name);
     const obj = this.object(objRef);
     const before = obj.properties.get(name);
+    const hadValue = obj.properties.has(name);
+    const beforeVersion = this.propertyVersionForRecording(objRef, name);
     if (obj.properties.has(name) && valuesEqual(before as WooValue, value)) {
+      this.recordTurnEvent({
+        kind: "prop_write",
+        object: objRef,
+        name,
+        hadValue,
+        before: cloneValue(before as WooValue),
+        after: cloneValue(value),
+        changed: false,
+        beforeVersion,
+        afterVersion: beforeVersion
+      });
       return false;
     }
     obj.properties.set(name, cloneValue(value));
     obj.propertyVersions.set(name, (obj.propertyVersions.get(name) ?? 0) + 1);
+    const afterVersion = this.propertyVersionForRecording(objRef, name);
     obj.modified = Date.now();
     if (name === "subscribers" || name === "session_subscribers") {
       this.invalidatePresenceIndex();
     }
+    this.recordTurnEvent({
+      kind: "prop_write",
+      object: objRef,
+      name,
+      hadValue,
+      ...(hadValue ? { before: cloneValue(before as WooValue) } : {}),
+      after: cloneValue(value),
+      changed: true,
+      beforeVersion,
+      afterVersion
+    });
     return true;
   }
 
@@ -854,8 +1096,15 @@ export class WooWorld {
 
   getProp(objRef: ObjRef, name: string): WooValue {
     const obj = this.object(objRef);
-    if (name === "owner") return obj.owner;
-    if (obj.properties.has(name)) return cloneValue(obj.properties.get(name)!);
+    if (name === "owner") {
+      this.recordTurnEvent({ kind: "prop_read", object: objRef, name, value: obj.owner, version: this.propertyVersionForRecording(objRef, name) });
+      return obj.owner;
+    }
+    if (obj.properties.has(name)) {
+      const value = cloneValue(obj.properties.get(name)!);
+      this.recordTurnEvent({ kind: "prop_read", object: objRef, name, value, version: this.propertyVersionForRecording(objRef, name) });
+      return value;
+    }
     // The `name` attribute is the substrate's authoritative display label
     // (see createObject, examine output, objectDisplayNameAsync). When no
     // explicit property has been set, surface the attribute to woocode
@@ -864,13 +1113,20 @@ export class WooWorld {
     // attribute, not a property value. createAuthoredObject mirrors them
     // intentionally for builder-created objects; this fallback covers the
     // bootstrap path that doesn't.
-    if (name === "name") return obj.name;
+    if (name === "name") {
+      this.recordTurnEvent({ kind: "prop_read", object: objRef, name, value: obj.name, version: this.propertyVersionForRecording(objRef, name) });
+      return obj.name;
+    }
     let parent = obj.parent;
     while (parent) {
       const ancestor = this.parentWalkLookup(objRef, parent);
       if (!ancestor) break;
       const def = ancestor.propertyDefs.get(name);
-      if (def) return cloneValue(def.defaultValue);
+      if (def) {
+        const value = cloneValue(def.defaultValue);
+        this.recordTurnEvent({ kind: "prop_read", object: objRef, name, value, version: this.propertyVersionForRecording(objRef, name) });
+        return value;
+      }
       parent = ancestor.parent;
     }
     throw wooError("E_PROPNF", `property not found: ${name}`, name);
@@ -893,6 +1149,13 @@ export class WooWorld {
       obj.verbs.push(this.withVerbSlot(normalized, obj.verbs.length));
     }
     this.reindexVerbs(obj);
+    // Verb writes are part of the host-seed body delivered to satellites; a
+    // verb edit that does not bump mutationCounter would let the gateway's
+    // hostSeedCache serve a stale seed to the next satellite that asks for
+    // its slice, and the satellite's stored arg_spec would never see the new
+    // shape until the cache was independently invalidated. Bump here so the
+    // cache key advances every time a verb's authoritative metadata changes.
+    this.bumpMutationVersion();
     this.persistObject(objRef);
     this.persist();
     return obj.verbs[writtenIndex];
@@ -904,6 +1167,7 @@ export class WooWorld {
     obj.verbs = obj.verbs.filter((verb) => verb.name !== name);
     if (obj.verbs.length === before) return false;
     this.reindexVerbs(obj);
+    this.bumpMutationVersion();
     this.persistObject(objRef);
     this.persist();
     return true;
@@ -1132,6 +1396,8 @@ export class WooWorld {
   async getPropChecked(progr: ObjRef, objRef: ObjRef, name: string, memo?: HostOperationMemo): Promise<WooValue> {
     if (await this.remoteHostForObject(objRef, memo)) {
       if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+      const effect = remoteBridgeUntrackedEffect("get_prop", { progr, object: objRef, property: name });
+      this.recordUntrackedEffect(effect.name, effect.detail);
       return await this.hostBridge.getPropChecked(progr, objRef, name, memo);
     }
     if (!this.canReadProperty(progr, objRef, name)) {
@@ -1152,6 +1418,8 @@ export class WooWorld {
   async setPropChecked(progr: ObjRef, objRef: ObjRef, name: string, value: WooValue, memo?: HostOperationMemo): Promise<void> {
     if (await this.remoteHostForObject(objRef, memo)) {
       if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+      const effect = remoteBridgeUntrackedEffect("set_prop", { progr, object: objRef, property: name });
+      this.recordUntrackedEffect(effect.name, effect.detail);
       await this.hostBridge.setPropChecked(progr, objRef, name, value, memo);
       return;
     }
@@ -1768,14 +2036,17 @@ export class WooWorld {
       }
       return session;
     }
-    if (token.startsWith("apikey:")) {
-      return this.authApiKey(token.slice("apikey:".length));
+      if (token.startsWith("apikey:")) {
+        return this.authApiKey(token.slice("apikey:".length));
+      }
+      if (token.startsWith("bearer:")) {
+        return this.authBearer(token.slice("bearer:".length));
+      }
+      const tokenClass = this.tokenClassFor(token);
+      const actor = this.allocateGuest();
+      this.placeAllocatedGuest(actor);
+      return this.createSessionForActor(actor, tokenClass);
     }
-    const tokenClass = this.tokenClassFor(token);
-    const actor = this.allocateGuest();
-    this.placeAllocatedGuest(actor);
-    return this.createSessionForActor(actor, tokenClass);
-  }
 
   // Move a freshly-allocated guest into the room named by `$system.guest_initial_room`,
   // if one is configured and the guest is currently sitting at $nowhere. The
@@ -1792,7 +2063,7 @@ export class WooWorld {
     this.moveObject(actor, configured);
   }
 
-  private authApiKey(payload: string): Session {
+    private authApiKey(payload: string): Session {
     const colon = payload.indexOf(":");
     if (colon < 0) throw wooError("E_NOSESSION", "apikey token must be apikey:<id>:<secret>");
     const id = payload.slice(0, colon);
@@ -1810,16 +2081,36 @@ export class WooWorld {
     if (!salt || !expected || !actor) throw wooError("E_NOSESSION", "apikey record is malformed");
     // Soft-deleted records remain in the map (for audit + observability) but
     // reject all further authentications.
-    if (r.revoked_at != null) throw wooError("E_NOSESSION", "apikey not found or revoked");
-    if (!this.objects.has(actor)) throw wooError("E_NOSESSION", "apikey target actor no longer exists");
-    const presented = hashSource(`${salt}:${secret}`);
+      if (r.revoked_at != null) throw wooError("E_NOSESSION", "apikey not found or revoked");
+      if (!this.objects.has(actor)) throw wooError("E_NOSESSION", "apikey target actor no longer exists");
+      if (!this.actorCanAuthenticate(actor)) throw wooError("E_NOSESSION", "apikey actor is deactivated");
+      const presented = hashSource(`${salt}:${secret}`);
     if (!constantTimeEqual(presented, expected)) throw wooError("E_NOSESSION", "apikey secret rejected");
-    // Record liveness so :look on a block can render "plug last seen Ns ago"
-    // without needing extra state. last_seen_at is per-key, not per-session;
-    // a key with N concurrent sessions still gets one timestamp.
-    this.touchApiKeyLastSeen(id);
-    return this.createSessionForActor(actor, "apikey", id);
-  }
+      // Record liveness so :look on a block can render "plug last seen Ns ago"
+      // without needing extra state. last_seen_at is per-key, not per-session;
+      // a key with N concurrent sessions still gets one timestamp.
+      this.touchApiKeyLastSeen(id);
+      if (this.objects.has(actor) && this.inheritsFrom(actor, "$agent")) this.setProp(actor, "last_seen_at", Date.now());
+      return this.createSessionForActor(actor, "apikey", id);
+    }
+
+    private authBearer(token: string): Session {
+      if (!token) throw wooError("E_NOSESSION", "bearer token is empty");
+    this.gcPendingCredentials();
+      const raw = this.propOrNull("$system", "bearer_tokens");
+      const map = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, WooValue> : {};
+      const record = map[token];
+      if (!record || typeof record !== "object" || Array.isArray(record)) throw wooError("E_NOSESSION", "bearer token is expired or unknown");
+      const r = record as Record<string, WooValue>;
+      const actor = String(r.actor ?? "");
+      const expiresAt = Number(r.expires_at ?? 0);
+      if (!actor || !this.objects.has(actor) || expiresAt <= Date.now()) {
+        this.setProp("$system", "bearer_tokens", Object.fromEntries(Object.entries(map).filter(([key]) => key !== token)) as WooValue);
+        throw wooError("E_NOSESSION", "bearer token is expired or unknown");
+      }
+      if (!this.actorCanAuthenticate(actor)) throw wooError("E_NOSESSION", "bearer actor is deactivated");
+      return this.createSessionForActor(actor, "bearer");
+    }
 
   /** Wizard-only: mint an apikey bound to any $actor descendant. */
   createApiKey(actor: ObjRef, target: ObjRef, label: string | null): { id: string; secret: string; actor: ObjRef; label: string | null; created_at: number } {
@@ -1955,6 +2246,13 @@ export class WooWorld {
     return matches;
   }
 
+  private closeSessionsForActor(actor: ObjRef): Session[] {
+    const matches = this.liveSessionsForActor(actor).map((session) => ({ ...session, attachedSockets: new Set(session.attachedSockets) }));
+    for (const session of matches) this.reapSession(session.id);
+    if (matches.length > 0) this.persist(true);
+    return matches;
+  }
+
   /** Wizard-only: list every apikey record's metadata. */
   listApiKeys(actor: ObjRef): Array<{ id: string; actor: ObjRef; label: string | null; created_at: number; last_seen_at: number | null; revoked_at: number | null }> {
     if (!this.canBypassPerms(actor)) throw wooError("E_PERM", "wizard authority required to list api keys", { actor });
@@ -1991,6 +2289,401 @@ export class WooWorld {
     return out;
   }
 
+  async beginSignup(emailInput: string, password: string, options: { inviteCode?: string | null; signupMethod?: string } = {}): Promise<SignupStartResult> {
+    this.gcPendingCredentials();
+    const email = normalizeEmail(emailInput);
+    if (!email) throw wooError("E_INVARG", "signup requires an email address");
+    if (password.length < 8) throw wooError("E_INVARG", "password must be at least 8 characters");
+    if (this.findAccountByEmail(email)) throw wooError("E_EXISTS", "account already exists for email", email);
+    if (this.propOrNull("$system", "signup_invite_required") === true) this.consumeSignupInvite(options.inviteCode ?? null);
+
+    const account = this.createProvisionedObjectId("account");
+    const now = Date.now();
+    const verifier = await hashPassword(password);
+    this.createObject({ id: account, name: email, parent: "$account", owner: "$wiz", location: null });
+    this.setProp(account, "name", email);
+    this.setProp(account, "email", email);
+    this.setProp(account, "password_salt", verifier.salt);
+    this.setProp(account, "password_hash", verifier.encoded);
+    this.setProp(account, "agent_quota", this.systemInt("default_agent_quota", 5));
+    this.setProp(account, "programmer_grant_quota", this.systemInt("default_programmer_grant_quota", 0));
+    this.setProp(account, "agent_count", 0);
+    this.setProp(account, "programmer_agent_count", 0);
+    this.setProp(account, "signup_method", options.signupMethod ?? (options.inviteCode ? "invite" : "turnstile_email"));
+    this.setProp(account, "created_at", now);
+
+    const token = randomHex(32);
+    const expiresAt = now + 24 * 60 * 60_000;
+    const pending = this.pendingEmailVerifications()
+      .filter((entry) => entry.account_id !== account)
+      .concat([{ token_hash: hashSource(token), account_id: account, expires_at: expiresAt }]);
+    this.setProp("$system", "pending_email_verifications", pending as unknown as WooValue);
+    this.recordWizardAction("$system", "signup_started", { account, email });
+    return { account, email, verification_token: token, verification_expires_at: expiresAt };
+  }
+
+  verifySignup(token: string, guestSessionId?: string | null): SignupVerifyResult {
+    const now = Date.now();
+    this.gcPendingCredentials(now);
+    const pending = this.pendingEmailVerifications();
+    const tokenHash = hashSource(token);
+    const index = pending.findIndex((entry) => entry.token_hash === tokenHash);
+    if (index < 0) throw wooError("E_NOSESSION", "verification token is unknown");
+    const entry = pending[index];
+    if (entry.expires_at < now) throw wooError("E_TOKEN_EXPIRED", "verification token has expired");
+    const account = entry.account_id;
+    this.object(account);
+    let actor: ObjRef | null = null;
+    let promotedGuest = false;
+    if (guestSessionId) {
+      const session = this.sessions.get(guestSessionId);
+      if (session && this.objects.has(session.actor) && this.inheritsFrom(session.actor, "$guest")) {
+        actor = session.actor;
+        this.guestFreePool.delete(actor);
+        this.chparentLocal(actor, "$human");
+        this.object(actor).owner = actor;
+        this.markObjectDirty(actor);
+        promotedGuest = true;
+      }
+    }
+    if (!actor) {
+      actor = this.provisionActorInternal("$human", "$wiz", { account, name: this.accountDisplayName(account), created_via: "signup" }, "$system").actor;
+    }
+    this.bindHumanToAccount(actor, account, now);
+    this.setProp("$system", "pending_email_verifications", pending.filter((_, i) => i !== index) as unknown as WooValue);
+    const bearer = this.issueBearerToken(actor, account);
+    const session = this.createSessionForActor(actor, "bearer");
+    this.recordWizardAction("$system", "signup_verified", { account, actor, promoted_guest: promotedGuest });
+    return { account, actor, bearer, session, promoted_guest: promotedGuest };
+  }
+
+  async authenticatePassword(emailInput: string, password: string): Promise<PasswordAuthResult> {
+    this.gcPendingCredentials();
+    const email = normalizeEmail(emailInput);
+    const account = this.findAccountByEmail(email);
+    if (!account) throw wooError("E_NOSESSION", "invalid email or password");
+    if (this.propOrNull(account, "deactivated_at") != null) throw wooError("E_NOSESSION", "account is deactivated");
+    const expected = String(this.propOrNull(account, "password_hash") ?? "");
+    if (!await verifyPassword(password, expected)) {
+      throw wooError("E_NOSESSION", "invalid email or password");
+    }
+    const actor = assertObj(this.propOrNull(account, "primary_actor"));
+    if (!this.actorCanAuthenticate(actor)) throw wooError("E_NOSESSION", "actor is deactivated");
+    const bearer = this.issueBearerToken(actor, account);
+    const session = this.createSessionForActor(actor, "bearer");
+    return { account, actor, bearer, session };
+  }
+
+  connectHermes(actor: ObjRef, returnUrl: string, state: string, profileId: string, options: { force?: boolean } = {}): HermesConnectResult {
+    if (!this.objects.has(actor) || !this.inheritsFrom(actor, "$human")) throw wooError("E_PERM", "Hermes connect requires a human session", actor);
+    if (!returnUrl || !this.allowedProvisionReturn(returnUrl)) throw wooError("E_INVARG", "return URL scheme is not allowed", returnUrl);
+    if (!state) throw wooError("E_INVARG", "state nonce is required");
+    if (!profileId) throw wooError("E_INVARG", "profile_id is required");
+    this.consumeProvisionState(state);
+    const account = assertObj(this.propOrNull(actor, "account"));
+    let agent = this.findHermesAgent(actor, profileId);
+    let created = false;
+    let apiKeyResult: { id: string; secret: string; actor: ObjRef; label: string | null; created_at: number };
+    if (!agent) {
+      const result = this.createAgentForHuman(actor, `hermes-${profileId.slice(0, 8)}`, "Hermes profile", false, {
+        created_via: "hermes_provision",
+        profile_id: profileId
+      });
+      agent = result.actor_id;
+      apiKeyResult = { id: result.api_key_id, secret: result.api_key_secret, actor: agent, label: result.label, created_at: result.created_at };
+      created = true;
+    } else {
+      const rotated = this.rotateAgentKey(actor, agent, options.force === true);
+      apiKeyResult = { id: rotated.id, secret: rotated.secret, actor: agent, label: rotated.label, created_at: rotated.created_at };
+    }
+    const api_key = `apikey:${apiKeyResult.id}:${apiKeyResult.secret}`;
+    const mcp_url = String(this.propOrNull("$system", "mcp_endpoint_url") ?? "/mcp");
+    const redirect_url = appendQuery(returnUrl, { state, actor_id: agent, api_key, mcp_url });
+    this.recordWizardAction(actor, created ? "hermes_agent_created" : "hermes_agent_reconnected", { account, actor: agent, profile_id: profileId });
+    return { actor_id: agent, api_key, mcp_url, redirect_url, created };
+  }
+
+  private issueBearerToken(actor: ObjRef, account: ObjRef): string {
+    this.gcPendingCredentials();
+    const token = randomHex(32);
+    const expiresAt = Date.now() + 60 * 60_000;
+    const raw = this.propOrNull("$system", "bearer_tokens");
+    const map = raw && typeof raw === "object" && !Array.isArray(raw) ? { ...(raw as Record<string, WooValue>) } : {};
+    map[token] = { actor, account, expires_at: expiresAt, created_at: Date.now() } as WooValue;
+    this.setProp("$system", "bearer_tokens", map as WooValue);
+    return `bearer:${token}`;
+  }
+
+  private actorCanAuthenticate(actor: ObjRef): boolean {
+    if (!this.objects.has(actor)) return false;
+    if (this.propOrNull(actor, "deactivated_at") != null) return false;
+    if (this.inheritsFrom(actor, "$human")) {
+      const account = this.propOrNull(actor, "account");
+      return typeof account === "string" && this.objects.has(account) && this.propOrNull(account, "deactivated_at") == null;
+    }
+    if (this.inheritsFrom(actor, "$agent")) {
+      const owner = this.propOrNull(actor, "owner");
+      if (owner === "$wiz") return true;
+      if (typeof owner !== "string" || !this.objects.has(owner)) return false;
+      return this.actorCanAuthenticate(owner);
+    }
+    return true;
+  }
+
+  gcPendingCredentials(now = Date.now()): boolean {
+    let changed = false;
+    const bearerRaw = this.propOrNull("$system", "bearer_tokens");
+    if (bearerRaw && typeof bearerRaw === "object" && !Array.isArray(bearerRaw)) {
+      const next = Object.fromEntries(Object.entries(bearerRaw as Record<string, WooValue>).filter(([, record]) => {
+        return !!(record && typeof record === "object" && !Array.isArray(record) && Number((record as Record<string, WooValue>).expires_at ?? 0) > now);
+      }));
+      if (Object.keys(next).length !== Object.keys(bearerRaw as Record<string, WooValue>).length) {
+        this.setProp("$system", "bearer_tokens", next as WooValue);
+        changed = true;
+      }
+    }
+    const pendingRaw = this.propOrNull("$system", "pending_email_verifications");
+    if (Array.isArray(pendingRaw)) {
+      const next = pendingRaw.filter((entry) => entry && typeof entry === "object" && !Array.isArray(entry) && Number((entry as Record<string, WooValue>).expires_at ?? 0) > now);
+      if (next.length !== pendingRaw.length) {
+        this.setProp("$system", "pending_email_verifications", next as WooValue);
+        changed = true;
+      }
+    }
+    const statesRaw = this.propOrNull("$system", "provision_state_nonces");
+    if (Array.isArray(statesRaw)) {
+      const next = statesRaw.filter((entry) => entry && typeof entry === "object" && !Array.isArray(entry) && Number((entry as Record<string, WooValue>).issued_at ?? 0) + PROVISION_STATE_TTL_MS >= now);
+      if (next.length !== statesRaw.length) {
+        this.setProp("$system", "provision_state_nonces", next as WooValue);
+        changed = true;
+      }
+    }
+    const invitesRaw = this.propOrNull("$system", "signup_invites");
+    if (Array.isArray(invitesRaw)) {
+      const next = invitesRaw.filter((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+        const map = entry as Record<string, WooValue>;
+        if (map.used_by == null) return Number(map.expires_at ?? 0) >= now;
+        return Number(map.used_at ?? map.expires_at ?? 0) + SIGNUP_INVITE_AUDIT_TTL_MS >= now;
+      });
+      if (next.length !== invitesRaw.length) {
+        this.setProp("$system", "signup_invites", next as WooValue);
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  private pendingEmailVerifications(): Array<{ token_hash: string; account_id: ObjRef; expires_at: number }> {
+    const raw = this.propOrNull("$system", "pending_email_verifications");
+    if (!Array.isArray(raw)) return [];
+    return raw.flatMap((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+      const map = entry as Record<string, WooValue>;
+      return typeof map.token_hash === "string" && typeof map.account_id === "string"
+        ? [{ token_hash: map.token_hash, account_id: map.account_id, expires_at: Number(map.expires_at ?? 0) }]
+        : [];
+    });
+  }
+
+  private consumeSignupInvite(code: string | null): void {
+    if (!code) throw wooError("E_PERM", "invite code is required");
+    const raw = this.propOrNull("$system", "signup_invites");
+    const invites = Array.isArray(raw) ? raw : [];
+    const now = Date.now();
+    this.gcPendingCredentials(now);
+    const index = invites.findIndex((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+      const map = entry as Record<string, WooValue>;
+      return map.code === code && map.used_by == null && Number(map.expires_at ?? 0) >= now;
+    });
+    if (index < 0) throw wooError("E_PERM", "invite code is invalid or expired");
+    const next = invites.slice();
+    next[index] = { ...(next[index] as Record<string, WooValue>), used_by: "pending", used_at: now } as WooValue;
+    this.setProp("$system", "signup_invites", next as WooValue);
+  }
+
+    private bindHumanToAccount(actor: ObjRef, account: ObjRef, now: number): void {
+      this.setProp(account, "email_verified_at", now);
+      this.setProp(account, "primary_actor", actor);
+      const actors = this.accountActors(account);
+      if (!actors.includes(actor)) this.setProp(account, "actors", [...actors, actor]);
+      this.setProp(actor, "account", account);
+      this.setProp(actor, "name", this.accountDisplayName(account));
+    }
+
+    private accountDisplayName(account: ObjRef): string {
+      const email = String(this.propOrNull(account, "email") ?? account);
+      return email.includes("@") ? email.slice(0, email.indexOf("@")) : email;
+    }
+
+    private findAccountByEmail(email: string): ObjRef | null {
+      for (const obj of this.objects.values()) {
+        if (!this.inheritsFrom(obj.id, "$account")) continue;
+        if (String(this.propOrNull(obj.id, "email") ?? "").toLowerCase() === email) return obj.id;
+      }
+      return null;
+    }
+
+    private accountActors(account: ObjRef): ObjRef[] {
+      const raw = this.propOrNull(account, "actors");
+      return Array.isArray(raw) ? raw.filter((item): item is ObjRef => typeof item === "string") : [];
+    }
+
+    private systemInt(name: string, fallback: number): number {
+      const value = Number(this.propOrNull("$system", name));
+      return Number.isFinite(value) ? value : fallback;
+    }
+
+    private createProvisionedObjectId(prefix: string): ObjRef {
+      let id: ObjRef;
+      do {
+        id = `${prefix}_${this.objectCounter++}`;
+      } while (this.objects.has(id));
+      this.persistCounters();
+      return id;
+    }
+
+    private provisionActorInternal(classRef: ObjRef, owner: ObjRef, attrs: Record<string, WooValue>, caller: ObjRef): { actor: ObjRef } {
+      if (!this.objects.has(classRef)) throw wooError("E_OBJNF", `class not found: ${classRef}`, classRef);
+      if (!this.inheritsFrom(classRef, "$actor")) throw wooError("E_TYPE", `class must descend from $actor: ${classRef}`, classRef);
+      if (!this.objects.has(owner)) throw wooError("E_OBJNF", `owner not found: ${owner}`, owner);
+      const prefix = classRef === "$human" ? "human" : classRef === "$agent" ? "agent" : "actor";
+      const id = this.createProvisionedObjectId(prefix);
+      const name = typeof attrs.name === "string" && attrs.name ? attrs.name : id;
+      this.createObject({ id, name, parent: classRef, owner, location: "$nowhere" });
+      this.setProp(id, "name", name);
+      if (typeof attrs.description === "string") this.setProp(id, "description", attrs.description);
+      if (classRef === "$human" && typeof attrs.account === "string") this.setProp(id, "account", attrs.account);
+      if (classRef === "$agent") {
+        this.setProp(id, "created_via", typeof attrs.created_via === "string" ? attrs.created_via : "wizard");
+        this.setProp(id, "purpose", typeof attrs.purpose === "string" ? attrs.purpose : "");
+        this.setProp(id, "scope", typeof attrs.scope === "string" ? attrs.scope : "write");
+        if (typeof attrs.profile_id === "string") this.setProp(id, "profile_id", attrs.profile_id);
+      }
+      this.recordWizardAction(caller, "actor_provisioned", { actor: id, class: classRef, owner });
+      return { actor: id };
+    }
+
+    private createAgentForHuman(
+      human: ObjRef,
+      name: string,
+      purpose: string,
+      programmer: boolean,
+      attrs: Record<string, WooValue> = {}
+    ): { actor_id: ObjRef; api_key: string; api_key_id: string; api_key_secret: string; label: string | null; created_at: number } {
+      this.assertSelfHuman(human, human);
+      const account = assertObj(this.propOrNull(human, "account"));
+      if (this.propOrNull(account, "deactivated_at") != null) throw wooError("E_PERM", "account is deactivated", account);
+      const quota = Number(this.propOrNull(account, "agent_quota") ?? 0);
+      const count = Number(this.propOrNull(account, "agent_count") ?? 0);
+      if (count >= quota) throw wooError("E_QUOTA_EXCEEDED", "agent quota exceeded", { account, quota, count });
+      if (programmer) this.assertProgrammerAgentQuota(account);
+      const { actor } = this.provisionActorInternal("$agent", human, { ...attrs, name, purpose }, human);
+      if (programmer) {
+        this.object(actor).flags.programmer = true;
+        this.markObjectDirty(actor);
+      }
+      const key = this.createApiKeyForOwner(human, actor, name);
+      this.setProp(actor, "api_key_id", key.id);
+      this.setProp(account, "actors", [...this.accountActors(account), actor]);
+      this.setProp(account, "agent_count", count + 1);
+      if (programmer) this.setProp(account, "programmer_agent_count", Number(this.propOrNull(account, "programmer_agent_count") ?? 0) + 1);
+      this.recordWizardAction(human, "actor_provisioned", { actor, owner: human, account, surface: "create_agent" });
+      return { actor_id: actor, api_key: `apikey:${key.id}:${key.secret}`, api_key_id: key.id, api_key_secret: key.secret, label: key.label, created_at: key.created_at };
+    }
+
+    private assertSelfHuman(caller: ObjRef, human: ObjRef): void {
+      if (caller !== human) throw wooError("E_PERM", "human provisioning verbs are self-only", { caller, human });
+      if (!this.objects.has(human) || !this.inheritsFrom(human, "$human")) throw wooError("E_TYPE", "target must be a $human", human);
+    }
+
+    private assertOwnedAgent(human: ObjRef, agent: ObjRef): ObjRef {
+      this.object(agent);
+      if (!this.inheritsFrom(agent, "$agent")) throw wooError("E_TYPE", "target must be a $agent", agent);
+      if (this.propOrNull(agent, "owner") !== human) throw wooError("E_PERM", "agent is not owned by this human", { human, agent });
+      return assertObj(this.propOrNull(human, "account"));
+    }
+
+    private assertProgrammerAgentQuota(account: ObjRef): void {
+      const count = Number(this.propOrNull(account, "programmer_agent_count") ?? 0);
+      const quota = Number(this.propOrNull(account, "programmer_grant_quota") ?? 0);
+      if (count >= quota) throw wooError("E_QUOTA_EXCEEDED", "programmer agent quota exceeded", { account, quota, count });
+    }
+
+    private rotateAgentKey(human: ObjRef, agent: ObjRef, force: boolean): { id: string; secret: string; actor: ObjRef; label: string | null; created_at: number } {
+      this.assertOwnedAgent(human, agent);
+      const oldKey = this.propOrNull(agent, "api_key_id");
+      if (typeof oldKey === "string" && oldKey) this.revokeApiKeyRecordById(human, oldKey, force);
+      const key = this.createApiKeyForOwner(human, agent, String(this.propOrNull(agent, "name") ?? agent));
+      this.setProp(agent, "api_key_id", key.id);
+      this.recordWizardAction(human, "api_key_rotated", { actor: agent, key_id: key.id, force });
+      return key;
+    }
+
+    private revokeApiKeyRecordById(actor: ObjRef, id: string, closeSessions: boolean): boolean {
+      const raw = this.propOrNull("$system", "api_keys");
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+      const map = raw as Record<string, WooValue>;
+      const rec = map[id];
+      if (!rec || typeof rec !== "object" || Array.isArray(rec)) return false;
+      const r = rec as Record<string, WooValue>;
+      if (r.revoked_at != null) return false;
+      const targetActor = String(r.actor ?? "");
+      const updated = { ...r, revoked_at: Date.now() };
+      this.setProp("$system", "api_keys", { ...map, [id]: updated as WooValue });
+      if (closeSessions) this.closeSessionsForApiKey(id);
+      this.recordWizardAction(actor, "api_key_revoked", { key_id: id, actor: targetActor });
+      return true;
+    }
+
+    private findHermesAgent(human: ObjRef, profileId: string): ObjRef | null {
+      for (const obj of this.objects.values()) {
+        if (!this.inheritsFrom(obj.id, "$agent")) continue;
+        if (this.propOrNull(obj.id, "owner") === human && this.propOrNull(obj.id, "created_via") === "hermes_provision" && this.propOrNull(obj.id, "profile_id") === profileId) return obj.id;
+      }
+      return null;
+    }
+
+    private listAgentsForHuman(human: ObjRef): Array<Record<string, WooValue>> {
+      const out: Array<Record<string, WooValue>> = [];
+      for (const obj of this.objects.values()) {
+        if (!this.inheritsFrom(obj.id, "$agent")) continue;
+        if (this.propOrNull(obj.id, "owner") !== human) continue;
+        out.push({
+          actor_id: obj.id,
+          name: String(this.propOrNull(obj.id, "name") ?? obj.name),
+          purpose: String(this.propOrNull(obj.id, "purpose") ?? ""),
+          created: obj.created,
+          last_seen: this.propOrNull(obj.id, "last_seen_at"),
+          scope: String(this.propOrNull(obj.id, "scope") ?? "write"),
+          programmer: obj.flags.programmer === true,
+          deactivated_at: this.propOrNull(obj.id, "deactivated_at")
+        });
+      }
+      out.sort((a, b) => String(a.actor_id).localeCompare(String(b.actor_id)));
+      return out;
+    }
+
+    private allowedProvisionReturn(url: string): boolean {
+      const raw = this.propOrNull("$system", "allowed_provision_return_schemes");
+      const allowed = Array.isArray(raw) ? raw.filter((item): item is string => typeof item === "string") : ["hermes://"];
+      return allowed.some((prefix) => url.startsWith(prefix));
+    }
+
+    private consumeProvisionState(state: string): void {
+      const now = Date.now();
+    this.gcPendingCredentials(now);
+      const raw = this.propOrNull("$system", "provision_state_nonces");
+      const entries = Array.isArray(raw) ? raw.filter((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+        return Number((entry as Record<string, WooValue>).issued_at ?? 0) + PROVISION_STATE_TTL_MS >= now;
+      }) : [];
+      const hash = hashSource(state);
+      if (entries.some((entry) => (entry as Record<string, WooValue>).state_hash === hash)) throw wooError("E_REPLAY", "state nonce has already been consumed");
+      this.setProp("$system", "provision_state_nonces", [...entries, { state_hash: hash, issued_at: now }] as unknown as WooValue);
+    }
+
   createSessionForActor(actor: ObjRef, tokenClass: Session["tokenClass"] = "bearer", apikeyId?: string): Session {
     this.reapExpiredSessions();
     this.object(actor);
@@ -2003,7 +2696,7 @@ export class WooWorld {
       expiresAt: now + this.sessionTtl(tokenClass),
       lastDetachAt: null,
       tokenClass,
-      currentLocation: this.initialSessionLocation(actor),
+      activeScope: this.initialSessionLocation(actor),
       attachedSockets: new Set(),
       lastInputAt: now,
       ...(apikeyId !== undefined ? { apikeyId } : {})
@@ -2032,7 +2725,7 @@ export class WooWorld {
     actor: ObjRef,
     tokenClass: Session["tokenClass"] = "bearer",
     expiresAt?: number,
-    currentLocation?: ObjRef | null,
+    activeScope?: ObjRef | null,
     apikeyId?: string
   ): Session {
     const existing = this.sessions.get(id);
@@ -2042,8 +2735,8 @@ export class WooWorld {
         existing.expiresAt = expiresAt;
         changed = true;
       }
-      if (currentLocation && existing.currentLocation !== currentLocation) {
-        existing.currentLocation = currentLocation;
+      if (activeScope && existing.activeScope !== activeScope) {
+        existing.activeScope = activeScope;
         changed = true;
       }
       // If the originating host knows the apikey id but the routed copy
@@ -2065,7 +2758,7 @@ export class WooWorld {
       expiresAt: expiresAt ?? now + this.sessionTtl(tokenClass),
       lastDetachAt: null,
       tokenClass,
-      currentLocation: currentLocation ?? this.initialSessionLocation(actor),
+      activeScope: activeScope ?? this.initialSessionLocation(actor),
       attachedSockets: new Set(),
       lastInputAt: now,
       ...(apikeyId !== undefined ? { apikeyId } : {})
@@ -2147,13 +2840,25 @@ export class WooWorld {
    * actively making calls without keeping a socket open; once input stops,
    * they fall through to "sleeping" the same way a closed WS does. */
   actorIsConnected(actor: ObjRef): boolean {
-    const liveCutoff = Date.now() - IDLE_PRESENCE_LIVE_WINDOW_MS;
+    const now = Date.now();
     for (const session of this.sessions.values()) {
       if (session.actor !== actor) continue;
-      if (session.attachedSockets.size > 0) return true;
-      if (session.lastInputAt >= liveCutoff) return true;
+      if (this.sessionIsLive(session, now)) return true;
     }
     return false;
+  }
+
+  private sessionIsLive(session: Session, now = Date.now()): boolean {
+    if (this.sessionExpired(session, now)) return false;
+    if (session.attachedSockets.size > 0) return true;
+    return session.lastInputAt >= now - IDLE_PRESENCE_LIVE_WINDOW_MS;
+  }
+
+  actorPresenceStatus(actor: ObjRef, now = Date.now()): "awake" | "idle" | "sleeping" {
+    if (!this.actorIsConnected(actor)) return "sleeping";
+    const lastInputAt = this.actorLastInputAt(actor);
+    if (lastInputAt !== null && Math.floor((now - lastInputAt) / 1000) >= IDLE_PRESENCE_IDLE_THRESHOLD_SECONDS) return "idle";
+    return "awake";
   }
 
   detachSocket(sessionId: string, socketId: string): void {
@@ -2234,18 +2939,23 @@ export class WooWorld {
     return best;
   }
 
-  currentLocationForSession(sessionId: string | null | undefined): ObjRef | null {
+  activeScopeForSession(sessionId: string | null | undefined): ObjRef | null {
     if (!sessionId) return null;
     const session = this.sessions.get(sessionId);
     if (!session || !this.sessionAlive(sessionId)) return null;
-    return session.currentLocation;
+    return session.activeScope;
+  }
+
+  /** @deprecated Use activeScopeForSession; current location was legacy focus vocabulary. */
+  currentLocationForSession(sessionId: string | null | undefined): ObjRef | null {
+    return this.activeScopeForSession(sessionId);
   }
 
   allLocationsForActor(actor: ObjRef): ObjRef[] {
     const out: ObjRef[] = [];
     for (const session of this.sessions.values()) {
       if (session.actor !== actor) continue;
-      if (!out.includes(session.currentLocation)) out.push(session.currentLocation);
+      if (!out.includes(session.activeScope)) out.push(session.activeScope);
     }
     if (out.length === 0) {
       const loc = this.objects.get(actor)?.location ?? null;
@@ -2266,7 +2976,7 @@ export class WooWorld {
     for (const session of this.sessions.values()) {
       if (session.actor !== actor) continue;
       if (this.sessionExpired(session, now)) continue;
-      if (!out.includes(session.currentLocation)) out.push(session.currentLocation);
+      if (!out.includes(session.activeScope)) out.push(session.activeScope);
     }
     return out;
   }
@@ -2489,7 +3199,9 @@ export class WooWorld {
         observations,
         hostMemo,
         observe: (event) => {
-          observations.push({ ...event, source: event.source ?? space });
+          const observation = { ...event, source: event.source ?? space };
+          this.recordTurnEvent({ kind: "observe", observation });
+          observations.push(observation);
         }
       };
       const result = await this.planCommandForSpace(ctx, text, space) as WooValue;
@@ -2563,32 +3275,41 @@ export class WooWorld {
         hostMemo,
         onSessionsEnded: options.onSessionsEnded,
         observe: (event) => {
-          observations.push({ ...event, source: event.source ?? target });
+          const observation = { ...event, source: event.source ?? target };
+          this.recordTurnEvent({ kind: "observe", observation });
+          observations.push(observation);
         },
         deferHostEffect: options.deferHostEffect ? (effect) => deferredHostEffects.push(effect) : undefined
       };
-      await this.withPersistencePaused(async () => {
-        const before = this.snapshotProps();
-        const beforePlacement = this.snapshotPlacement();
-        const beforeParkedTasks = new Map(this.parkedTasks);
-        const beforeParkedTaskCounter = this.parkedTaskCounter;
-        const beforeObjectCount = this.objects.size;
-        try {
-          result = await this.dispatch(dispatchCtx, target, verbName, args);
-          mutated =
-            beforeObjectCount !== this.objects.size ||
-            this.propsChanged(before) ||
-            this.placementChanged(beforePlacement) ||
-            beforeParkedTasks.size !== this.parkedTasks.size ||
-            beforeParkedTaskCounter !== this.parkedTaskCounter;
-        } catch (err) {
-          this.restoreProps(before);
-          this.restorePlacement(beforePlacement);
-          this.parkedTasks = new Map(beforeParkedTasks);
-          this.parkedTaskCounter = beforeParkedTaskCounter;
-          throw err;
+      await this.withTurnRecording(
+        { id: frameId, route: "direct", scope: audience ?? "#-1", seq: -1, session: sessionId, actor, target, verb: verbName, args },
+        async (activeRecorder) => {
+          hostMemo.turnRecorder = activeRecorder;
+          await this.withPersistencePaused(async () => {
+            const before = this.snapshotProps();
+            const beforePlacement = this.snapshotPlacement();
+            const beforeParkedTasks = new Map(this.parkedTasks);
+            const beforeParkedTaskCounter = this.parkedTaskCounter;
+            const beforeObjectCount = this.objects.size;
+            try {
+              result = await this.dispatch(dispatchCtx, target, verbName, args);
+              mutated =
+                beforeObjectCount !== this.objects.size ||
+                this.propsChanged(before) ||
+                this.placementChanged(beforePlacement) ||
+                beforeParkedTasks.size !== this.parkedTasks.size ||
+                beforeParkedTaskCounter !== this.parkedTaskCounter;
+            } catch (err) {
+              this.restoreProps(before);
+              this.restorePlacement(beforePlacement);
+              this.parkedTasks = new Map(beforeParkedTasks);
+              this.parkedTaskCounter = beforeParkedTaskCounter;
+              throw err;
+            }
+          });
+          return result;
         }
-      });
+      );
       if (mutated || this.persistenceDirty) this.persist(true);
       if (options.deferHostEffect) {
         for (const effect of deferredHostEffects) options.deferHostEffect(effect);
@@ -2634,9 +3355,9 @@ export class WooWorld {
 
   private async includeMovingActorInHere(ctx: CallContext, here: RoomSnapshot, memo: HostOperationMemo): Promise<RoomSnapshot> {
     if (!ctx.session || here.present_actors.some((actor) => actor.id === ctx.actor)) return here;
-    const currentLocation = this.currentLocationForSession(ctx.session);
-    if (!currentLocation) return here;
-    const currentHere = await this.primaryRoomForLocation(currentLocation, memo);
+    const activeScope = this.activeScopeForSession(ctx.session);
+    if (!activeScope) return here;
+    const currentHere = await this.primaryRoomForLocation(activeScope, memo);
     if (currentHere !== here.id) return here;
     return {
       ...here,
@@ -2656,7 +3377,20 @@ export class WooWorld {
       this.validateMessage(message);
       const space = this.object(spaceRef);
       await this.scrubStaleSubscribersForSpace(spaceRef, message.actor, this.chatPresent(spaceRef));
+      // Sequenced calls use the same catalog-level presence override as
+      // direct calls. The check runs before the recorder opens, so ignoring
+      // skip_presence_check here would make v2 commit-scope turns fail with no
+      // transcript instead of producing an authority-verifiable result.
+      let skipPresenceCheck = false;
+      try {
+        skipPresenceCheck = this.resolveVerb(message.target, message.verb).verb.skip_presence_check === true;
+      } catch {
+        // Let unresolved target verbs continue into the sequenced call body,
+        // where they become applied $error observations and still consume seq.
+      }
+      if (!skipPresenceCheck) {
         this.authorizePresence(message.actor, spaceRef, sessionId);
+      }
       const nextSeq = Number(this.getProp(spaceRef, "next_seq"));
       const seq = nextSeq;
       this.setProp(spaceRef, "next_seq", nextSeq + 1);
@@ -2693,15 +3427,24 @@ export class WooWorld {
         observations,
         hostMemo: createHostOperationMemo(),
         observe: (event) => {
-          observations.push({ ...event, source: event.source ?? space.id });
+          const observation = { ...event, source: event.source ?? space.id };
+          this.recordTurnEvent({ kind: "observe", observation });
+          observations.push(observation);
         }
       };
 
       try {
-        await this.withBehaviorSavepoint(async () => {
-          result = await this.dispatch(ctx, message.target, message.verb, message.args);
-          result = await this.enrichScopedMoveResult(ctx, result);
-        });
+        await this.withTurnRecording(
+          { id, route: "sequenced", scope: spaceRef, seq, session: sessionId, actor: message.actor, target: message.target, verb: message.verb, args: message.args },
+          async (activeRecorder) => {
+            if (ctx.hostMemo) ctx.hostMemo.turnRecorder = activeRecorder;
+            await this.withBehaviorSavepoint(async () => {
+              result = await this.dispatch(ctx, message.target, message.verb, message.args);
+              result = await this.enrichScopedMoveResult(ctx, result);
+            });
+            return result ?? null;
+          }
+        );
         logEntry.applied_ok = true;
       } catch (err) {
         if (isVmSuspendSignal(err)) {
@@ -2739,7 +3482,17 @@ export class WooWorld {
         this.validateMessage(message);
         const space = this.object(spaceRef);
         await this.scrubStaleSubscribersForSpace(spaceRef, message.actor, this.chatPresent(spaceRef));
-        this.authorizePresence(message.actor, spaceRef, sessionId);
+        // Match the in-memory apply path: verb metadata decides whether the
+        // pre-recording presence gate applies to sequenced calls.
+        let skipPresenceCheck = false;
+        try {
+          skipPresenceCheck = this.resolveVerb(message.target, message.verb).verb.skip_presence_check === true;
+        } catch {
+          // Keep missing-verb calls on the applied-frame rollback path.
+        }
+        if (!skipPresenceCheck) {
+          this.authorizePresence(message.actor, spaceRef, sessionId);
+        }
         const seq = Number(this.getProp(spaceRef, "next_seq"));
         const ts = Date.now();
         this.setPropLocal(spaceRef, "next_seq", seq + 1);
@@ -2779,15 +3532,24 @@ export class WooWorld {
           observations,
           hostMemo: createHostOperationMemo(),
           observe: (event) => {
-            observations.push({ ...event, source: event.source ?? space.id });
+            const observation = { ...event, source: event.source ?? space.id };
+            this.recordTurnEvent({ kind: "observe", observation });
+            observations.push(observation);
           }
         };
 
         try {
-          await this.withBehaviorSavepoint(async () => {
-            result = await this.dispatch(ctx, message.target, message.verb, message.args);
-            result = await this.enrichScopedMoveResult(ctx, result);
-          });
+          await this.withTurnRecording(
+            { id, route: "sequenced", scope: spaceRef, seq, session: sessionId, actor: message.actor, target: message.target, verb: message.verb, args: message.args },
+            async (activeRecorder) => {
+              if (ctx.hostMemo) ctx.hostMemo.turnRecorder = activeRecorder;
+              await this.withBehaviorSavepoint(async () => {
+                result = await this.dispatch(ctx, message.target, message.verb, message.args);
+                result = await this.enrichScopedMoveResult(ctx, result);
+              });
+              return result ?? null;
+            }
+          );
           logEntry.applied_ok = true;
         } catch (err) {
           if (isVmSuspendSignal(err)) {
@@ -2856,6 +3618,8 @@ export class WooWorld {
     let result: WooValue;
     if (await this.remoteHostForObject(target, ctx.hostMemo) || (startAt ? await this.remoteHostForObject(startAt, ctx.hostMemo) : false)) {
       if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+      const effect = remoteBridgeUntrackedEffect("dispatch", { target, verb: verbName, start_at: startAt ?? null });
+      this.recordUntrackedEffect(effect.name, effect.detail);
       result = await this.hostBridge.dispatch(ctx, target, verbName, args, startAt);
     } else {
       if (this.callDepth >= MAX_CALL_DEPTH) throw wooError("E_CALL_DEPTH", "maximum verb call depth exceeded");
@@ -2866,6 +3630,7 @@ export class WooWorld {
         // as "no parent override" and fall back to the standard resolveVerb walk.
         const { definer, verb } = startAt == null ? this.resolveVerb(target, verbName) : this.resolveVerbFrom(startAt, verbName);
         this.assertCanExecuteVerb(ctx.progr, target, verbName, verb);
+        this.recordTurnDispatch(target, verbName, startAt, definer, verb);
         const runCtx: CallContext = {
           ...ctx,
           thisObj: target,
@@ -2882,9 +3647,9 @@ export class WooWorld {
           // permissions and set progr/definer/caller frame fields.
           const handler = this.nativeHandlers.get(verb.native);
           if (!handler) throw wooError("E_VERBNF", `native handler not found: ${verb.native}`);
-          result = await handler(runCtx, args);
+          result = await this.withTurnRecorderFrame(runCtx, async () => await handler(runCtx, args));
         } else {
-          result = await runTinyVm(runCtx, verb.bytecode, args);
+          result = await this.withTurnRecorderFrame(runCtx, async () => await runTinyVm(runCtx, verb.bytecode, args));
         }
       } finally {
         this.callDepth -= 1;
@@ -2927,20 +3692,20 @@ export class WooWorld {
 
   async meSnapshot(session: Session): Promise<MeSnapshot> {
     const memo = createHostOperationMemo();
-    const currentLocation = this.currentLocationForSession(session.id);
-    const hereLocation = currentLocation
-      ? await this.primaryRoomForLocation(currentLocation, memo).catch((err) => {
+    const activeScope = this.activeScopeForSession(session.id);
+    const hereLocation = activeScope
+      ? await this.primaryRoomForLocation(activeScope, memo).catch((err) => {
         if (isReadAvailabilityError(err)) return null;
         throw err;
       })
       : null;
     const inventoryRefs = await this.objectContents(session.actor, memo);
     const inventory = await this.scopedObjectSummaries(session.actor, inventoryRefs, memo);
-    const overlays = currentLocation && hereLocation && currentLocation !== hereLocation
-      ? { current_location: { subject: currentLocation, surface: "default", restore: true } }
+    const overlays = activeScope && hereLocation && activeScope !== hereLocation
+      ? { active_scope: { subject: activeScope, surface: "default", restore: true } }
       : undefined;
     const cursorSpaces = [
-      currentLocation,
+      activeScope,
       hereLocation,
       ...Object.values(overlays ?? {}).map((overlay) => overlay.subject)
     ].filter((item): item is ObjRef => typeof item === "string");
@@ -2957,7 +3722,8 @@ export class WooWorld {
       session: {
         id: session.id,
         actor: session.actor,
-        current_location: currentLocation,
+        active_scope: activeScope,
+        current_location: activeScope,
         all_locations: this.allLocationsForActor(session.actor)
       },
       here,
@@ -4134,7 +4900,7 @@ export class WooWorld {
     } else if (ctx.session) {
       const session = this.sessions.get(ctx.session);
       if (session && session.actor === actor) {
-        session.currentLocation = destination;
+        session.activeScope = destination;
         this.persistSession(session);
       }
     }
@@ -4522,14 +5288,14 @@ export class WooWorld {
       if (!session || session.actor !== actor) throw wooError("E_NOSESSION", "actor moveto requires the calling actor's live session", { actor, session: ctx.session });
       if (!await this.remoteHostForObject(targetRef, ctx.hostMemo)) this.object(targetRef);
       await this.invokeAcceptableHook(ctx, targetRef, actor);
-      const oldLocation = session.currentLocation;
+      const oldLocation = session.activeScope;
       if (oldLocation && (this.objects.has(oldLocation) || await this.remoteHostForObject(oldLocation, ctx.hostMemo))) {
         await this.invokeContainerHookSwallow(ctx, oldLocation, "exitfunc", [actor]);
       }
       if (oldLocation && await this.spaceLikeOrRemote(oldLocation, ctx.hostMemo)) {
         await this.updatePresenceChecked(actor, oldLocation, false, ctx);
       }
-      session.currentLocation = targetRef;
+      session.activeScope = targetRef;
       this.persistSession(session);
       if (this.primarySessionForActor(actor)?.id === session.id) {
         if (ctx.deferHostEffect && await this.remoteHostForObject(actor, ctx.hostMemo)) {
@@ -4596,13 +5362,23 @@ export class WooWorld {
   async moveObjectChecked(objRef: ObjRef, targetRef: ObjRef, options: { suppressMirrorHost?: string | null } = {}): Promise<MoveObjectResult> {
     if (await this.remoteHostForObject(objRef)) {
       if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+      const effect = remoteBridgeUntrackedEffect("move", { object: objRef, target: targetRef });
+      this.recordUntrackedEffect(effect.name, effect.detail);
       return await this.hostBridge.moveObject(objRef, targetRef, options);
     }
     return await this.moveObjectOwned(objRef, targetRef, options);
   }
 
   contentsOf(objRef: ObjRef): ObjRef[] {
-    return Array.from(this.object(objRef).contents);
+    const obj = this.object(objRef);
+    const value = Array.from(obj.contents);
+    this.recordTurnEvent({
+      kind: "cell_read",
+      cell: { kind: "contents", object: objRef },
+      version: this.structuralVersionForRecording("contents", objRef),
+      value
+    });
+    return value;
   }
 
   /**
@@ -4615,9 +5391,17 @@ export class WooWorld {
    */
   mirrorContents(containerRef: ObjRef, objRef: ObjRef, present: boolean): void {
     const container = this.object(containerRef);
+    const prior = this.structuralVersionForRecording("contents", containerRef);
     if (present) container.contents.add(objRef);
     else container.contents.delete(objRef);
     container.modified = Date.now();
+    this.recordTurnEvent({
+      kind: "cell_write",
+      cell: { kind: "contents", object: containerRef },
+      value: Array.from(container.contents),
+      op: present ? "add" : "remove",
+      prior
+    });
     this.persistObject(containerRef);
     this.persist();
   }
@@ -4629,15 +5413,31 @@ export class WooWorld {
     // hot, maintain a local contents reverse index instead.
     for (const obj of this.objects.values()) {
       if (!obj.contents.delete(objRef)) continue;
+      const prior = this.structuralVersionForRecording("contents", obj.id);
       obj.modified = Date.now();
+      this.recordTurnEvent({
+        kind: "cell_write",
+        cell: { kind: "contents", object: obj.id },
+        value: Array.from(obj.contents),
+        op: "remove",
+        prior
+      });
       this.persistObject(obj.id);
       changed = true;
     }
     if (this.objects.has(targetRef)) {
       const target = this.object(targetRef);
       if (!target.contents.has(objRef)) {
+        const prior = this.structuralVersionForRecording("contents", targetRef);
         target.contents.add(objRef);
         target.modified = Date.now();
+        this.recordTurnEvent({
+          kind: "cell_write",
+          cell: { kind: "contents", object: targetRef },
+          value: Array.from(target.contents),
+          op: "add",
+          prior
+        });
         this.persistObject(targetRef);
         changed = true;
       }
@@ -4649,7 +5449,7 @@ export class WooWorld {
       if (present) {
         const session = this.sessions.get(sessionId);
         if (session && session.actor === actor) {
-          session.currentLocation = space;
+          session.activeScope = space;
           this.persistSession(session);
         }
       }
@@ -4678,8 +5478,19 @@ export class WooWorld {
 
   async objectLocationChecked(objRef: ObjRef, memo?: HostOperationMemo): Promise<ObjRef | null> {
     const remote = await this.remoteHostForObject(objRef, memo);
-    if (!remote) return this.object(objRef).location;
+    if (!remote) {
+      const obj = this.object(objRef);
+      this.recordTurnEvent({
+        kind: "cell_read",
+        cell: { kind: "location", object: objRef },
+        version: this.structuralVersionForRecording("location", objRef),
+        value: obj.location
+      });
+      return obj.location;
+    }
     if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+    const effect = remoteBridgeUntrackedEffect("location", { object: objRef });
+    this.recordUntrackedEffect(effect.name, effect.detail);
     return await this.hostBridge.location(objRef, memo);
   }
 
@@ -4710,7 +5521,7 @@ export class WooWorld {
       actor: ctx.actor,
       text,
       body: text,
-      ts: Date.now()
+      ts: this.logicalNow("tell.ts")
     });
   }
 
@@ -5188,6 +5999,28 @@ export class WooWorld {
     };
   }
 
+  exportSessions(): SerializedSession[] {
+    // Transport relays need fresh session claims for auth/revocation checks, but
+    // not a full world snapshot. Keep this narrow so hot-path gateways do not
+    // serialize object/log state just to refresh bearer-token authority.
+    return Array.from(this.sessions.values()).map((session) => this.serializeSession(session));
+  }
+
+  exportObjects(ids: Iterable<ObjRef>): SerializedObject[] {
+    // Commit-scope relays sometimes need object authority for session-bound
+    // actors minted after the scope snapshot opened. Export the named records
+    // only, preserving the no-full-world hot-path discipline.
+    const out: SerializedObject[] = [];
+    const seen = new Set<ObjRef>();
+    for (const id of ids) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const obj = this.objects.get(id);
+      if (obj) out.push(this.serializeObject(obj));
+    }
+    return out;
+  }
+
   /**
    * Round-trippable host slice. Returns SeedWorld shape (a
    * SerializedWorld slice plus the `objectHosts` routing map required
@@ -5238,6 +6071,19 @@ export class WooWorld {
    * authoritative for them on the receiver), neutralizes
    * gateway-global counters.
    *
+   * Authoring metadata stripping: verbs ship with `line_map` blanked
+   * to `{}`. line_map is large (per local measurements it dominates
+   * the seed payload — full default-world seed JSON roughly halves
+   * with it removed) and is only consulted for stack-trace formatting.
+   * The seed-merge comparison ignores `line_map` (see
+   * `normalizeVerbForCompare` in bootstrap.ts), so stored slices on
+   * satellites keep any populated line_map they already have, and the
+   * post-merge `runHostScopedLocalCatalogLifecycle` recompiles
+   * bundled-catalog verbs on first arrival to fill it in. Verbs from
+   * non-bundled sources end up with `line_map: {}` on satellites —
+   * stack traces from those verbs lose line/column info on the
+   * satellite, which is acceptable degradation.
+   *
    * Cache: when many satellites cold-load in succession the gateway
    * may rebuild the same per-host slice repeatedly. Memoize on
    * (host, mutationVersion); any mutation bumps the version and
@@ -5245,10 +6091,36 @@ export class WooWorld {
    * per mutation, vs. one rebuild per host per cold-load.
    */
   buildHostSeedForDelivery(host: ObjRef): SeedWorld {
+    return this.buildHostSeedForDeliveryWithDigest(host).seed;
+  }
+
+  /**
+   * Returns the same SeedWorld as `buildHostSeedForDelivery` plus a
+   * stable SHA-256 digest of its JSON body. The digest powers the
+   * cheap "is the satellite's stored slice still current?" probe used
+   * by satellite cold-loads to skip a full ~1 MB seed transfer when
+   * nothing has changed since they were last awake.
+   *
+   * Two satellites observing the same digest are guaranteed to be
+   * offered byte-identical seed bodies. The reverse is not true — a
+   * verb edit that only touches `line_map` would produce a different
+   * intermediate world but the SAME digest, because `line_map` is
+   * stripped from delivery (see buildHostSeedForDelivery). That's
+   * fine: line_map doesn't drive merge changes anyway.
+   */
+  buildHostSeedForDeliveryWithDigest(host: ObjRef): { seed: SeedWorld; digest: string } {
     const version = this.mutationCounter;
     const cached = this.hostSeedCache.get(host);
-    if (cached && cached.version === version) return cached.seed;
+    if (cached && cached.version === version) return { seed: cached.seed, digest: cached.digest };
     const slice = this.exportHostScopedWorld(host);
+    // The wire body keeps the insertion-order layout that the existing
+    // mergeHostScopedSeed contract assumes: per-object arrays (verbs,
+    // eventSchemas, properties, propertyDefs, propertyVersions) compare
+    // positionally in some merge paths, so reordering them inside the
+    // delivered seed would force false-positive merges against any
+    // stored slice that was produced through plain serializeObject.
+    // We strip line_map only — that drop is safe (the merge's
+    // normalizeVerbForCompare already ignores line_map).
     const seed: SeedWorld = {
       ...slice,
       objectCounter: nextScopedObjectCounter(slice.objects.map((obj) => obj.id)),
@@ -5257,10 +6129,21 @@ export class WooWorld {
       logs: [],
       snapshots: [],
       parkedTasks: [],
-      tombstones: slice.tombstones ?? []
+      tombstones: slice.tombstones ?? [],
+      objects: slice.objects.map(stripAuthoringMetadataFromObject)
     };
-    this.hostSeedCache.set(host, { version, seed });
-    return seed;
+    // The digest is computed over a DIFFERENT, canonicalized form (the
+    // wire body is left untouched). Canonical form sorts per-object
+    // arrays and JSON object keys so the digest is stable across the
+    // gateway's own eviction/reload — without it, insertion-order Maps
+    // mid-runtime produce different bytes than alphabetical SQL
+    // hydration even when no world content changed, and every gateway
+    // cold-boot would force every satellite to take the full seed
+    // transfer. The canonical form is gateway-internal, never
+    // transmitted, so it doesn't perturb merge semantics.
+    const digest = hashSource(canonicalJsonStringify(canonicalSeedForDigest(seed)));
+    this.hostSeedCache.set(host, { version, seed, digest });
+    return { seed, digest };
   }
 
   importWorld(serialized: SerializedWorld): void {
@@ -5318,6 +6201,182 @@ export class WooWorld {
       this.sessionCounter = serialized.sessionCounter;
       this.rebuildGuestPool();
     });
+  }
+
+  applyCommittedShadowTranscript(transcript: EffectTranscript): void {
+    // CommitScopeDO is the authority for v2 shadow commits. The gateway keeps
+    // this WooWorld as a routing/tool-list cache. Apply the same transcript
+    // materialization semantics in-place so hot v2/MCP commits scale with the
+    // accepted transcript instead of export/clone/import of the whole world.
+    // This intentionally does not persist to the gateway DO.
+    const totalStartedAt = Date.now();
+    const profile = (phase: (MetricEvent & { kind: "shadow_gateway_apply_step" })["phase"], startedAt: number) => {
+      const stats = this.shadowGatewayLiveMetricStats();
+      this.recordMetric({
+        kind: "shadow_gateway_apply_step",
+        phase,
+        scope: transcript.scope,
+        route: transcript.route,
+        ms: Date.now() - startedAt,
+        ...stats,
+        creates: transcript.creates.length,
+        writes: transcript.writes.length
+      });
+    };
+    this.applyCommittedShadowTranscriptInPlace(transcript, Date.now(), profile);
+    profile("total", totalStartedAt);
+  }
+
+  private shadowGatewayLiveMetricStats(): ShadowGatewayApplyStats {
+    let properties = 0;
+    for (const object of this.objects.values()) properties += object.properties.size;
+    let logs = 0;
+    for (const entries of this.logs.values()) logs += entries.length;
+    return {
+      objects: this.objects.size,
+      properties,
+      sessions: this.sessions.size,
+      logs
+    };
+  }
+
+  private applyCommittedShadowTranscriptInPlace(
+    transcript: EffectTranscript,
+    objectTimestamp: number,
+    profile?: (phase: (MetricEvent & { kind: "shadow_gateway_apply_step" })["phase"], startedAt: number) => void
+  ): void {
+    this.bumpMutationVersion();
+    this.hostSeedCache.clear();
+    let stepStartedAt = Date.now();
+    for (const create of transcript.creates) {
+      const serialized = serializedObjectForTranscriptCreate(create, objectTimestamp);
+      this.objects.set(create.object, this.objectFromSerializedCreate(serialized));
+      if (serialized.parent) addSortedSetValue(this.objects.get(serialized.parent)?.children, serialized.id);
+      if (serialized.location) addSortedSetValue(this.objects.get(serialized.location)?.contents, serialized.id);
+    }
+    profile?.("apply_creates", stepStartedAt);
+
+    stepStartedAt = Date.now();
+    const writes = finalWritesByCell(transcript);
+    profile?.("collect_writes", stepStartedAt);
+
+    stepStartedAt = Date.now();
+    for (const write of writes) {
+      this.applyTranscriptWriteInPlace(write, objectTimestamp);
+    }
+    profile?.("apply_writes", stepStartedAt);
+
+    // The serialized commit-scope applier sorts objects on every accepted
+    // transcript. Keep the gateway cache export-equivalent even for write-only
+    // commits, where insertion order would otherwise remain whatever the live
+    // world happened to have before the transcript arrived.
+    stepStartedAt = Date.now();
+    this.sortObjectMap();
+    profile?.("sort_objects", stepStartedAt);
+
+    stepStartedAt = Date.now();
+    const sessionUpdate = transcriptSessionActiveScope(transcript);
+    if (sessionUpdate) {
+      const session = this.sessions.get(sessionUpdate.session);
+      if (session?.actor === sessionUpdate.actor) session.activeScope = sessionUpdate.activeScope;
+    }
+    profile?.("apply_session", stepStartedAt);
+
+    stepStartedAt = Date.now();
+    const logEntry = transcriptLogEntry(transcript);
+    if (logEntry) {
+      const entries = this.logs.get(transcript.scope) ?? [];
+      mergeTranscriptLogEntry(entries, logEntry);
+      this.logs.set(transcript.scope, entries);
+      this.sortLogsMap();
+    }
+    profile?.("apply_log", stepStartedAt);
+
+    stepStartedAt = Date.now();
+    this.objectCounter = nextObjectCounterForCreates(this.objectCounter, transcript.creates);
+    profile?.("counters", stepStartedAt);
+  }
+
+  private objectFromSerializedCreate(item: SerializedObject): WooObject {
+    return {
+      id: item.id,
+      name: item.name,
+      parent: item.parent,
+      owner: item.owner,
+      location: item.location,
+      anchor: item.anchor,
+      flags: item.flags ?? {},
+      created: item.created,
+      modified: item.modified,
+      propertyDefs: new Map(),
+      properties: new Map(),
+      propertyVersions: new Map(),
+      verbs: [],
+      children: new Set(),
+      contents: new Set(),
+      eventSchemas: new Map()
+    };
+  }
+
+  private applyTranscriptWriteInPlace(write: TranscriptWrite, objectTimestamp: number): void {
+    const target = this.objects.get(write.cell.object);
+    if (!target) return;
+    // Keep this live-object materializer parallel with
+    // applyTranscriptWriteToSerializedObject in shadow-commit-scope.ts. The
+    // Map/Set storage shapes differ, but transcript semantics must not.
+    switch (write.cell.kind) {
+      case "prop":
+        this.applyTranscriptPropWriteInPlace(target, write, objectTimestamp);
+        return;
+      case "location":
+        if (typeof write.value === "string" || write.value === null) {
+          target.location = write.value;
+          target.modified = objectTimestamp;
+        }
+        return;
+      case "contents":
+        if (Array.isArray(write.value)) {
+          target.contents = new Set(write.value.filter((item): item is ObjRef => typeof item === "string"));
+          target.modified = objectTimestamp;
+        }
+        return;
+      case "lifecycle":
+      case "verb":
+        return;
+    }
+  }
+
+  private applyTranscriptPropWriteInPlace(target: WooObject, write: TranscriptWrite, objectTimestamp: number): void {
+    // Keep this parallel with applyPropWrite in shadow-commit-scope.ts.
+    if (write.cell.kind !== "prop") return;
+    const propName = write.cell.name;
+    if (write.op === "remove") {
+      target.properties.delete(propName);
+      target.propertyVersions.delete(propName);
+      target.modified = objectTimestamp;
+      if (propName === "subscribers" || propName === "session_subscribers") this.invalidatePresenceIndex();
+      return;
+    }
+    const value = cloneValue(write.value);
+    target.properties.set(propName, value);
+    target.properties = sortedMap(target.properties);
+    if (propName === "name" && typeof value === "string") target.name = value;
+    const parsedVersion = write.next === undefined ? null : Number(write.next);
+    const version = parsedVersion !== null && Number.isInteger(parsedVersion) && parsedVersion >= 0
+      ? parsedVersion
+      : (target.propertyVersions.get(propName) ?? 0) + 1;
+    target.propertyVersions.set(propName, version);
+    target.propertyVersions = sortedMap(target.propertyVersions);
+    target.modified = objectTimestamp;
+    if (propName === "subscribers" || propName === "session_subscribers") this.invalidatePresenceIndex();
+  }
+
+  private sortObjectMap(): void {
+    this.objects = sortedMap(this.objects);
+  }
+
+  private sortLogsMap(): void {
+    this.logs = sortedMap(this.logs);
   }
 
   private serializeObject(obj: WooObject): SerializedObject {
@@ -5480,7 +6539,7 @@ export class WooWorld {
         expiresAt: session.expiresAt,
         lastDetachAt: session.lastDetachAt,
         tokenClass: session.tokenClass,
-        currentLocation: session.currentLocation,
+        activeScope: session.activeScope,
         ...(session.apikeyId !== undefined ? { apikeyId: session.apikeyId } : {})
       };
     }
@@ -6029,25 +7088,30 @@ export class WooWorld {
     if (!Array.isArray(message.args)) throw wooError("E_INVARG", "message.args must be a list");
   }
 
-    private hydrateSession(
-      session: { id: string; actor: ObjRef; started: number; expiresAt?: number; lastDetachAt?: number | null; tokenClass?: Session["tokenClass"]; currentLocation?: ObjRef | null; apikeyId?: string },
-      now: number
-    ): Session {
+  private hydrateSession(
+    session: { id: string; actor: ObjRef; started: number; expiresAt?: number; lastDetachAt?: number | null; tokenClass?: Session["tokenClass"]; activeScope?: ObjRef | null; active_scope?: ObjRef | null; currentLocation?: ObjRef | null; apikeyId?: string },
+    now: number
+  ): Session {
     const tokenClass = session.tokenClass ?? (this.inheritsFrom(session.actor, "$guest") ? "guest" : "bearer");
-    const lastDetachAt = session.lastDetachAt ?? now;
+    const lastDetachAt = session.lastDetachAt === undefined ? now : session.lastDetachAt;
+    // `null` is the live-session sentinel. Import/export is used by shadow
+    // execution as well as cold persistence; converting null to "now" makes an
+    // attached session look detached and lets it expire while the gateway socket
+    // is still alive.
     const expiresAt = Math.max(
       session.expiresAt ?? session.started + this.sessionTtl(tokenClass),
-      lastDetachAt + this.sessionGrace(tokenClass)
+      lastDetachAt === null ? 0 : lastDetachAt + this.sessionGrace(tokenClass)
     );
+    const activeScope = session.activeScope ?? session.active_scope ?? session.currentLocation ?? null;
     return {
       id: session.id,
       actor: session.actor,
       started: session.started,
       expiresAt,
-        lastDetachAt,
-        tokenClass,
-        currentLocation: session.currentLocation && this.objects.has(session.currentLocation) ? session.currentLocation : this.initialSessionLocation(session.actor),
-        attachedSockets: new Set(),
+      lastDetachAt,
+      tokenClass,
+      activeScope: activeScope && this.objects.has(activeScope) ? activeScope : this.initialSessionLocation(session.actor),
+      attachedSockets: new Set(),
       // lastInputAt isn't persisted; on cold rehydrate, treat as just-active
       // rather than restoring some old timestamp from `started`. Otherwise
       // every freshly-rehydrated DO would show huge idle for everyone.
@@ -6077,30 +7141,30 @@ export class WooWorld {
     return now >= session.lastDetachAt + this.sessionGrace(session.tokenClass);
   }
 
-    private reapSession(sessionId: string): void {
-      const session = this.sessions.get(sessionId);
-      if (!session) return;
-      const isGuest = this.inheritsFrom(session.actor, "$guest");
-      const wasPrimary = this.primarySessionForActorIncludingExpired(session.actor)?.id === sessionId;
-      session.attachedSockets.clear();
-      this.killReadTasksFor(session.actor);
-      this.removeSessionPresence(sessionId, session.actor);
+  private reapSession(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    const isGuest = this.inheritsFrom(session.actor, "$guest");
+    const wasPrimary = this.primarySessionForActorIncludingExpired(session.actor)?.id === sessionId;
+    session.attachedSockets.clear();
+    this.killReadTasksFor(session.actor);
+    this.removeSessionPresence(sessionId, session.actor);
     // session_id mirror is no longer written (see createSessionForActor /
     // ensureSessionForActor); the matching reset on reap would just rewrite
     // the inherited default.
-      this.sessions.delete(sessionId);
-      this.deletePersistedSession(sessionId);
-      if (wasPrimary && !isGuest) this.promoteActorPrimaryLocation(session.actor);
-      if (isGuest) this.resetGuestOnDisconnect(session.actor);
-    }
+    this.sessions.delete(sessionId);
+    this.deletePersistedSession(sessionId);
+    if (wasPrimary && !isGuest) this.promoteActorPrimaryLocation(session.actor);
+    if (isGuest) this.resetGuestOnDisconnect(session.actor);
+  }
 
-    private promoteActorPrimaryLocation(actor: ObjRef): void {
-      const primary = this.primarySessionForActor(actor);
-      if (!primary) return;
-      if (this.objects.has(actor) && this.objects.get(actor)!.location !== primary.currentLocation) {
-        this.moveObject(actor, primary.currentLocation);
-      }
+  private promoteActorPrimaryLocation(actor: ObjRef): void {
+    const primary = this.primarySessionForActor(actor);
+    if (!primary) return;
+    if (this.objects.has(actor) && this.objects.get(actor)!.location !== primary.activeScope) {
+      this.moveObject(actor, primary.activeScope);
     }
+  }
 
   private resetGuestOnDisconnect(actor: ObjRef): void {
     const homeValue = this.propOrNull(actor, "home");
@@ -6166,13 +7230,47 @@ export class WooWorld {
     const obj = this.object(objRef);
     this.object(targetRef);
     const oldLocation = obj.location;
-    if (oldLocation && this.objects.has(oldLocation)) this.object(oldLocation).contents.delete(objRef);
+    const locationPrior = this.structuralVersionForRecording("location", objRef);
+    let oldContentsPrior: string | undefined;
+    if (oldLocation && this.objects.has(oldLocation)) {
+      const oldContainer = this.object(oldLocation);
+      oldContentsPrior = this.structuralVersionForRecording("contents", oldLocation);
+      oldContainer.contents.delete(objRef);
+      oldContainer.modified = Date.now();
+    }
     obj.location = targetRef;
-    this.object(targetRef).contents.add(objRef);
+    const target = this.object(targetRef);
+    const targetContentsPrior = this.structuralVersionForRecording("contents", targetRef);
+    target.contents.add(objRef);
+    target.modified = Date.now();
     obj.modified = Date.now();
     this.persistObject(objRef);
     if (oldLocation) this.persistObject(oldLocation);
     this.persistObject(targetRef);
+    this.recordTurnEvent({ kind: "object_move", object: objRef, from: oldLocation, to: targetRef });
+    this.recordTurnEvent({
+      kind: "cell_write",
+      cell: { kind: "location", object: objRef },
+      value: targetRef,
+      op: "move",
+      prior: locationPrior
+    });
+    if (oldLocation && oldContentsPrior !== undefined) {
+      this.recordTurnEvent({
+        kind: "cell_write",
+        cell: { kind: "contents", object: oldLocation },
+        value: Array.from(this.object(oldLocation).contents),
+        op: "remove",
+        prior: oldContentsPrior
+      });
+    }
+    this.recordTurnEvent({
+      kind: "cell_write",
+      cell: { kind: "contents", object: targetRef },
+      value: Array.from(target.contents),
+      op: "add",
+      prior: targetContentsPrior
+    });
   }
 
   private async moveObjectOwned(objRef: ObjRef, targetRef: ObjRef, options: { suppressMirrorHost?: string | null } = {}): Promise<MoveObjectResult> {
@@ -6180,11 +7278,20 @@ export class WooWorld {
     const targetRemote = await this.remoteHostForObject(targetRef);
     if (!targetRemote) this.object(targetRef);
     const oldLocation = obj.location;
+    const locationPrior = this.structuralVersionForRecording("location", objRef);
     obj.location = targetRef;
     obj.modified = Date.now();
     this.persistObject(objRef);
     if (oldLocation && oldLocation !== targetRef) await this.mirrorContainerContents(oldLocation, objRef, false, options);
     await this.mirrorContainerContents(targetRef, objRef, true, options);
+    this.recordTurnEvent({ kind: "object_move", object: objRef, from: oldLocation, to: targetRef });
+    this.recordTurnEvent({
+      kind: "cell_write",
+      cell: { kind: "location", object: objRef },
+      value: targetRef,
+      op: "move",
+      prior: locationPrior
+    });
     return { oldLocation, location: targetRef };
   }
 
@@ -6198,6 +7305,8 @@ export class WooWorld {
     if (remote) {
       if (options.suppressMirrorHost && remote === options.suppressMirrorHost) return;
       if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+      const effect = remoteBridgeUntrackedEffect("mirror_contents", { container: containerRef, object: objRef, present });
+      this.recordUntrackedEffect(effect.name, effect.detail);
       await this.hostBridge.mirrorContents(containerRef, objRef, present);
       return;
     }
@@ -6230,12 +7339,12 @@ export class WooWorld {
     }
   }
 
-    private authorizePresence(actor: ObjRef, space: ObjRef, sessionId: string | null = null): void {
-      if (this.isWizard(actor)) return;
-      if (sessionId && (this.hasSessionPresence(sessionId, space) || this.currentLocationForSession(sessionId) === space)) return;
-      if (!this.hasPresence(actor, space)) {
-        throw wooError("E_PERM", `${actor} is not present in ${space}`);
-      }
+  private authorizePresence(actor: ObjRef, space: ObjRef, sessionId: string | null = null): void {
+    if (this.isWizard(actor)) return;
+    if (sessionId && (this.hasSessionPresence(sessionId, space) || this.activeScopeForSession(sessionId) === space)) return;
+    if (!this.hasPresence(actor, space)) {
+      throw wooError("E_PERM", `${actor} is not present in ${space}`);
+    }
   }
 
   private featureList(objRef: ObjRef): ObjRef[] {
@@ -6485,7 +7594,10 @@ export class WooWorld {
     const sessionMap = audience ? this.presenceSessionsIn(audience) : null;
     if (sessionMap) {
       const sessions: string[] = [];
+      const now = Date.now();
       for (const [sessionId, actor] of sessionMap) {
+        const session = this.sessions.get(sessionId);
+        if (!session || session.actor !== actor || !this.sessionIsLive(session, now)) continue;
         if (actorSet.has(actor)) sessions.push(sessionId);
       }
       return sessions;
@@ -6587,7 +7699,7 @@ export class WooWorld {
       if (present) {
         const session = this.sessions.get(sessionId);
         if (session && session.actor === actor) {
-          session.currentLocation = space;
+          session.activeScope = space;
           this.persistSession(session);
         }
       }
@@ -6610,7 +7722,7 @@ export class WooWorld {
     if (present) {
       const session = this.sessions.get(sessionId);
       if (session && session.actor === actor) {
-        session.currentLocation = space;
+        session.activeScope = space;
         this.persistSession(session);
       }
     }
@@ -6738,7 +7850,9 @@ export class WooWorld {
         observations,
         hostMemo: createHostOperationMemo(),
         observe: (event) => {
-          observations.push({ ...event, source: event.source ?? hostSpace });
+          const observation = { ...event, source: event.source ?? hostSpace };
+          this.recordTurnEvent({ kind: "observe", observation });
+          observations.push(observation);
         }
       };
 
@@ -6979,7 +8093,9 @@ export class WooWorld {
       message,
       observations,
       observe: (event) => {
-        observations.push({ ...event, source: event.source ?? space });
+        const observation = { ...event, source: event.source ?? space };
+        this.recordTurnEvent({ kind: "observe", observation });
+        observations.push(observation);
       }
     };
   }
@@ -7152,28 +8268,29 @@ export class WooWorld {
     return actor;
   }
 
-  private async publicCommandLocation(ctx: CallContext, actor: ObjRef, value: WooValue | undefined): Promise<ObjRef | null> {
+  private async publicCommandLocation(ctx: CallContext, actor: ObjRef, value: WooValue | undefined, options: PublicCommandLocationOptions = {}): Promise<ObjRef | null> {
       const location = typeof value === "string"
         ? value as ObjRef
         : actor === ctx.actor && ctx.session
-          ? this.currentLocationForSession(ctx.session)
+          ? this.activeScopeForSession(ctx.session)
           : await this.objectLocationChecked(actor, ctx.hostMemo).catch((err) => {
             if (isOptionalProjectionReadError(err)) return null;
             throw err;
           });
-    await this.assertPublicCommandLocation(ctx, actor, location);
+    await this.assertPublicCommandLocation(ctx, actor, location, options);
     return location;
   }
 
-  private async assertPublicCommandLocation(ctx: CallContext, actor: ObjRef, location: ObjRef | null): Promise<void> {
+  private async assertPublicCommandLocation(ctx: CallContext, actor: ObjRef, location: ObjRef | null, options: PublicCommandLocationOptions = {}): Promise<void> {
     if (!location || this.isWizard(ctx.actor)) return;
     if (actor !== ctx.actor) {
       throw wooError("E_PERM", `${ctx.actor} cannot parse commands for ${actor}`, { actor: ctx.actor, requested_actor: actor });
     }
     if (location === actor) return;
+    if (options.skipPresenceCheck === true) return;
 
       const actorLocation = actor === ctx.actor && ctx.session
-        ? this.currentLocationForSession(ctx.session)
+        ? this.activeScopeForSession(ctx.session)
         : await this.objectLocationChecked(actor, ctx.hostMemo).catch((err) => {
           if (isOptionalProjectionReadError(err)) return null;
           throw err;
@@ -7190,6 +8307,19 @@ export class WooWorld {
       // Missing or unreadable command locations are rejected below.
     }
     throw wooError("E_PERM", `${actor} is not present in ${location}`, { actor, location });
+  }
+
+  private currentVerbSkipsPresenceCheck(ctx: CallContext): boolean {
+    try {
+      if (this.ownVerbExact(ctx.definer, ctx.verbName)?.skip_presence_check === true) return true;
+    } catch {
+      // Fall through to the original message verb below.
+    }
+    try {
+      return this.resolveVerb(ctx.message.target, ctx.message.verb).verb.skip_presence_check === true;
+    } catch {
+      return false;
+    }
   }
 
   private async commandVisibleCandidates(ctx: CallContext, actor: ObjRef, location: ObjRef | null): Promise<ObjRef[]> {
@@ -7318,7 +8448,165 @@ export class WooWorld {
     this.nativeHandlers.set("list_api_keys_for_owner", (ctx) => {
       return this.listApiKeysForOwner(ctx.actor) as unknown as WooValue;
     });
-    this.nativeHandlers.set("feature_can_be_attached_by", (ctx, args) => {
+    this.nativeHandlers.set("provision_actor", (ctx, args) => {
+      if (!this.canBypassPerms(ctx.actor)) throw wooError("E_PERM", "wizard authority required to provision actors", { actor: ctx.actor });
+      const classRef = assertObj(args[0]);
+      const owner = assertObj(args[1]);
+      const attrs = args[2] && typeof args[2] === "object" && !Array.isArray(args[2]) ? args[2] as Record<string, WooValue> : {};
+      return this.provisionActorInternal(classRef, owner, attrs, ctx.actor).actor;
+    });
+    this.nativeHandlers.set("rotate_api_key", (ctx, args) => {
+      if (!this.canBypassPerms(ctx.actor)) throw wooError("E_PERM", "wizard authority required to rotate api keys", { actor: ctx.actor });
+      const agent = assertObj(args[0]);
+      const oldKey = this.propOrNull(agent, "api_key_id");
+      if (typeof oldKey === "string" && oldKey) this.revokeApiKeyRecordById(ctx.actor, oldKey, args[1] === true);
+      const key = this.createApiKey(ctx.actor, agent, String(this.propOrNull(agent, "name") ?? agent));
+      this.setProp(agent, "api_key_id", key.id);
+      this.recordWizardAction(ctx.actor, "api_key_rotated", { actor: agent, key_id: key.id, force: args[1] === true });
+      return { api_key: `apikey:${key.id}:${key.secret}`, id: key.id, actor: agent, created_at: key.created_at } as unknown as WooValue;
+    });
+    this.nativeHandlers.set("deactivate_actor", (ctx, args) => {
+      if (!this.canBypassPerms(ctx.actor)) throw wooError("E_PERM", "wizard authority required to deactivate actors", { actor: ctx.actor });
+      const target = assertObj(args[0]);
+      const now = Date.now();
+      const closedSessions: Session[] = [];
+      if (this.inheritsFrom(target, "$account")) {
+        this.setProp(target, "deactivated_at", now);
+        for (const actor of this.accountActors(target)) closedSessions.push(...this.closeSessionsForActor(actor));
+      } else {
+        this.setProp(target, "deactivated_at", now);
+        closedSessions.push(...this.closeSessionsForActor(target));
+      }
+      this.recordWizardAction(ctx.actor, "actor_deactivated", { actor: target, reason: typeof args[1] === "string" ? args[1] : null });
+      if (closedSessions.length > 0) return Promise.resolve(ctx.onSessionsEnded?.(closedSessions)).then(() => true);
+      return true;
+    });
+    this.nativeHandlers.set("reactivate_actor", (ctx, args) => {
+      if (!this.canBypassPerms(ctx.actor)) throw wooError("E_PERM", "wizard authority required to reactivate actors", { actor: ctx.actor });
+      const target = assertObj(args[0]);
+      this.setProp(target, "deactivated_at", null);
+      this.recordWizardAction(ctx.actor, "actor_reactivated", { actor: target });
+      return true;
+    });
+    this.nativeHandlers.set("recycle_actor", async (ctx, args) => {
+      if (!this.canBypassPerms(ctx.actor)) throw wooError("E_PERM", "wizard authority required to recycle actors", { actor: ctx.actor });
+      const target = assertObj(args[0]);
+      await this.recycleChecked(ctx.progr, ctx.actor, target, { force: true, force_reserved: true });
+      this.recordWizardAction(ctx.actor, "actor_recycled", { actor: target });
+      return true;
+    });
+    this.nativeHandlers.set("issue_signup_invite", (ctx, args) => {
+      if (!this.canBypassPerms(ctx.actor)) throw wooError("E_PERM", "wizard authority required to issue invites", { actor: ctx.actor });
+      this.gcPendingCredentials();
+      const quantity = Math.max(1, Math.min(100, Math.floor(Number(args[0] ?? 1))));
+      const expiresAt = Number(args[1] ?? Date.now() + 7 * 24 * 60 * 60_000);
+      const raw = this.propOrNull("$system", "signup_invites");
+      const invites = Array.isArray(raw) ? raw : [];
+      const created = Array.from({ length: quantity }, () => ({ code: randomHex(16), expires_at: expiresAt, used_by: null }));
+      this.setProp("$system", "signup_invites", [...invites, ...created] as unknown as WooValue);
+      this.recordWizardAction(ctx.actor, "signup_invite_issued", { quantity, expires_at: expiresAt });
+      return created as unknown as WooValue;
+    });
+    this.nativeHandlers.set("gc_pending_credentials", (ctx) => {
+      if (!this.canBypassPerms(ctx.actor)) throw wooError("E_PERM", "wizard authority required to gc pending credentials", { actor: ctx.actor });
+      const changed = this.gcPendingCredentials();
+      this.recordWizardAction(ctx.actor, "gc_pending_credentials", { changed });
+      return changed;
+    });
+    this.nativeHandlers.set("set_actor_flag", (ctx, args) => {
+      if (!this.canBypassPerms(ctx.actor)) throw wooError("E_PERM", "wizard authority required to set actor flags", { actor: ctx.actor });
+      const target = assertObj(args[0]);
+      const flag = String(args[1] ?? "");
+      const value = args[2];
+      if (typeof value !== "boolean") throw wooError("E_TYPE", "flag value must be boolean", value);
+      if (flag === "programmer" && value === true && this.inheritsFrom(target, "$agent")) {
+        const owner = this.propOrNull(target, "owner");
+        if (typeof owner === "string" && this.objects.has(owner) && this.inheritsFrom(owner, "$human")) {
+          const account = assertObj(this.propOrNull(owner, "account"));
+          if (!this.object(target).flags.programmer) {
+            this.assertProgrammerAgentQuota(account);
+            this.setProp(account, "programmer_agent_count", Number(this.propOrNull(account, "programmer_agent_count") ?? 0) + 1);
+          }
+        }
+      }
+      if (flag === "programmer" && value === false && this.inheritsFrom(target, "$agent") && this.object(target).flags.programmer) {
+        const owner = this.propOrNull(target, "owner");
+        if (typeof owner === "string" && this.objects.has(owner) && this.inheritsFrom(owner, "$human")) {
+          const account = assertObj(this.propOrNull(owner, "account"));
+          this.setProp(account, "programmer_agent_count", Math.max(0, Number(this.propOrNull(account, "programmer_agent_count") ?? 0) - 1));
+        }
+      }
+      return this.setObjectFlags(ctx.actor, target, { [flag]: value }) as unknown as WooValue;
+    });
+    this.nativeHandlers.set("set_quota", (ctx, args) => {
+      if (!this.canBypassPerms(ctx.actor)) throw wooError("E_PERM", "wizard authority required to set quotas", { actor: ctx.actor });
+      const account = assertObj(args[0]);
+      const kind = String(args[1] ?? "");
+      const value = Math.max(0, Math.floor(Number(args[2] ?? 0)));
+      if (kind !== "agent_quota" && kind !== "programmer_grant_quota") throw wooError("E_INVARG", "unknown quota kind", kind);
+      const old = Number(this.propOrNull(account, kind) ?? 0);
+      this.setProp(account, kind, value);
+      this.recordWizardAction(ctx.actor, "account_quota_changed", { account, kind, old, new: value });
+      return true;
+    });
+    this.nativeHandlers.set("human_create_agent", (ctx, args) => {
+        this.assertSelfHuman(ctx.actor, ctx.thisObj);
+        const name = assertString(args[0] ?? "");
+        const purpose = typeof args[1] === "string" ? args[1] : "";
+        const result = this.createAgentForHuman(ctx.thisObj, name, purpose, args[2] === true);
+        ctx.observe({ type: "agent_created", source: ctx.thisObj, actor: result.actor_id, name, _audience_override: [ctx.thisObj] });
+        return { actor_id: result.actor_id, api_key: result.api_key, mcp_url: this.propOrNull("$system", "mcp_endpoint_url") ?? "/mcp" } as unknown as WooValue;
+      });
+      this.nativeHandlers.set("human_list_agents", (ctx) => {
+        this.assertSelfHuman(ctx.actor, ctx.thisObj);
+        return this.listAgentsForHuman(ctx.thisObj) as unknown as WooValue;
+      });
+      this.nativeHandlers.set("human_revoke_agent", (ctx, args) => {
+        this.assertSelfHuman(ctx.actor, ctx.thisObj);
+        const agent = assertObj(args[0]);
+        const account = this.assertOwnedAgent(ctx.thisObj, agent);
+        const key = this.propOrNull(agent, "api_key_id");
+        if (typeof key === "string" && key) this.revokeApiKeyRecordById(ctx.actor, key, true);
+        this.setProp(agent, "deactivated_at", Date.now());
+        this.setProp(account, "agent_count", Math.max(0, Number(this.propOrNull(account, "agent_count") ?? 0) - 1));
+        if (this.object(agent).flags.programmer) {
+          this.object(agent).flags.programmer = false;
+          this.markObjectDirty(agent);
+          this.setProp(account, "programmer_agent_count", Math.max(0, Number(this.propOrNull(account, "programmer_agent_count") ?? 0) - 1));
+        }
+        this.recordWizardAction(ctx.actor, "agent_revoked", { actor: agent, reason: typeof args[1] === "string" ? args[1] : null });
+        return true;
+      });
+      this.nativeHandlers.set("human_promote_agent_to_programmer", (ctx, args) => {
+        this.assertSelfHuman(ctx.actor, ctx.thisObj);
+        const agent = assertObj(args[0]);
+        const account = this.assertOwnedAgent(ctx.thisObj, agent);
+        if (!this.object(agent).flags.programmer) {
+          this.assertProgrammerAgentQuota(account);
+          this.object(agent).flags.programmer = true;
+          this.markObjectDirty(agent);
+          this.setProp(account, "programmer_agent_count", Number(this.propOrNull(account, "programmer_agent_count") ?? 0) + 1);
+        }
+        return true;
+      });
+      this.nativeHandlers.set("human_demote_agent_from_programmer", (ctx, args) => {
+        this.assertSelfHuman(ctx.actor, ctx.thisObj);
+        const agent = assertObj(args[0]);
+        const account = this.assertOwnedAgent(ctx.thisObj, agent);
+        if (this.object(agent).flags.programmer) {
+          this.object(agent).flags.programmer = false;
+          this.markObjectDirty(agent);
+          this.setProp(account, "programmer_agent_count", Math.max(0, Number(this.propOrNull(account, "programmer_agent_count") ?? 0) - 1));
+        }
+        return true;
+      });
+      this.nativeHandlers.set("human_rotate_agent_key", (ctx, args) => {
+        this.assertSelfHuman(ctx.actor, ctx.thisObj);
+        const agent = assertObj(args[0]);
+        const key = this.rotateAgentKey(ctx.thisObj, agent, args[1] === true);
+        return { actor_id: agent, api_key: `apikey:${key.id}:${key.secret}`, mcp_url: this.propOrNull("$system", "mcp_endpoint_url") ?? "/mcp" } as unknown as WooValue;
+      });
+      this.nativeHandlers.set("feature_can_be_attached_by", (ctx, args) => {
       const actor = assertObj(args[0] ?? ctx.actor);
       return actor === this.object(ctx.thisObj).owner;
     });
@@ -7411,7 +8699,13 @@ export class WooWorld {
     });
     this.nativeHandlers.set("plan_command", async (ctx, args) => {
       const space = assertObj(args[1] ?? ctx.caller);
-      return await this.planCommandForSpace(ctx, assertString(args[0] ?? ""), space) as unknown as WooValue;
+      return await this.planCommandForSpace(ctx, assertString(args[0] ?? ""), space, {
+        // Catalog wrappers such as `$conversational:command_plan` are
+        // read-only planners. When the wrapper explicitly opts out of presence
+        // checks, let it plan against the supplied command space without
+        // teaching the browser about catalog command aliases.
+        skipPresenceCheck: this.currentVerbSkipsPresenceCheck(ctx)
+      }) as unknown as WooValue;
     });
     this.nativeHandlers.set("parse_command", async (ctx, args) => {
       const actor = await this.publicCommandActor(ctx, args[1]);
@@ -7421,6 +8715,9 @@ export class WooWorld {
     this.nativeHandlers.set("room_look_self", (ctx) => this.spaceLookSelf(ctx));
     this.nativeHandlers.set("space_look_self", (ctx) => this.spaceLookSelf(ctx));
     this.nativeHandlers.set("room_who", (ctx) => this.roomWho(ctx));
+    this.nativeHandlers.set("embodied_room_roster", (ctx) => this.embodiedRoomRoster(ctx));
+    this.nativeHandlers.set("workspace_room_roster", (ctx) => this.workspaceRoomRoster(ctx));
+    this.nativeHandlers.set("space_live_audience", (ctx, args) => this.spaceLiveAudience(ctx, args));
     this.nativeHandlers.set("help_db_find_topics", (ctx, args) => this.helpDbFindTopics(ctx, args));
     this.nativeHandlers.set("help_db_get_topic", (ctx, args) => this.helpDbGetTopic(ctx, args));
     this.nativeHandlers.set("help_db_dump_topic", (ctx, args) => this.helpDbDumpTopic(ctx, args));
@@ -7447,8 +8744,21 @@ export class WooWorld {
     this.lastSubscriberScrubAt.set(space, now);
     let survivingActors = subscribers;
     if (subscribers.length > 0) {
+      const rawSessionSubscribers = this.propOrNull(space, "session_subscribers");
+      const rowsByActor = new Map<ObjRef, Array<{ session: string; actor: ObjRef }>>();
+      if (Array.isArray(rawSessionSubscribers)) {
+        for (const entry of rawSessionSubscribers) {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+          const map = entry as Record<string, WooValue>;
+          if (typeof map.session !== "string" || typeof map.actor !== "string") continue;
+          const rows = rowsByActor.get(map.actor) ?? [];
+          rows.push({ session: map.session, actor: map.actor });
+          rowsByActor.set(map.actor, rows);
+        }
+      }
       const remoteActorsSet = new Set<ObjRef>();
       for (const actor of subscribers) {
+        if (rowsByActor.has(actor)) continue;
         if (await this.remoteHostForObject(actor, memo)) remoteActorsSet.add(actor);
       }
       const remoteLocationsByActor = await this.fetchRemoteSessionLocations(
@@ -7458,16 +8768,43 @@ export class WooWorld {
       const kept: ObjRef[] = [];
       const stale: ObjRef[] = [];
       for (const actor of subscribers) {
+        const rows = rowsByActor.get(actor);
+        if (rows && rows.length > 0) {
+          let hasKnownLiveSession = false;
+          let hasUnknownRemoteSession = false;
+          const actorRemote = await this.remoteHostForObject(actor, memo);
+          for (const row of rows) {
+            if (row.session.startsWith("legacy:")) {
+              hasKnownLiveSession = true;
+              break;
+            }
+            const session = this.sessions.get(row.session);
+            if (session && !this.sessionExpired(session, now)) {
+              hasKnownLiveSession = true;
+              break;
+            }
+            if (!session && actorRemote) hasUnknownRemoteSession = true;
+          }
+          if (hasKnownLiveSession) kept.push(actor);
+          else if (hasUnknownRemoteSession) {
+            // A remote actor with only missing session rows is excluded from
+            // this read but left persisted. The owning host may still have the
+            // session; dropping the row here would race cross-host setup.
+          }
+          else stale.push(actor);
+          continue;
+        }
         // A remote actor whose home host failed to answer (read-availability
         // error) is left in `subscribers` and excluded from this read's
         // survivingActors view, mirroring the per-actor path's behavior
         // under the same error class. Without this guard a transient remote
         // blip would mark the actor stale and persist a subscriber-row drop.
         if (remoteActorsSet.has(actor) && !remoteLocationsByActor.has(actor)) continue;
-        // `liveSessionLocationsForActor`, not `allLocationsForActor`: the
-        // latter falls back to the actor's persistent `.location` when no
-        // session is live, which would mask sessions lost to hibernation /
-        // gateway reset and keep the dead guest pinned to this space forever.
+        // Legacy subscriber rows have no session attribution. For those rows
+        // only, fall back to active-scope probing so old worlds can still shed
+        // dead live-presence mirrors. Session-attributed rows above are a real
+        // many-spaces subscription relation and must not be collapsed to the
+        // actor's active_scope.
         const localLocations = this.liveSessionLocationsForActor(actor);
         const remoteLocations = remoteLocationsByActor.get(actor) ?? [];
         const locations = remoteActorsSet.has(actor)
@@ -7502,7 +8839,7 @@ export class WooWorld {
   }
 
   /**
-   * Resolve `currentLocation` for each actor whose home host is not this DO,
+   * Resolve `activeScope` for each actor whose home host is not this DO,
    * preferring a batched cross-host call so a room with N remote subscribers
    * costs one RPC per host instead of N. Falls back to per-actor lookup for
    * bridges that don't implement the batch method (older deployments and
@@ -7650,9 +8987,11 @@ export class WooWorld {
   private async objectContents(objRef: ObjRef, memo?: HostOperationMemo): Promise<ObjRef[]> {
     if (await this.remoteHostForObject(objRef, memo)) {
       if (!this.hostBridge) throw wooError("E_INTERNAL", "remote host bridge unavailable");
+      const effect = remoteBridgeUntrackedEffect("contents", { object: objRef });
+      this.recordUntrackedEffect(effect.name, effect.detail);
       return await this.hostBridge.contents(objRef, memo);
     }
-    return Array.from(this.object(objRef).contents);
+    return this.contentsOf(objRef);
   }
 
   private isActorForLook(item: ObjRef, present: ObjRef[]): boolean {
@@ -7729,6 +9068,7 @@ export class WooWorld {
 
   private async roomWho(ctx: CallContext): Promise<WooValue> {
     const present = this.chatPresent(ctx.thisObj);
+    const roster = await this.rosterRowsForActors(ctx, present);
     const presentNames = (await this.collectPropChecked(ctx.progr, present, "name", ctx.hostMemo)).map((name) => valueToText(name));
     ctx.observe({
       type: "who",
@@ -7737,10 +9077,71 @@ export class WooWorld {
       to: ctx.actor,
       room: ctx.thisObj,
       present_actors: present,
+      roster,
       text: `Present: ${presentNames.join(", ") || "nobody"}.`,
       ts: Date.now()
     });
     return present;
+  }
+
+  private async embodiedRoomRoster(ctx: CallContext): Promise<WooValue> {
+    const actors = this.contentsOf(ctx.thisObj)
+      .filter((item) => this.objects.has(item) && this.inheritsFrom(item, "$actor"));
+    return await this.rosterRowsForActors(ctx, actors);
+  }
+
+  private async workspaceRoomRoster(ctx: CallContext): Promise<WooValue> {
+    const sessions = this.presenceSessionsIn(ctx.thisObj);
+    if (!sessions) return [] as unknown as WooValue;
+    const actors = new Set<ObjRef>();
+    const now = Date.now();
+    for (const [sessionId, actor] of sessions) {
+      const session = this.sessions.get(sessionId);
+      if (!session || session.actor !== actor || this.sessionExpired(session, now)) continue;
+      if (this.objects.has(actor) && this.inheritsFrom(actor, "$actor")) actors.add(actor);
+    }
+    return await this.rosterRowsForActors(ctx, Array.from(actors));
+  }
+
+  private async rosterRowsForActors(ctx: CallContext, actors: ObjRef[]): Promise<WooValue> {
+    const now = this.logicalNow("room_roster.now");
+    const rows = await Promise.all(actors.map(async (id) => {
+      const lastInputAt = this.actorLastInputAt(id);
+      const idleSeconds = lastInputAt === null
+        ? null
+        : Math.max(0, Math.floor((now - lastInputAt) / 1000));
+      return {
+        id,
+        name: await this.objectDisplayNameAsync(ctx.progr, id, ctx.hostMemo),
+        presence: this.actorPresenceStatus(id, now),
+        ...(idleSeconds !== null ? { idle_seconds: idleSeconds } : {})
+      } as Record<string, WooValue>;
+    }));
+    rows.sort((left, right) => String(left.name).localeCompare(String(right.name)) || String(left.id).localeCompare(String(right.id)));
+    return rows as unknown as WooValue;
+  }
+
+  private async spaceLiveAudience(ctx: CallContext, args: WooValue[]): Promise<WooValue> {
+    const raw = args[0];
+    if (raw === undefined || raw === null) {
+      return this.liveSessionIdsIn(ctx.thisObj) as unknown as WooValue;
+    }
+    if (typeof raw !== "object" || Array.isArray(raw)) throw wooError("E_INVARG", "live_audience observation must be a map", raw);
+    const observation = raw as Observation;
+    return (await this.observationAudienceSessions(ctx.thisObj, observation) ?? []) as unknown as WooValue;
+  }
+
+  private liveSessionIdsIn(space: ObjRef): string[] {
+    const sessions = this.presenceSessionsIn(space);
+    if (!sessions) return [];
+    const out: string[] = [];
+    const now = Date.now();
+    for (const [sessionId, actor] of sessions) {
+      const session = this.sessions.get(sessionId);
+      if (!session || session.actor !== actor || !this.sessionIsLive(session, now)) continue;
+      out.push(sessionId);
+    }
+    return out.sort();
   }
 
   private async playerWho(ctx: CallContext, args: WooValue[]): Promise<WooValue> {
@@ -8175,11 +9576,11 @@ export class WooWorld {
     return resolved ? { name: resolved.verb.name, definer: resolved.definer, direct_callable: resolved.verb.direct_callable === true, arg_spec: resolved.verb.arg_spec ?? {} } : null;
   }
 
-  private async planCommandForSpace(ctx: CallContext, input: string, space: ObjRef): Promise<WooValue> {
+  private async planCommandForSpace(ctx: CallContext, input: string, space: ObjRef, options: PublicCommandLocationOptions = {}): Promise<WooValue> {
     const text = input.trim();
     if (!text) return await this.commandHuhPlan(ctx, space, input, "empty command");
     const actor = await this.publicCommandActor(ctx, undefined);
-    const location = await this.publicCommandLocation(ctx, actor, space);
+    const location = await this.publicCommandLocation(ctx, actor, space, options);
 
     const lowered = await this.lowerSpeechPrefixPlan(ctx, text, space, actor, location);
     if (lowered) return lowered as unknown as WooValue;
@@ -8415,13 +9816,45 @@ export class WooWorld {
   private async commandPlanForResolved(ctx: CallContext, commandSpace: ObjRef, target: ObjRef, verbName: string, args: WooValue[], cmd: CommandMap): Promise<CommandPlan> {
     const resolved = await this.tryResolveVerbForCommand(ctx, target, verbName);
     const directCallable = resolved?.direct_callable === true;
-    let route: "direct" | "sequenced" = directCallable ? "direct" : "sequenced";
+    const routeHint = commandRouteHint(resolved?.arg_spec);
+    let route: "direct" | "sequenced" = routeHint ?? (directCallable ? "direct" : "sequenced");
     let space: ObjRef | null = null;
     if (route === "sequenced") {
       space = await this.isDescendantOfChecked(target, "$space", ctx.hostMemo) ? target : commandSpace;
       if (!space) throw wooError("E_NOLOCATION", "sequenced command has no command space", { target, verb: verbName });
     }
-    return { ok: true, route, space, target, verb: resolved?.name ?? verbName, args, cmd };
+    const verb = resolved?.name ?? verbName;
+    const persistence = commandPersistenceHint(resolved?.arg_spec)
+      ?? (route === "direct" && await this.commandPlanRequiresDurablePresence(ctx, target, verb)
+        ? "durable" as const
+        : undefined);
+    return {
+      ok: true,
+      route,
+      space,
+      target,
+      verb,
+      args,
+      cmd,
+      ...(persistence ? { persistence: persistence } : {})
+    };
+  }
+
+  private async commandPlanRequiresDurablePresence(ctx: CallContext, target: ObjRef, verbName: string): Promise<boolean> {
+    // Substrate fallback for when the matched verb's arg_spec.command has no
+    // explicit `persistence` hint. Catalog manifests are the source of truth
+    // for per-verb persistence (see spec/semantics/match.md), but a deployed
+    // satellite slice can carry stale verb metadata when a manifest bump
+    // happens after the satellite's last bootstrap-style migration ID — the
+    // class-verb reconcile is now self-healing on cold-load (see
+    // local-catalogs.ts) but propagation is bounded by hibernation cadence.
+    // This list is the LambdaMOO-canonical movement-and-handling verb set;
+    // any command-style direct call to one of these on a $space descendant
+    // is treated as durable so the v2 commit fires even when the satellite's
+    // arg_spec hint is missing. Catalog code can still override by setting
+    // `arg_spec.command.persistence: "live"` explicitly.
+    if (!COMMAND_PLAN_DEFAULT_DURABLE_VERBS.has(verbName)) return false;
+    return await this.isDescendantOfChecked(target, "$space", ctx.hostMemo);
   }
 
   private async commandHuhPlan(ctx: CallContext, space: ObjRef, text: string, reason: string): Promise<WooValue> {
@@ -8653,8 +10086,8 @@ export class WooWorld {
       return { id, names, aliases };
     }
     if (!this.objects.has(id)) return { id, names, aliases };
-    const obj = this.object(id);
-    names.push(obj.name);
+    const name = this.getProp(id, "name");
+    if (typeof name === "string") names.push(name);
     const [title] = await Promise.all([
       this.titleForLook(ctx, ctx.thisObj, id).catch(() => null),
       this.addCatalogMatchNames(ctx, id, names)
@@ -9033,8 +10466,43 @@ function commandPlanFromValue(value: WooValue): CommandPlan | null {
     target: map.target,
     verb: map.verb,
     args: Array.isArray(map.args) ? map.args : [],
-    cmd: commandMapFromValue(map.cmd)
+    cmd: commandMapFromValue(map.cmd),
+    ...(map.persistence === "durable" || map.persistence === "live" ? { persistence: map.persistence } : {})
   };
+}
+
+// Substrate fallback set for `commandPlanRequiresDurablePresence`. The
+// canonical movement-and-handling verb names that mutate $space-rooted
+// durable cells (actor location, room contents, presence) when they have no
+// explicit `arg_spec.command.persistence` hint. Keeping this list in the
+// substrate is a deliberate (small) layering compromise: catalog metadata
+// remains the source of truth, but a satellite slice carrying stale verb
+// shape after a manifest bump still gets the v2 commit fired here. When all
+// deployed satellites have reconciled to the current manifest, this list
+// becomes a redundant safety net.
+const COMMAND_PLAN_DEFAULT_DURABLE_VERBS = new Set<string>([
+  "enter", "leave", "out",
+  "go",
+  "north", "south", "east", "west",
+  "northeast", "northwest", "southeast", "southwest",
+  "up", "down", "in",
+  "take", "drop", "give"
+]);
+
+function commandRouteHint(argSpec: Record<string, WooValue> | undefined): "direct" | "sequenced" | null {
+  // Catalogs own command routing hints; the client should not learn that a
+  // particular bundled surface needs a sequenced plan.
+  const command = argSpec?.command;
+  if (!command || typeof command !== "object" || Array.isArray(command)) return null;
+  const route = (command as Record<string, WooValue>).route;
+  return route === "direct" || route === "sequenced" ? route : null;
+}
+
+function commandPersistenceHint(argSpec: Record<string, WooValue> | undefined): "durable" | "live" | null {
+  const command = argSpec?.command;
+  if (!command || typeof command !== "object" || Array.isArray(command)) return null;
+  const policy = (command as Record<string, WooValue>).persistence;
+  return policy === "durable" || policy === "live" ? policy : null;
 }
 
 function addUnique<T>(items: T[], item: T): T[] {
@@ -9089,6 +10557,70 @@ function nextScopedObjectCounter(ids: Iterable<ObjRef>): number {
     if (Number.isSafeInteger(value) && value >= next) next = value + 1;
   }
   return next;
+}
+
+// Drop authoring metadata from a serialized object before host-seed delivery.
+// `line_map` is the dominant verb-payload contributor and is only consumed by
+// stack-trace formatting in tiny-vm.ts; the seed-merge comparison ignores it
+// (bootstrap.ts:normalizeVerbForCompare). See buildHostSeedForDelivery for the
+// full rationale and the degradation contract for non-bundled-catalog verbs.
+function stripAuthoringMetadataFromObject(obj: SerializedObject): SerializedObject {
+  const stripped: SerializedObject = {
+    ...obj,
+    verbs: obj.verbs.map((verb) => ({ ...verb, line_map: {} }))
+  };
+  if (obj.parent === "$account") {
+    const sensitive = new Set(["password_hash", "password_salt", "oauth_identities"]);
+    stripped.properties = stripped.properties.filter(([name]) => !sensitive.has(name));
+    stripped.propertyVersions = stripped.propertyVersions.filter(([name]) => !sensitive.has(name));
+  }
+  return stripped;
+}
+
+// Stable JSON serialization for digest computation. Recursively sorts JSON
+// object keys but leaves arrays in caller-supplied order — that's a separate
+// concern handled by `canonicalSeedForDigest` for the host-seed path, which
+// pre-sorts the arrays whose iteration order differs between mid-runtime Map
+// insertion order and post-hydration SQL ORDER BY order.
+function canonicalJsonStringify(value: unknown): string {
+  if (value === null || value === undefined) return "null";
+  if (typeof value === "number") return Number.isFinite(value) ? JSON.stringify(value) : "null";
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "string") return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return "[" + value.map(canonicalJsonStringify).join(",") + "]";
+  }
+  if (typeof value === "object") {
+    const keys = Object.keys(value as Record<string, unknown>).sort();
+    return "{" + keys.map((k) => JSON.stringify(k) + ":" + canonicalJsonStringify((value as Record<string, unknown>)[k])).join(",") + "}";
+  }
+  return "null";
+}
+
+// Build a digest-only canonical view of a SeedWorld. The returned value is
+// fed straight into canonicalJsonStringify; the original `seed` (the body on
+// the wire) is left untouched. Per-object arrays (verbs, propertyDefs,
+// properties, propertyVersions, eventSchemas, children, contents) are sorted
+// by their natural key so the digest is independent of Map insertion order.
+// Without this, a freshly-hydrated gateway (alphabetical SQL ORDER BY) would
+// hash differently than the same world mid-runtime (insertion-order Maps),
+// and the satellite digest probe would miss on every gateway eviction.
+function canonicalSeedForDigest(seed: SeedWorld): unknown {
+  return {
+    ...seed,
+    objects: seed.objects.map((obj) => ({
+      ...obj,
+      propertyDefs: [...obj.propertyDefs].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)),
+      properties: [...obj.properties].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)),
+      propertyVersions: [...obj.propertyVersions].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)),
+      eventSchemas: [...obj.eventSchemas].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)),
+      // Verbs are slot-ordered by both insertion and SQL hydration, but sort
+      // defensively by slot in case a caller produced an unsorted list.
+      verbs: [...obj.verbs].sort((a, b) => (a.slot ?? 0) - (b.slot ?? 0)),
+      children: [...obj.children].sort(),
+      contents: [...obj.contents].sort()
+    }))
+  };
 }
 
 type SerializedWorldRowStats = {
@@ -9174,7 +10706,86 @@ function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
   return value !== null && typeof value === "object" && typeof (value as Promise<T>).then === "function";
 }
 
+function normalizeEmail(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+async function hashPassword(password: string, salt = randomHex(16)): Promise<{ encoded: string; salt: string }> {
+  const digest = await pbkdf2Sha256Hex(password, salt, PASSWORD_PBKDF2_ITERATIONS);
+  return {
+    encoded: `pbkdf2-sha256:${PASSWORD_PBKDF2_ITERATIONS}:${salt}:${digest}`,
+    salt
+  };
+}
+
+async function verifyPassword(password: string, encoded: string): Promise<boolean> {
+  const parts = encoded.split(":");
+  if (parts.length !== 4 || parts[0] !== "pbkdf2-sha256") return false;
+  const iterations = Number(parts[1]);
+  const salt = parts[2];
+  const expected = parts[3];
+  if (!Number.isSafeInteger(iterations) || iterations < PASSWORD_PBKDF2_ITERATIONS || !salt || !expected) return false;
+  const actual = await pbkdf2Sha256Hex(password, salt, iterations);
+  return constantTimeEqual(actual, expected);
+}
+
+async function pbkdf2Sha256Hex(password: string, saltHex: string, iterations: number): Promise<string> {
+  const subtle = (globalThis as unknown as { crypto: { subtle: SubtleCrypto } }).crypto.subtle;
+  const keyMaterial = await subtle.importKey(
+    "raw",
+    new TextEncoder().encode(password),
+    "PBKDF2",
+    false,
+    ["deriveBits"]
+  );
+  const bits = await subtle.deriveBits(
+    {
+      name: "PBKDF2",
+      hash: "SHA-256",
+      salt: hexToBytes(saltHex).buffer as ArrayBuffer,
+      iterations
+    },
+    keyMaterial,
+    PASSWORD_PBKDF2_KEY_BITS
+  );
+  return bytesToHex(new Uint8Array(bits));
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  if (hex.length % 2 !== 0) throw wooError("E_INVARG", "hex string must have an even length");
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function appendQuery(base: string, params: Record<string, string>): string {
+  const sep = base.includes("?") ? "&" : "?";
+  const query = Object.entries(params)
+    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
+    .join("&");
+  return `${base}${sep}${query}`;
+}
+
 const STORAGE_FLUSH_TOP_N = 5;
+
+function sortedMap<K extends string, V>(map: Map<K, V>): Map<K, V> {
+  return new Map(Array.from(map.entries()).sort(([a], [b]) => a.localeCompare(b)));
+}
+
+function addSortedSetValue(set: Set<ObjRef> | undefined, value: ObjRef): void {
+  // Creates per accepted transcript are expected to be small. If this becomes
+  // hot for bulk-create transcripts, batch additions by parent/location and
+  // sort each affected Set once at the end.
+  if (!set || set.has(value)) return;
+  set.add(value);
+  const sorted = Array.from(set).sort();
+  set.clear();
+  for (const item of sorted) set.add(item);
+}
 
 // Group identical strings, return the K most-frequent as [name, count] pairs.
 // Used by storage_flush to surface which property names / object IDs dominate

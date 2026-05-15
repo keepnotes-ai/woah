@@ -115,6 +115,7 @@ type RestV2RelayClient = {
 
 const WORLD_HOST = "world";
 const REMOTE_ROUTE_SYNC_TTL_MS = 60_000;
+const MAX_REST_V2_RELAY_CLIENTS = 64;
 const DIRECTORY_HOST = "directory";
 const INTERNAL_ORIGIN = "https://woo.internal";
 const MAX_JSON_BODY_BYTES = 1 * 1024 * 1024;
@@ -242,6 +243,9 @@ export class PersistentObjectDO {
   // Throttle to one round-trip per host per `REMOTE_ROUTE_SYNC_TTL_MS`.
   private remoteRouteSyncAt = new Map<string, number>();
   private mcpGateway: McpGateway | null = null;
+  // Gateway-owned REST relays mirror the browser/MCP open-once shape. Keep a
+  // bounded per-DO LRU so agents that touch many scopes do not retain full
+  // serialized snapshots for the lifetime of a hot Durable Object instance.
   private restV2Relays = new Map<ObjRef, RestV2RelayClient>();
   // Cross-host property cache for stable, hot-path property reads
   // (actor.name in a verb that runs on a different host's DO is a common
@@ -2528,11 +2532,29 @@ export class PersistentObjectDO {
         serialized: snapshot
       });
       if (opened.head) client.relay.commit_scope.head = opened.head;
-      this.restV2Relays.set(scope, client);
+      this.rememberRestV2Relay(scope, client);
       return client;
     }
+    this.rememberRestV2Relay(scope, client);
     this.refreshRestV2RelayAuthority(client, authority.sessions, authority.session_objects);
     return client;
+  }
+
+  private rememberRestV2Relay(scope: ObjRef, client: RestV2RelayClient): void {
+    this.restV2Relays.delete(scope);
+    this.restV2Relays.set(scope, client);
+    while (this.restV2Relays.size > MAX_REST_V2_RELAY_CLIENTS) {
+      const oldest = this.restV2Relays.keys().next().value;
+      if (oldest === undefined) break;
+      this.restV2Relays.delete(oldest);
+    }
+  }
+
+  private restV2EnvelopeId(id: string, attempt: number): string {
+    // CommitScopeDO caches every fresh reply by envelope id, including stale
+    // rejections. A repair retry must therefore use a new envelope id while
+    // preserving any caller-supplied turn id inside the request body.
+    return attempt === 0 ? id : `${id}:repair:${crypto.randomUUID()}`;
   }
 
   private refreshRestV2RelayAuthority(client: RestV2RelayClient, sessions: SerializedSession[], sessionObjects: SerializedObject[]): void {
@@ -2572,9 +2594,11 @@ export class PersistentObjectDO {
       for (let attempt = 0; attempt < 2; attempt++) {
         const client = await this.ensureRestV2Relay(world, input, input.scope, token, attempt > 0);
         const id = input.id ?? `${client.node}:turn:${client.nextTurn++}:${crypto.randomUUID()}`;
+        const envelopeId = this.restV2EnvelopeId(id, attempt);
         const envelope = encodeEnvelope(buildShadowTurnIntentEnvelope({
           ...input,
           id,
+          envelopeId,
           node: client.node,
           session: input.session.id,
           token,
@@ -2602,6 +2626,7 @@ export class PersistentObjectDO {
     for (let attempt = 0; attempt < 2; attempt++) {
       const planningClient = await this.ensureRestV2Relay(world, input, planningScope, token, attempt > 0);
       const id = input.id ?? `${planningClient.node}:turn:${planningClient.nextTurn++}:${crypto.randomUUID()}`;
+      const envelopeId = this.restV2EnvelopeId(id, attempt);
       const call: ShadowTurnCall = {
         kind: "woo.turn_call.shadow.v1",
         id,
@@ -2640,6 +2665,7 @@ export class PersistentObjectDO {
         session: input.session.id,
         token,
         id,
+        envelopeId,
         body
       }));
       const result = await this.v2CommitScopePost<CommitScopeEnvelopeResponse>(commitScope, "/v2/envelope", {

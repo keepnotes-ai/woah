@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { installVerb } from "../../src/core/authoring";
 import { createWorld } from "../../src/core/bootstrap";
-import { encodeEnvelope } from "../../src/core/shadow-envelope";
+import { decodeEnvelope, encodeEnvelope } from "../../src/core/shadow-envelope";
 import {
   createShadowBrowserNode,
   createShadowBrowserRelayShim,
@@ -68,7 +68,7 @@ function makeCfHarness(): Harness {
 
 function fakeCommitScopeNamespace(
   secret = "cf-test-secret",
-  record?: (scope: string, path: string, body: unknown) => void
+  record?: (scope: string, path: string, body: unknown) => Response | void | Promise<Response | void>
 ): DurableObjectNamespace {
   const states = new Map<string, FakeDurableObjectState>();
   return new FakeDurableObjectNamespace((name) => {
@@ -87,7 +87,8 @@ function fakeCommitScopeNamespace(
           } catch {
             body = null;
           }
-          record(name, new URL(request.url).pathname, body);
+          const override = await record(name, new URL(request.url).pathname, body);
+          if (override) return override;
         }
         return await target.fetch(request);
       }
@@ -1257,6 +1258,118 @@ describe("CFObjectRepository production-shape coverage", () => {
       expect(chatOpens[0].body).toHaveProperty("serialized");
       expect(chatEnvelopes).toHaveLength(2);
       expect(chatEnvelopes.every((post) => !Object.prototype.hasOwnProperty.call(post.body, "serialized"))).toBe(true);
+    } finally {
+      logSpy.mockRestore();
+      directoryState.close();
+      for (const state of wooStates.values()) state.close();
+    }
+  });
+
+  it("reopens and retries REST v2 relays after a stale-head rejection", async () => {
+    const directoryState = new FakeDurableObjectState("directory");
+    const directory = new DirectoryDO(directoryState as unknown as DurableObjectState, { WOO_INTERNAL_SECRET: "cf-test-secret" });
+    const wooStates = new Map<string, FakeDurableObjectState>();
+    const wooObjects = new Map<string, PersistentObjectDO>();
+    const commitPosts: Array<{ scope: string; path: string; body: Record<string, unknown> }> = [];
+    const staleEnvelopeIds = new Set<string>();
+    let rejectNextChatEnvelope = false;
+    let staleReplies = 0;
+    let env: Env;
+    const wooNamespace = new FakeDurableObjectNamespace((name) => {
+      let object = wooObjects.get(name);
+      if (!object) {
+        const state = new FakeDurableObjectState(name);
+        wooStates.set(name, state);
+        object = new PersistentObjectDO(state as unknown as DurableObjectState, env);
+        wooObjects.set(name, object);
+      }
+      return object;
+    });
+    const staleHeadResponse = (id: string): Response => new Response(JSON.stringify({
+      ok: true,
+      reply: encodeEnvelope({
+        v: 2,
+        type: "woo.turn.exec.reply.shadow.v1",
+        id: `forced-stale:${id}`,
+        from: "node:commit-scope:the_chatroom",
+        auth: { mode: "same_deployment_mac", mac: "forced-test-reply" },
+        body: {
+          kind: "woo.turn.exec.reply.shadow.v1",
+          ok: false,
+          id: "rest-repair-explicit-id",
+          reason: "commit_rejected",
+          commit: {
+            kind: "woo.commit.conflict.shadow.v1",
+            scope: "the_chatroom",
+            current: { kind: "woo.scope_head.shadow.v1", scope: "the_chatroom", epoch: 0, seq: 99, hash: "forced-stale" },
+            reason: "stale_head",
+            errors: ["forced stale head for REST relay repair test"],
+            receipt: {}
+          }
+        }
+      }),
+      fanout: []
+    }), { status: 200, headers: { "content-type": "application/json" } });
+    env = {
+      WOO_INITIAL_WIZARD_TOKEN: "cf-command-token",
+      WOO_INTERNAL_SECRET: "cf-test-secret",
+      WOO_AUTO_INSTALL_CATALOGS: "chat,demoworld,pinboard",
+      DIRECTORY: new FakeDurableObjectNamespace((name) => {
+        if (name !== "directory") throw new Error(`unexpected Directory DO ${name}`);
+        return directory;
+      }),
+      WOO: wooNamespace,
+      COMMIT_SCOPE: fakeCommitScopeNamespace("cf-test-secret", (scope, path, body) => {
+        if (path !== "/v2/open" && path !== "/v2/envelope") return;
+        if (!body || typeof body !== "object" || Array.isArray(body)) return;
+        const post = { scope, path, body: body as Record<string, unknown> };
+        commitPosts.push(post);
+        if (scope !== "the_chatroom" || path !== "/v2/envelope" || typeof post.body.envelope !== "string") return;
+        const envelope = decodeEnvelope(post.body.envelope);
+        if (staleEnvelopeIds.has(envelope.id)) {
+          staleReplies += 1;
+          return staleHeadResponse(envelope.id);
+        }
+        if (rejectNextChatEnvelope) {
+          rejectNextChatEnvelope = false;
+          staleEnvelopeIds.add(envelope.id);
+          staleReplies += 1;
+          return staleHeadResponse(envelope.id);
+        }
+      })
+    } as unknown as Env;
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    async function post(path: string, body: Record<string, unknown>, session?: string): Promise<{ status: number; body: Record<string, unknown> }> {
+      const response = await worker.fetch(new Request(`https://woo.test${path}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(session ? { authorization: `Session ${session}` } : {})
+        },
+        body: JSON.stringify(body)
+      }), env, {});
+      return { status: response.status, body: await response.json() as Record<string, unknown> };
+    }
+
+    try {
+      const auth = await post("/api/auth", { token: "guest:cf-rest-relay-repair" });
+      expect(auth.status).toBe(200);
+      const session = String(auth.body.session);
+
+      const firstEnter = await post("/api/objects/the_chatroom/calls/enter", { args: [] }, session);
+      expect(firstEnter.status, JSON.stringify(firstEnter.body)).toBe(200);
+
+      rejectNextChatEnvelope = true;
+      const repairedEnter = await post("/api/objects/the_chatroom/calls/enter", { id: "rest-repair-explicit-id", args: [] }, session);
+      expect(repairedEnter.status, JSON.stringify(repairedEnter.body)).toBe(200);
+      expect(staleReplies).toBe(1);
+
+      const chatOpens = commitPosts.filter((post) => post.scope === "the_chatroom" && post.path === "/v2/open");
+      const chatEnvelopes = commitPosts.filter((post) => post.scope === "the_chatroom" && post.path === "/v2/envelope");
+      expect(chatOpens).toHaveLength(2);
+      expect(chatEnvelopes).toHaveLength(3);
+      expect(new Set(chatEnvelopes.map((post) => decodeEnvelope(String(post.body.envelope)).id)).size).toBe(3);
     } finally {
       logSpy.mockRestore();
       directoryState.close();

@@ -66,7 +66,10 @@ function makeCfHarness(): Harness {
   };
 }
 
-function fakeCommitScopeNamespace(secret = "cf-test-secret"): DurableObjectNamespace {
+function fakeCommitScopeNamespace(
+  secret = "cf-test-secret",
+  record?: (scope: string, path: string, body: unknown) => void
+): DurableObjectNamespace {
   const states = new Map<string, FakeDurableObjectState>();
   return new FakeDurableObjectNamespace((name) => {
     let state = states.get(name);
@@ -74,7 +77,21 @@ function fakeCommitScopeNamespace(secret = "cf-test-secret"): DurableObjectNames
       state = new FakeDurableObjectState(name);
       states.set(name, state);
     }
-    return new CommitScopeDO(state as unknown as DurableObjectState, { WOO_INTERNAL_SECRET: secret });
+    const target = new CommitScopeDO(state as unknown as DurableObjectState, { WOO_INTERNAL_SECRET: secret });
+    return {
+      fetch: async (request: Request): Promise<Response> => {
+        if (record) {
+          let body: unknown = null;
+          try {
+            body = await request.clone().json();
+          } catch {
+            body = null;
+          }
+          record(name, new URL(request.url).pathname, body);
+        }
+        return await target.fetch(request);
+      }
+    };
   }) as unknown as DurableObjectNamespace;
 }
 
@@ -1159,7 +1176,8 @@ describe("CFObjectRepository production-shape coverage", () => {
       expect(auth.status).toBe(200);
       const session = String(auth.body.session);
 
-      expect((await post("/api/objects/the_chatroom/calls/enter", { args: [] }, session)).status).toBe(200);
+      const firstEnter = await post("/api/objects/the_chatroom/calls/enter", { args: [] }, session);
+      expect(firstEnter.status, JSON.stringify(firstEnter.body)).toBe(200);
       expect((await post("/api/objects/the_chatroom/calls/enter", { args: [] }, session)).status).toBe(200);
       expect((await post("/api/objects/the_chatroom/calls/southeast", { args: [] }, session)).status).toBe(200);
 
@@ -1170,6 +1188,75 @@ describe("CFObjectRepository production-shape coverage", () => {
       const pinboardPlan = await post("/api/objects/the_deck/calls/command_plan", { args: ["enter pinboard"] }, session);
       expect(pinboardPlan.status).toBe(200);
       expect(pinboardPlan.body.result).toMatchObject({ ok: true, route: "sequenced", space: "the_pinboard", target: "the_pinboard", verb: "enter", args: [] });
+    } finally {
+      logSpy.mockRestore();
+      directoryState.close();
+      for (const state of wooStates.values()) state.close();
+    }
+  });
+
+  it("keeps REST v2 relay snapshots on open instead of every envelope", async () => {
+    const directoryState = new FakeDurableObjectState("directory");
+    const directory = new DirectoryDO(directoryState as unknown as DurableObjectState, { WOO_INTERNAL_SECRET: "cf-test-secret" });
+    const wooStates = new Map<string, FakeDurableObjectState>();
+    const wooObjects = new Map<string, PersistentObjectDO>();
+    const commitPosts: Array<{ scope: string; path: string; body: Record<string, unknown> }> = [];
+    let env: Env;
+    const wooNamespace = new FakeDurableObjectNamespace((name) => {
+      let object = wooObjects.get(name);
+      if (!object) {
+        const state = new FakeDurableObjectState(name);
+        wooStates.set(name, state);
+        object = new PersistentObjectDO(state as unknown as DurableObjectState, env);
+        wooObjects.set(name, object);
+      }
+      return object;
+    });
+    env = {
+      WOO_INITIAL_WIZARD_TOKEN: "cf-command-token",
+      WOO_INTERNAL_SECRET: "cf-test-secret",
+      WOO_AUTO_INSTALL_CATALOGS: "chat,demoworld,pinboard",
+      DIRECTORY: new FakeDurableObjectNamespace((name) => {
+        if (name !== "directory") throw new Error(`unexpected Directory DO ${name}`);
+        return directory;
+      }),
+      WOO: wooNamespace,
+      COMMIT_SCOPE: fakeCommitScopeNamespace("cf-test-secret", (scope, path, body) => {
+        if (path !== "/v2/open" && path !== "/v2/envelope") return;
+        if (!body || typeof body !== "object" || Array.isArray(body)) return;
+        commitPosts.push({ scope, path, body: body as Record<string, unknown> });
+      })
+    } as unknown as Env;
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    async function post(path: string, body: Record<string, unknown>, session?: string): Promise<{ status: number; body: Record<string, unknown> }> {
+      const response = await worker.fetch(new Request(`https://woo.test${path}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(session ? { authorization: `Session ${session}` } : {})
+        },
+        body: JSON.stringify(body)
+      }), env, {});
+      return { status: response.status, body: await response.json() as Record<string, unknown> };
+    }
+
+    try {
+      const auth = await post("/api/auth", { token: "guest:cf-rest-relay" });
+      expect(auth.status).toBe(200);
+      const session = String(auth.body.session);
+
+      const firstEnter = await post("/api/objects/the_chatroom/calls/enter", { args: [] }, session);
+      expect(firstEnter.status, JSON.stringify(firstEnter.body)).toBe(200);
+      const secondEnter = await post("/api/objects/the_chatroom/calls/enter", { args: [] }, session);
+      expect(secondEnter.status, JSON.stringify(secondEnter.body)).toBe(200);
+
+      const chatOpens = commitPosts.filter((post) => post.scope === "the_chatroom" && post.path === "/v2/open");
+      const chatEnvelopes = commitPosts.filter((post) => post.scope === "the_chatroom" && post.path === "/v2/envelope");
+      expect(chatOpens).toHaveLength(1);
+      expect(chatOpens[0].body).toHaveProperty("serialized");
+      expect(chatEnvelopes).toHaveLength(2);
+      expect(chatEnvelopes.every((post) => !Object.prototype.hasOwnProperty.call(post.body, "serialized"))).toBe(true);
     } finally {
       logSpy.mockRestore();
       directoryState.close();

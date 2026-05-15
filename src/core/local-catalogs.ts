@@ -344,13 +344,6 @@ export function localCatalogUiIndex(world: WooWorld): { catalogs: WooValue[] } {
 export function runHostScopedLocalCatalogLifecycle(world: WooWorld, host = "host", options: { freshSeed?: boolean } = {}): void {
   runHostScopedSchemaPlans(world, host, options.freshSeed === true);
   runHostScopedDataMigrations(world, host);
-  // TEMP diag: report satellite's view of $room.southeast at end of cold-load
-  if (world.objects.has("$room")) {
-    const v = world.ownVerbExact("$room", "southeast");
-    console.log("woo.diag", JSON.stringify({ tag: "satellite-coldload-room-southeast", host, freshSeed: options.freshSeed === true, arg_spec: v?.arg_spec ?? null }));
-  } else {
-    console.log("woo.diag", JSON.stringify({ tag: "satellite-coldload-no-room", host }));
-  }
 }
 
 function runLocalCatalogMigrations(world: WooWorld, names: readonly string[], cleanInstalled: ReadonlySet<string>): Set<string> {
@@ -488,9 +481,23 @@ function runHostScopedSchemaPlans(world: WooWorld, host: string, freshSeed: bool
     // Verify even when this manifest's previous plan completed. A host slice
     // can retain stale catalog metadata after a gateway repair, and the plan
     // id alone cannot prove the local slice is still in sync.
+    //
+    // reconcileClassVerbs walks every class verb on this slice against the
+    // bundled manifest's arg_spec / source / aliases / flags and writes only
+    // when storage drifts. Without it, a verb metadata change that landed on
+    // the gateway after this satellite's last bootstrap-style migration ID
+    // (e.g. an arg_spec.command.persistence hint added by a chat-v2 manifest
+    // bump) was unreachable: the satellite's own bootstrap migration list
+    // does not run on cold-load (only the gateway runs that), and the
+    // host-seed merge alone could miss it when the gateway's seed cache had
+    // been built before the gateway's reconcile (addVerb does not bump
+    // mutationCounter, so the hostSeedCache stayed valid). Reconciling on
+    // every cold-load is idempotent — empty diff means no writes — and is
+    // the substrate's self-heal for stale satellite verb shapes.
     const result = runLocalCatalogSchemaPlan(world, name, manifest, "host", host, {
       allowImplementationHints: true,
       reconcileSeedHooks: true,
+      reconcileClassVerbs: true,
       skipMissingSeedHooks: true
     });
     if (result.status === "failed") {
@@ -540,17 +547,7 @@ function runLocalCatalogMigration(
   options: { allowImplementationHints?: boolean; reconcileSeedHooks?: boolean; rehomeNowhereSeedObjects?: boolean; reconcileClassVerbs?: boolean; only?: string } = {}
 ): Set<string> {
   const covered = new Set<string>();
-  const alreadyApplied = migrationApplied(world, id);
-  // TEMP diag: trace the chat persistence reconcile to confirm it's reaching reconcile.
-  if (id === "2026-05-14-chat-v2-command-persistence-reconcile") {
-    let southeastBefore: unknown = null;
-    if (world.objects.has("$room")) {
-      const v = world.ownVerbExact("$room", "southeast");
-      southeastBefore = v?.arg_spec ?? null;
-    }
-    console.log("woo.diag", JSON.stringify({ tag: "persistence-reconcile-entry", alreadyApplied, names: [...names], chatInstalled: localCatalogInstalled(world, "chat"), cleanHasChat: cleanInstalled.has("chat"), southeastBefore }));
-  }
-  if (alreadyApplied) return covered;
+  if (migrationApplied(world, id)) return covered;
   let repaired = false;
   for (const name of names) {
     if (options.only && name !== options.only) continue;
@@ -569,10 +566,6 @@ function runLocalCatalogMigration(
     if (result.status === "failed") throw new Error(`local catalog schema plan failed: ${result.plan_id}`);
     repaired = true;
     covered.add(name);
-  }
-  if (id === "2026-05-14-chat-v2-command-persistence-reconcile") {
-    const v = world.objects.has("$room") ? world.ownVerbExact("$room", "southeast") : null;
-    console.log("woo.diag", JSON.stringify({ tag: "persistence-reconcile-exit", repaired, southeastAfter: v?.arg_spec ?? null }));
   }
   if (repaired || !options.only) markMigrationApplied(world, id);
   return covered;

@@ -1149,6 +1149,13 @@ export class WooWorld {
       obj.verbs.push(this.withVerbSlot(normalized, obj.verbs.length));
     }
     this.reindexVerbs(obj);
+    // Verb writes are part of the host-seed body delivered to satellites; a
+    // verb edit that does not bump mutationCounter would let the gateway's
+    // hostSeedCache serve a stale seed to the next satellite that asks for
+    // its slice, and the satellite's stored arg_spec would never see the new
+    // shape until the cache was independently invalidated. Bump here so the
+    // cache key advances every time a verb's authoritative metadata changes.
+    this.bumpMutationVersion();
     this.persistObject(objRef);
     this.persist();
     return obj.verbs[writtenIndex];
@@ -1160,6 +1167,7 @@ export class WooWorld {
     obj.verbs = obj.verbs.filter((verb) => verb.name !== name);
     if (obj.verbs.length === before) return false;
     this.reindexVerbs(obj);
+    this.bumpMutationVersion();
     this.persistObject(objRef);
     this.persist();
     return true;

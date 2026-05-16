@@ -32,6 +32,7 @@ import {
 import { wooError, type ErrorValue, type Message, type ObjRef, type Observation, type SpaceLogEntry, type WooValue } from "../core/types";
 
 type Row = Record<string, any>;
+const LOCAL_SQLITE_SCHEMA_VERSION = 1;
 
 function persistedSessionFromRow(row: Row, now: number): SerializedSession {
   const session = sessionFromRow(row);
@@ -523,7 +524,31 @@ export class LocalSQLiteRepository implements WorldRepository, ObjectRepository 
   }
 
   private migrate(): void {
+    const tables = this.userTableNames();
+    const version = Number((this.db.prepare("PRAGMA user_version").get() as Row | undefined)?.user_version ?? 0);
+    if (version > LOCAL_SQLITE_SCHEMA_VERSION) {
+      throw wooError("E_STORAGE", `local SQLite schema is newer than this runtime: ${version} > ${LOCAL_SQLITE_SCHEMA_VERSION}`);
+    }
+    // user_version 0 predates local SQLite schema versioning. For this initial
+    // boundary, recreate old local DBs instead of carrying compatibility
+    // branches for retired table shapes. Future bumps should choose explicitly
+    // between a real migration and another reset.
+    if (tables.length > 0 && version < LOCAL_SQLITE_SCHEMA_VERSION) {
+      this.recreateLocalDatabase(tables);
+    }
     this.db.exec(SQL_SCHEMA_SCRIPT);
+    this.db.exec(`PRAGMA user_version = ${LOCAL_SQLITE_SCHEMA_VERSION}`);
+  }
+
+  private userTableNames(): string[] {
+    const rows = this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Row[];
+    return rows.map((row) => String(row.name));
+  }
+
+  private recreateLocalDatabase(tables: string[]): void {
+    for (const table of tables) {
+      this.db.exec(`DROP TABLE IF EXISTS "${table.replaceAll("\"", "\"\"")}"`);
+    }
   }
 
   private ensureHostedObject(id: ObjRef): void {

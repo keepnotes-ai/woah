@@ -1,6 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { createWorld, createWorldFromSerialized, scopeSerializedWorldToHost } from "../src/core/bootstrap";
 import { installCatalogManifest, updateCatalogManifest, type CatalogManifest } from "../src/core/catalog-installer";
@@ -347,6 +348,44 @@ describe("sqlite persistence", () => {
       expect(resumed.actor).toBe(session.actor);
       expect(secondWorld.sessions.get(session.id)?.lastDetachAt).toBe(reloaded?.lastDetachAt);
       secondRepo.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("recreates unversioned legacy SQLite databases", () => {
+    const { dir, path } = tempDb();
+    try {
+      const db = new DatabaseSync(path);
+      db.exec(`
+        CREATE TABLE legacy_only (
+          id TEXT PRIMARY KEY
+        );
+        CREATE TABLE session (
+          id TEXT PRIMARY KEY,
+          actor TEXT NOT NULL,
+          started INTEGER NOT NULL,
+          expires_at INTEGER,
+          last_detach_at INTEGER,
+          token_class TEXT NOT NULL DEFAULT 'guest',
+          attachment TEXT NOT NULL
+        )
+      `);
+      db.close();
+
+      const repo = new LocalSQLiteRepository(path);
+      const world = createWorld({ repository: repo });
+      world.auth("guest:legacy-attachment");
+      const check = new DatabaseSync(path);
+      const version = (check.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
+      const legacyTable = check.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'legacy_only'").get();
+      const sessionColumns = (check.prepare("PRAGMA table_info(session)").all() as Array<{ name: string }>).map((row) => row.name);
+      check.close();
+
+      expect(version).toBe(1);
+      expect(legacyTable).toBeUndefined();
+      expect(sessionColumns).not.toContain("attachment");
+      repo.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

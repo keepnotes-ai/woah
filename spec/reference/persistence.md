@@ -19,6 +19,12 @@ Per-object tables (`property_def`, `property_value`, `verb`, `child`, `content`,
 
 > **This schema is the CF backend's storage encoding**, not a contract on runtime types. The runtime works with the TS types in [`src/core/types.ts`](../../src/core/types.ts) and accesses storage through the [`ObjectRepository`](../../src/core/repository.ts) interface ([cloudflare.md §R3](cloudflare.md#r3-per-object-repository-interface)). Other backends (in-memory, local SQLite, JSON-folder) are free to encode differently as long as they satisfy the interface. Where this schema's encoding differs from the runtime types, the encoding is "how the CF SQLite stores it"; the runtime never sees the raw SQL shape.
 
+Local development SQLite (`LocalSQLiteRepository`) stamps databases with
+`PRAGMA user_version = 1`. Version `0` predates local SQLite schema versioning,
+so a non-empty local SQLite file at version `0` is treated as too old and is
+recreated from the current schema on startup. Future `user_version` bumps must
+choose explicitly between a real local migration and another reset.
+
 ### 14.1 Per-`MooObject` schema
 
 ```sql

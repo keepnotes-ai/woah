@@ -7,7 +7,7 @@ import { buildServerInstructions, createMcpServer } from "../src/mcp/server";
 import type { EffectTranscript } from "../src/core/effect-transcript";
 import { createShadowBrowserRelayShim } from "../src/core/shadow-browser-node";
 import { applyShadowTranscriptToCommittedState } from "../src/core/shadow-commit-scope";
-import type { MetricEvent, Observation, ObjRef, RemoteToolDescriptor, VerbDef, WooValue } from "../src/core/types";
+import type { MetricEvent, Observation, ObjRef, RemoteToolDescriptor, RemoteToolRequest, VerbDef, WooValue } from "../src/core/types";
 import type { CallContext, HostBridge, MoveObjectResult, RoomSnapshot, ScopedObjectSummary, WooWorld } from "../src/core/world";
 
 function bootstrapWorld() {
@@ -135,14 +135,15 @@ class RemoteToolBridge implements HostBridge {
     return this.worldFor(objRef).contentsOf(objRef);
   }
 
-  async enumerateRemoteTools(actor: ObjRef, ids: ObjRef[]): Promise<RemoteToolDescriptor[]> {
+  async enumerateRemoteTools(actor: ObjRef, requests: RemoteToolRequest[]): Promise<RemoteToolDescriptor[]> {
     const out: RemoteToolDescriptor[] = [];
-    for (const id of ids) {
+    for (const request of requests) {
+      const id = request.id;
       const host = this.routes.get(id);
       if (!host || host === this.localHost) continue;
       const mcpHost = this.hosts.get(host);
       if (!mcpHost) continue;
-      out.push(...mcpHost.enumerateLocalToolDescriptors(actor, [id]));
+      out.push(...mcpHost.enumerateLocalToolDescriptors(actor, [request]));
     }
     return out;
   }
@@ -1441,7 +1442,13 @@ describe("McpGateway", () => {
     remote.createObject({ id: "remote_widget", name: "Remote Widget", parent: "$thing", owner: "$wiz", location: "remote_gallery" });
     remote.addVerb("remote_widget", nativeToolVerb("ping", "remote_ping"));
     const remotePing = remote.ownVerb("remote_widget", "ping");
-    if (remotePing) remotePing.arg_spec = { ...remotePing.arg_spec, command: { dobj: "this", prep: "none", iobj: "none", args_from: [] } };
+    if (remotePing) {
+      // Load-bearing: command-shaped but not tool_exposed reproduces weather's
+      // open/ask verbs, which local obvious projection listed but remote
+      // explicit-tool projection used to drop.
+      remotePing.tool_exposed = false;
+      remotePing.arg_spec = { ...remotePing.arg_spec, command: { dobj: "this", prep: "none", iobj: "none", args_from: [] } };
+    }
     remote.registerNativeHandler("remote_ping", () => "pong");
 
     const gateway = new McpGateway(home);
@@ -1552,6 +1559,39 @@ describe("McpGateway", () => {
 
     const tool = await host.resolveReachableTool(session.actor, "remote_room", "leave");
     expect(tool).toBeDefined();
+  });
+
+  it("does not broaden focused remote objects to obvious-only verbs", async () => {
+    const home = bootstrapWorld();
+    const remote = bootstrapWorld();
+    const remoteHost = new McpHost(remote);
+    const worlds = new Map<string, WooWorld>([
+      ["home", home],
+      ["remote", remote]
+    ]);
+    const routes = new Map<ObjRef, string>([["remote_widget", "remote"]]);
+    const hosts = new Map<string, McpHost>([["remote", remoteHost]]);
+    home.setHostBridge(new RemoteToolBridge("home", worlds, routes, hosts));
+    remote.setHostBridge(new RemoteToolBridge("remote", worlds, routes, hosts));
+
+    home.createObject({ id: "remote_widget", name: "Remote Widget", parent: "$thing", owner: "$wiz" });
+    remote.createObject({ id: "remote_widget", name: "Remote Widget", parent: "$thing", owner: "$wiz" });
+    remote.addVerb("remote_widget", nativeToolVerb("ping", "remote_ping"));
+    const remotePing = remote.ownVerb("remote_widget", "ping");
+    if (remotePing) {
+      remotePing.tool_exposed = false;
+      remotePing.arg_spec = { ...remotePing.arg_spec, command: { dobj: "this", prep: "none", iobj: "none", args_from: [] } };
+    }
+    remote.registerNativeHandler("remote_ping", () => "pong");
+
+    const session = home.auth("guest:mcp-focused-remote-obvious");
+    home.setProp(session.actor, "focus_list", ["remote_widget"]);
+    const host = new McpHost(home);
+    host.bindSession(session.id, session.actor);
+
+    const focused = await host.listTools(session.actor, { scope: "focus" });
+    expect(focused.tools.map((tool) => `${tool.object}:${tool.verb}`)).not.toContain("remote_widget:ping");
+    await expect(host.resolveReachableTool(session.actor, "remote_widget", "ping")).resolves.toBeNull();
   });
 
   it("initializes a session via Authorization bearer for Codex-style MCP clients", async () => {

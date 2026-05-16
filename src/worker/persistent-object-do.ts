@@ -37,7 +37,7 @@ import {
   type RestProtocolHost,
   type RestProtocolRequest
 } from "../core/protocol";
-import type { MetricEvent, ObjRef, Observation, RemoteToolDescriptor, Session, WooValue } from "../core/types";
+import type { MetricEvent, ObjRef, Observation, RemoteToolDescriptor, RemoteToolRequest, Session, WooValue } from "../core/types";
 import { directedRecipients, publicAppliedFrame, sessionActiveScopeFromRecord, wooError } from "../core/types";
 import type { AppliedFrame, DirectResultFrame, ErrorFrame, LiveEventFrame, Message } from "../core/types";
 import type { SeedWorld, SerializedObject, SerializedSession, SerializedWorld, TombstoneRecord } from "../core/repository";
@@ -1742,21 +1742,22 @@ export class PersistentObjectDO {
         if (memo) return await memoizeHostOperation(memo.reads, `contents:${objRef}`, read);
         return await read();
       },
-      enumerateRemoteTools: async (actor, ids) => {
+      enumerateRemoteTools: async (actor, requests) => {
         // Group ids by owning host, RPC each, merge.
-        const byHost = new Map<string, ObjRef[]>();
-        for (const id of ids) {
+        const byHost = new Map<string, RemoteToolRequest[]>();
+        for (const request of requests) {
+          const id = request.id;
           const host = await hostForObject(id);
           if (!host || host === localHost) continue;
           const list = byHost.get(host) ?? [];
-          list.push(id);
+          list.push(request);
           byHost.set(host, list);
         }
         if (byHost.size === 0) return [];
         const responses = await Promise.all(
-          Array.from(byHost, async ([host, hostIds]) => {
+          Array.from(byHost, async ([host, hostRequests]) => {
             try {
-              const response = await this.forwardInternalReadChecked<{ tools: RemoteToolDescriptor[] }>(host, "/__internal/enumerate-tools", { actor, ids: hostIds });
+              const response = await this.forwardInternalReadChecked<{ tools: RemoteToolDescriptor[] }>(host, "/__internal/enumerate-tools", { actor, requests: hostRequests });
               const tools = response.tools ?? [];
               // Returned descriptors include runtime-minted objects (tasks
               // created on the cluster) that the directory may not know about
@@ -2216,9 +2217,22 @@ export class PersistentObjectDO {
 
       if (request.method === "POST" && pathname === "/__internal/enumerate-tools") {
         const actor = String(body.actor ?? "") as ObjRef;
-        const ids = Array.isArray(body.ids) ? (body.ids as string[]).filter((id) => typeof id === "string") as ObjRef[] : [];
+        const requests = Array.isArray(body.requests)
+          ? body.requests
+            .filter((item): item is Record<string, unknown> => item !== null && typeof item === "object" && typeof item.id === "string")
+            .map((item) => ({
+              id: item.id as ObjRef,
+              projection: item.projection === "obvious" ? "obvious" as const : "tools" as const,
+              expandContents: item.expandContents === true,
+              contentsProjection: item.contentsProjection === "tools" ? "tools" as const : "obvious" as const
+            }))
+          : Array.isArray(body.ids)
+          ? (body.ids as unknown[])
+            .filter((id): id is string => typeof id === "string")
+            .map((id) => ({ id: id as ObjRef, projection: "tools" as const, expandContents: true, contentsProjection: "obvious" as const }))
+          : [];
         if (actor) this.ensureInternalActor(world, actor);
-        const tools = this.getMcpGateway(world).host.enumerateLocalToolDescriptors(actor, ids);
+        const tools = this.getMcpGateway(world).host.enumerateLocalToolDescriptors(actor, requests);
         return jsonResponse({ tools });
       }
 

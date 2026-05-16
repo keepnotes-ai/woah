@@ -8,7 +8,7 @@
 
 import type { WooWorld } from "../core/world";
 import type { EffectTranscript } from "../core/effect-transcript";
-import type { AppliedFrame, DirectResultFrame, ErrorFrame, Message, ObjRef, Observation, RemoteToolDescriptor, WooValue } from "../core/types";
+import type { AppliedFrame, DirectResultFrame, ErrorFrame, Message, ObjRef, Observation, RemoteToolDescriptor, RemoteToolProjection, RemoteToolRequest, WooValue } from "../core/types";
 import type { ShadowCommitAccepted } from "../core/shadow-commit-scope";
 import { directedRecipients, wooError } from "../core/types";
 
@@ -402,19 +402,11 @@ export class McpHost {
     if (bridge?.enumerateRemoteTools) {
       let selectedDescriptors: RemoteToolDescriptor[] = [];
       try {
-        if (plan.remoteIds.length > 0) selectedDescriptors = await bridge.enumerateRemoteTools(actor, plan.remoteIds);
+        if (plan.remoteRequests.length > 0) selectedDescriptors = await bridge.enumerateRemoteTools(actor, plan.remoteRequests);
       } catch {
         // Best-effort; if a host is unreachable its tools just don't appear.
       }
-      addRemoteDescriptors(selectedDescriptors, true);
-
-      let expandedDescriptors: RemoteToolDescriptor[] = [];
-      try {
-        if (plan.remoteExpandedIds.length > 0) expandedDescriptors = await bridge.enumerateRemoteTools(actor, plan.remoteExpandedIds);
-      } catch {
-        // Best-effort; if a host is unreachable its tools just don't appear.
-      }
-      addRemoteDescriptors(expandedDescriptors, false);
+      addRemoteDescriptors(selectedDescriptors, false);
     }
 
     return filterTools(tools, query);
@@ -424,11 +416,11 @@ export class McpHost {
     actor: ObjRef,
     scope: McpToolScope,
     object: ObjRef | undefined
-  ): Promise<{ selectedIds: Set<ObjRef>; obviousOnlyIds: Set<ObjRef>; remoteIds: ObjRef[]; remoteExpandedIds: ObjRef[] }> {
+  ): Promise<{ selectedIds: Set<ObjRef>; obviousOnlyIds: Set<ObjRef>; remoteRequests: RemoteToolRequest[] }> {
     const selectedIds = new Set<ObjRef>();
     const obviousOnlyIds = new Set<ObjRef>();
-    const remoteCandidates = new Set<ObjRef>();
-    const remoteExpandCandidates = new Set<ObjRef>();
+    const remoteCandidates = new Map<ObjRef, RemoteToolProjection>();
+    const remoteExpandCandidates = new Map<ObjRef, RemoteToolProjection>();
     const actorObj = this.world.objects.has(actor) ? this.world.object(actor) : null;
     const activeLocations = this.world.allLocationsForActor(actor);
     const activeScope = actorObj?.location ?? activeLocations[0] ?? null;
@@ -442,7 +434,7 @@ export class McpHost {
       selectedIds.add(id);
       if (projection === "obvious") obviousOnlyIds.add(id);
       else obviousOnlyIds.delete(id);
-      if (remoteCandidate) remoteCandidates.add(id);
+      if (remoteCandidate) remoteCandidates.set(id, projection);
     };
     const addIfReachable = (id: ObjRef | null | undefined): void => {
       if (!id) return;
@@ -456,8 +448,8 @@ export class McpHost {
         if (this.actorCanSee(actor, child)) add(child, false, "obvious");
       }
     };
-    const expandRemoteContents = (space: ObjRef | null | undefined): void => {
-      if (space) remoteExpandCandidates.add(space);
+    const expandRemoteContents = (space: ObjRef | null | undefined, contentsProjection: RemoteToolProjection = "obvious"): void => {
+      if (space) remoteExpandCandidates.set(space, contentsProjection);
     };
 
     switch (scope) {
@@ -498,27 +490,27 @@ export class McpHost {
         break;
     }
 
-    const remoteIdsRaw: ObjRef[] = [];
-    for (const id of remoteCandidates) {
+    const requestById = new Map<ObjRef, RemoteToolRequest>();
+    for (const [id, projection] of remoteCandidates) {
       if (id === actor) continue;
-      if (await this.world.isRemoteObject(id)) remoteIdsRaw.push(id);
+      if (!await this.world.isRemoteObject(id)) continue;
+      requestById.set(id, { id, projection });
     }
-    const remoteExpandedIds: ObjRef[] = [];
-    for (const id of remoteExpandCandidates) {
+    for (const [id, contentsProjection] of remoteExpandCandidates) {
       if (id === actor) continue;
-      if (await this.world.isRemoteObject(id)) remoteExpandedIds.push(id);
+      if (!await this.world.isRemoteObject(id)) continue;
+      const request = requestById.get(id) ?? { id, projection: "tools" as const };
+      request.expandContents = true;
+      request.contentsProjection = contentsProjection;
+      requestById.set(id, request);
     }
-    const expanded = new Set(remoteExpandedIds);
-    const remoteIds = remoteIdsRaw.filter((id) => !expanded.has(id));
-    return { selectedIds, obviousOnlyIds, remoteIds, remoteExpandedIds };
+    return { selectedIds, obviousOnlyIds, remoteRequests: Array.from(requestById.values()) };
   }
 
-  // Computes tool descriptors for the given ids — the remote-side counterpart
-  // of cross-host enumeration. The caller (gateway) RPCs in here with the
-  // actor (already stubbed locally if needed) and the ids it cares about.
-  // Each id contributes its own tool-exposed verbs; if it's a $space, its
-  // current contents contribute too (filtered by the actor's read access).
-  enumerateLocalToolDescriptors(actor: ObjRef, ids: ObjRef[]): RemoteToolDescriptor[] {
+  // Computes tool descriptors for the given requests — the remote-side
+  // counterpart of cross-host enumeration. The caller owns the reachability
+  // projection choice; the remote host only applies it under local permissions.
+  enumerateLocalToolDescriptors(actor: ObjRef, requests: RemoteToolRequest[]): RemoteToolDescriptor[] {
     const out: RemoteToolDescriptor[] = [];
     const seen = new Set<string>();
     const emit = (id: ObjRef, projection: "tools" | "obvious" = "tools"): void => {
@@ -540,11 +532,12 @@ export class McpHost {
         });
       }
     };
-    for (const id of ids) {
+    for (const request of requests) {
+      const id = request.id;
       if (!this.world.objects.has(id)) continue;
-      emit(id);
-      if (this.descendsFrom(id, "$space")) {
-        for (const child of this.world.object(id).contents) emit(child, "obvious");
+      emit(id, request.projection ?? "tools");
+      if (request.expandContents && this.descendsFrom(id, "$space")) {
+        for (const child of this.world.object(id).contents) emit(child, request.contentsProjection ?? "obvious");
       }
     }
     return out;
@@ -630,7 +623,8 @@ export class McpHost {
     const bridge = this.world.getHostBridge();
     if (locallyReachable && await this.world.isRemoteObject(object)) {
       if (!bridge?.enumerateRemoteTools) return null;
-      const descriptors = await bridge.enumerateRemoteTools(actor, [object]);
+      const projection = this.usesObviousProjection(actor, object) ? "obvious" : "tools";
+      const descriptors = await bridge.enumerateRemoteTools(actor, [{ id: object, projection }]);
       const descriptor = descriptors.find((candidate) => candidate.object === object && candidate.verb === verbName);
       return descriptor ? this.assembleTool(descriptor.object, descriptor, new Set()) : null;
     }
@@ -649,7 +643,12 @@ export class McpHost {
     if (!bridge?.enumerateRemoteTools) return null;
     const remoteScopeIds = await this.collectRemoteScopeIds(actor);
     if (remoteScopeIds.length === 0) return null;
-    const descriptors = await bridge.enumerateRemoteTools(actor, remoteScopeIds);
+    const descriptors = await bridge.enumerateRemoteTools(actor, remoteScopeIds.map((id) => ({
+      id,
+      projection: "tools" as const,
+      expandContents: true,
+      contentsProjection: "obvious" as const
+    })));
     const descriptor = descriptors.find((candidate) => candidate.object === object && candidate.verb === verbName);
     return descriptor ? this.assembleTool(descriptor.object, descriptor, new Set()) : null;
   }

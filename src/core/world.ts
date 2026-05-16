@@ -16,6 +16,7 @@ import {
   type ObjRef,
   type PropertyDef,
   type RemoteToolDescriptor,
+  type RemoteToolRequest,
   type Session,
   type SpaceLogEntry,
   type VerbDef,
@@ -228,10 +229,10 @@ export type HostBridge = {
   actorSessionLocationsBatch?(actors: ObjRef[], memo?: HostOperationMemo): Promise<Map<ObjRef, ObjRef[]>>;
   contents(objRef: ObjRef, memo?: HostOperationMemo): Promise<ObjRef[]>;
   // Cross-host MCP reachability (spec/protocol/mcp.md §M3). Asks the host
-  // owning each id for tool descriptors covering that id's tool-exposed verbs
-  // plus the verbs of its current contents (when id is a $space). Optional —
-  // hosts that don't run an MCP gateway can omit it.
-  enumerateRemoteTools?(actor: ObjRef, ids: ObjRef[]): Promise<RemoteToolDescriptor[]>;
+  // owning each requested id for descriptors under the caller-selected
+  // projection (`tools` or `obvious`), with optional space-content expansion.
+  // Optional — hosts that don't run an MCP gateway can omit it.
+  enumerateRemoteTools?(actor: ObjRef, requests: RemoteToolRequest[]): Promise<RemoteToolDescriptor[]>;
 };
 
 export type HostObjectSummary = {

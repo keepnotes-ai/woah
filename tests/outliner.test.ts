@@ -264,6 +264,33 @@ describe("outliner catalog: not portable / defensive recycle", () => {
     expect(r.op).toBe("error");
     if (r.op === "error") expect(r.error.code).toBe("E_PERM");
   });
+
+  it("tolerates stale refs in contents(this) (add_item / list_items keep working)", async () => {
+    // Production observation: the dev server had `obj_the_outline_1` in
+    // the_outline.contents but the object itself no longer existed in the
+    // world. `_siblings_ordered` then called `isa(stale_ref, $outline_item)`
+    // which threw E_OBJNF, killing `add_item` and `list_items`. The verbs
+    // now defensively wrap the `isa` call and skip unresolvable refs.
+    //
+    // Simulating the bad state by injecting a string id into the contents
+    // Set; the substrate's contentsOf returns Array.from(obj.contents) so
+    // the DSL `contents(this)` will surface the stale ref to woocode.
+    const world = setupWorld();
+    const session = world.auth("guest:stale");
+    await expectResult(call(world, session.actor, "the_outline", "enter", []));
+    // Inject a non-existent ref into contents. This is exactly the shape
+    // the user observed in their persistent-store db.
+    world.object("the_outline").contents.add("obj_the_outline_stale");
+
+    // `add` must still succeed and `list_items` must still enumerate cleanly.
+    const a = await addItem(world, session.actor, "after-stale");
+    expect(parentOf(world, a)).toBe(null);
+    expect(position(world, a)).toBe(1);
+    const list = await expectResult(call(world, session.actor, "the_outline", "list_items", []));
+    expect(Array.isArray(list.result)).toBe(true);
+    const rows = list.result as Array<{ id: string }>;
+    expect(rows.map((r) => r.id)).toEqual([a]);
+  });
 });
 
 describe("outliner catalog: single-level undo", () => {

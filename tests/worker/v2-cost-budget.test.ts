@@ -99,10 +99,15 @@ describe("v2 CommitScopeDO cost budget", () => {
         arguments: { object: "guest_1", verb: "set_description", args: ["cost guard over mcp v2"] }
       });
       expect(said.result).toMatchObject({ isError: false });
-      // The MCP gateway applies the accepted v2 transcript as an in-memory
-      // routing/tool-list cache update. It must not persist the gateway world
-      // on the v2 hot path; CommitScopeDO is the durable authority.
-      expect(rowWrites(gatewayState)).toBe(0);
+      // CommitScopeDO remains the scope-head authority, but accepted v2
+      // commits now write through to the routed object host before reporting
+      // success. A gateway-hosted object therefore gets only its touched
+      // property rows persisted here, not a full gateway-world rewrite.
+      expect(writeRowsByTable(gatewayState)).toMatchObject({
+        property_value: 1,
+        property_version: 1
+      });
+      expect(rowWrites(gatewayState)).toBe(2);
       expect(commitScopeNamespace.fetchCallCount).toBe(1);
       expect(writeRowsByTable(directScopeState!)).toMatchObject({
         v2_commit_scope_meta: 1,

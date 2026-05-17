@@ -278,6 +278,13 @@ export interface ObjectRepository {
    */
   recordLogOutcome(space: ObjRef, seq: number, applied_ok: boolean, observations?: Observation[], error?: ErrorValue): void;
 
+  /**
+   * Idempotently materialize an already-accepted v2 commit log row. Unlike
+   * appendLog/recordLogOutcome this does not allocate a sequence number or
+   * mutate next_seq; the accepted transcript already carried both.
+   */
+  saveCommittedLogEntry(space: ObjRef, entry: SpaceLogEntry): void;
+
   /** Read at most `limit` log entries with `seq >= from`. Caller checks for `has_more`. */
   readLog(space: ObjRef, from: number, limit: number): LogReadResult;
 
@@ -616,6 +623,14 @@ export class InMemoryObjectRepository implements ObjectRepository, WorldReposito
     entry.applied_ok = applied_ok;
     entry.observations = cloneRepoValue(observations as unknown as WooValue) as unknown as Observation[];
     if (error) entry.error = cloneRepoValue(error as unknown as WooValue) as unknown as ErrorValue;
+  }
+
+  saveCommittedLogEntry(space: ObjRef, entry: SpaceLogEntry): void {
+    this.requireObject(space);
+    const entries = (this.logs.get(space) ?? []).filter((item) => item.seq !== entry.seq);
+    entries.push(cloneRepoValue(entry as unknown as WooValue) as unknown as SpaceLogEntry);
+    entries.sort((left, right) => left.seq - right.seq);
+    this.logs.set(space, entries);
   }
 
   readLog(space: ObjRef, from: number, limit: number): LogReadResult {

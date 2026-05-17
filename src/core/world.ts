@@ -41,7 +41,8 @@ import {
   nextObjectCounterForCreates,
   serializedObjectForTranscriptCreate,
   transcriptLogEntry,
-  transcriptSessionActiveScope
+  transcriptSessionActiveScope,
+  transcriptTouchedObjectIds
 } from "./shadow-commit-scope";
 
 export type NativeHandler = (ctx: CallContext, args: WooValue[]) => WooValue | Promise<WooValue>;
@@ -61,6 +62,24 @@ type ShadowGatewayApplyStats = {
   properties: number;
   sessions: number;
   logs: number;
+};
+
+type ShadowGatewayApplyOptions = {
+  skipObjectHost?: {
+    hostKey: string;
+    gatewayHost?: boolean;
+  };
+};
+
+export type ShadowHostApplyResult = {
+  ok: true;
+  host: string;
+  objects: number;
+  properties: number;
+  logs: number;
+  sessions: number;
+  creates: number;
+  writes: number;
 };
 
 type ResolvedVerb = {
@@ -6196,7 +6215,7 @@ export class WooWorld {
     });
   }
 
-  applyCommittedShadowTranscript(transcript: EffectTranscript): void {
+  applyCommittedShadowTranscript(transcript: EffectTranscript, options: ShadowGatewayApplyOptions = {}): void {
     // CommitScopeDO is the authority for v2 shadow commits. The gateway keeps
     // this WooWorld as a routing/tool-list cache. Apply the same transcript
     // materialization semantics in-place so hot v2/MCP commits scale with the
@@ -6216,8 +6235,131 @@ export class WooWorld {
         writes: transcript.writes.length
       });
     };
-    this.applyCommittedShadowTranscriptInPlace(transcript, Date.now(), profile);
+    this.applyCommittedShadowTranscriptInPlace(transcript, Date.now(), profile, options);
     profile("total", totalStartedAt);
+  }
+
+  applyCommittedShadowTranscriptToHost(hostKey: string, transcript: EffectTranscript, options: { gatewayHost?: boolean } = {}): ShadowHostApplyResult {
+    // CommitScopeDO accepts against its own authority snapshot; object-host DOs
+    // are the durable read authority for public object routes. This materializes
+    // only the slice owned by `hostKey`, preserving the accepted transcript
+    // semantics while keeping host persistence O(touched rows), not O(world).
+    const objectTimestamp = Date.now();
+    const gatewayHost = options.gatewayHost === true;
+    const { belongsHere, createBelongsHere } = this.transcriptHostPredicates(hostKey, gatewayHost);
+
+    this.bumpMutationVersion();
+    this.hostSeedCache.clear();
+    let objects = 0;
+    let properties = 0;
+    let logs = 0;
+    let sessions = 0;
+    let creates = 0;
+    let writesApplied = 0;
+    const dirtyObjects = new Set<ObjRef>();
+    const dirtyProps = new Map<ObjRef, Set<string>>();
+    const markObject = (id: ObjRef | null | undefined): void => {
+      if (!id || !this.objects.has(id)) return;
+      dirtyObjects.add(id);
+      dirtyProps.delete(id);
+    };
+    const markProp = (id: ObjRef, name: string): void => {
+      if (dirtyObjects.has(id)) return;
+      let props = dirtyProps.get(id);
+      if (!props) {
+        props = new Set();
+        dirtyProps.set(id, props);
+      }
+      props.add(name);
+    };
+
+    for (const create of transcript.creates) {
+      if (!createBelongsHere(create)) continue;
+      if (!this.objects.has(create.object)) {
+        const serialized = serializedObjectForTranscriptCreate(create, objectTimestamp);
+        this.objects.set(create.object, this.objectFromSerializedCreate(serialized));
+        if (serialized.parent) addSortedSetValue(this.objects.get(serialized.parent)?.children, serialized.id);
+        if (serialized.location) addSortedSetValue(this.objects.get(serialized.location)?.contents, serialized.id);
+      }
+      markObject(create.object);
+      if (belongsHere(create.parent)) markObject(create.parent);
+      if (belongsHere(create.location)) markObject(create.location);
+      creates += 1;
+    }
+
+    for (const write of finalWritesByCell(transcript)) {
+      if (!belongsHere(write.cell.object)) continue;
+      const target = this.objects.get(write.cell.object);
+      if (!target) continue;
+      this.applyTranscriptWriteInPlace(write, objectTimestamp);
+      writesApplied += 1;
+      if (write.cell.kind === "prop") {
+        if (write.op === "remove") markObject(write.cell.object);
+        else markProp(write.cell.object, write.cell.name);
+      } else if (write.cell.kind === "location" || write.cell.kind === "contents") {
+        markObject(write.cell.object);
+      }
+    }
+
+    const sessionUpdate = transcriptSessionActiveScope(transcript);
+    if (gatewayHost && sessionUpdate) {
+      const session = this.sessions.get(sessionUpdate.session);
+      if (session?.actor === sessionUpdate.actor) {
+        session.activeScope = sessionUpdate.activeScope;
+        this.persistSession(session);
+        sessions += 1;
+      }
+    }
+
+    const logEntry = transcriptLogEntry(transcript);
+    if (logEntry && belongsHere(transcript.scope)) {
+      const entries = this.logs.get(transcript.scope) ?? [];
+      mergeTranscriptLogEntry(entries, logEntry);
+      this.logs.set(transcript.scope, entries);
+      this.activeObjectRepository()?.saveCommittedLogEntry(transcript.scope, logEntry);
+      logs += 1;
+    }
+
+    this.objectCounter = nextObjectCounterForCreates(this.objectCounter, transcript.creates);
+    if (gatewayHost && transcript.creates.length > 0) this.persistCounters();
+    for (const id of dirtyObjects) {
+      this.persistObject(id);
+      objects += 1;
+    }
+    for (const [id, names] of dirtyProps) {
+      for (const name of names) {
+        this.persistProperty(id, name);
+        properties += 1;
+      }
+    }
+
+    return { ok: true, host: hostKey, objects, properties, logs, sessions, creates, writes: writesApplied };
+  }
+
+  private transcriptHostPredicates(hostKey: string, gatewayHost: boolean): {
+    belongsHere: (id: ObjRef | null | undefined) => boolean;
+    createBelongsHere: (create: EffectTranscript["creates"][number]) => boolean;
+  } {
+    // Keep host-slice materialization and gateway-cache skip filtering in
+    // lockstep. If local object-host write-through has already applied a
+    // transcript slice, the later gateway cache apply must not replay it.
+    const routeHost = new Map(this.objectRoutes().map((route) => [route.id, route.host] as const));
+    const belongsHere = (id: ObjRef | null | undefined): boolean => {
+      if (!id) return false;
+      const routed = routeHost.get(id);
+      if (routed !== undefined) return routed === hostKey;
+      const obj = this.objects.get(id);
+      if (!obj) return false;
+      if (obj.anchor && routeHost.get(obj.anchor) === hostKey) return true;
+      return gatewayHost;
+    };
+    const createBelongsHere = (create: EffectTranscript["creates"][number]): boolean => {
+      if (routeHost.get(create.object) === hostKey) return true;
+      if (create.anchor && routeHost.get(create.anchor) === hostKey) return true;
+      if (create.location && routeHost.get(create.location) === hostKey) return true;
+      return gatewayHost && routeHost.get(create.object) === undefined;
+    };
+    return { belongsHere, createBelongsHere };
   }
 
   private shadowGatewayLiveMetricStats(): ShadowGatewayApplyStats {
@@ -6236,12 +6378,18 @@ export class WooWorld {
   private applyCommittedShadowTranscriptInPlace(
     transcript: EffectTranscript,
     objectTimestamp: number,
-    profile?: (phase: (MetricEvent & { kind: "shadow_gateway_apply_step" })["phase"], startedAt: number) => void
+    profile?: (phase: (MetricEvent & { kind: "shadow_gateway_apply_step" })["phase"], startedAt: number) => void,
+    options: ShadowGatewayApplyOptions = {}
   ): void {
+    const skipHost = options.skipObjectHost;
+    const skippedHostPredicates = skipHost
+      ? this.transcriptHostPredicates(skipHost.hostKey, skipHost.gatewayHost === true)
+      : null;
     this.bumpMutationVersion();
     this.hostSeedCache.clear();
     let stepStartedAt = Date.now();
     for (const create of transcript.creates) {
+      if (skippedHostPredicates?.createBelongsHere(create)) continue;
       const serialized = serializedObjectForTranscriptCreate(create, objectTimestamp);
       this.objects.set(create.object, this.objectFromSerializedCreate(serialized));
       if (serialized.parent) addSortedSetValue(this.objects.get(serialized.parent)?.children, serialized.id);
@@ -6255,6 +6403,7 @@ export class WooWorld {
 
     stepStartedAt = Date.now();
     for (const write of writes) {
+      if (skippedHostPredicates?.belongsHere(write.cell.object)) continue;
       this.applyTranscriptWriteInPlace(write, objectTimestamp);
     }
     profile?.("apply_writes", stepStartedAt);

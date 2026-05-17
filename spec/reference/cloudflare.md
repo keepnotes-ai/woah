@@ -202,6 +202,7 @@ interface ObjectRepository {
   // See §R3.2 below.
   appendLog(space: ObjRef, actor: ObjRef, message: Message): { seq: number; ts: number };
   recordLogOutcome(space: ObjRef, seq: number, applied_ok: boolean, observations?: Observation[], error?: ErrorValue): void;
+  saveCommittedLogEntry(space: ObjRef, entry: SpaceLogEntry): void;
   readLog(space: ObjRef, from: number, limit: number): LogReadResult;
   currentSeq(space: ObjRef): number;
   saveSpaceSnapshot(snapshot: SpaceSnapshotRecord): void;
@@ -636,6 +637,16 @@ object rows named by transcript creates/writes plus any changed session active
 scope and sequenced log row. This keeps steady-state commit storage cost
 proportional to the turn delta, not to the scope's world size. Cold opens still
 write O(world-size) rows once for a new or migrated scope.
+
+After `CommitScopeDO` accepts a v2 commit, the origin `PersistentObjectDO` must
+synchronously materialize the accepted transcript into every routed object host
+whose rows were touched by the transcript. The signed internal
+`POST /__internal/apply-v2-commit` endpoint applies only the receiver's
+host-owned slice and persists only changed object/property/log/session rows.
+The origin must complete this write-through before returning a clean applied
+REST/MCP/WS result; if any object host rejects or times out, the caller receives
+a retryable error rather than an applied frame whose public object reads would
+be stale. The endpoint is idempotent for replayed accepted transcripts.
 
 The Directory `session_route` row records the active MCP shard in `mcp_shard`
 after that shard has actually handled the session. Directory exposes the active

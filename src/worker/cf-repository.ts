@@ -545,6 +545,23 @@ export class CFObjectRepository implements ObjectRepository, WorldRepository {
     this.emitMetric({ kind: "storage_direct_write", what: "log_outcome", ms: Date.now() - startedAt, rows: 1 });
   }
 
+  saveCommittedLogEntry(space: ObjRef, entry: SpaceLogEntry): void {
+    this.ensureHostedObject(space);
+    const startedAt = Date.now();
+    this.sql.exec(
+      "INSERT OR REPLACE INTO space_message(space_id, seq, ts, actor, message, observations, applied_ok, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      space,
+      entry.seq,
+      entry.ts,
+      entry.actor,
+      stringifyValue(entry.message as unknown as WooValue),
+      stringifyValue((entry.observations ?? []) as unknown as WooValue),
+      entry.applied_ok ? 1 : 0,
+      entry.error ? stringifyValue(entry.error as unknown as WooValue) : null
+    );
+    this.emitMetric({ kind: "storage_direct_write", what: "log_outcome", ms: Date.now() - startedAt, rows: 1 });
+  }
+
   readLog(space: ObjRef, from: number, limit: number): LogReadResult {
     const rows = this.all("SELECT * FROM space_message WHERE space_id = ? AND seq >= ? ORDER BY seq LIMIT ?", space, from, limit + 1);
     const page = rows.slice(0, limit);

@@ -30,7 +30,7 @@ import {
   type ShadowBrowserStateTransfer,
   type ShadowTransportHello
 } from "../core/shadow-browser-node";
-import { transcriptLogEntry, transcriptSessionActiveScope, type ShadowCommitAccepted, type ShadowScopeHead } from "../core/shadow-commit-scope";
+import { transcriptLogEntry, transcriptSessionActiveScope, transcriptTouchedObjectIds, type ShadowCommitAccepted, type ShadowScopeHead } from "../core/shadow-commit-scope";
 import { encodeEnvelope, type ShadowEnvelope } from "../core/shadow-envelope";
 import { stableShadowJson } from "../core/shadow-cell-version";
 import type { ShadowTurnExecReply } from "../core/shadow-turn-exec";
@@ -875,21 +875,6 @@ function logsFromRows(rows: Array<{ space: string; body: string }>): SerializedW
     space,
     entries.sort((a, b) => a.seq - b.seq)
   ]);
-}
-
-function transcriptTouchedObjectIds(transcript: EffectTranscript): Set<ObjRef> {
-  const ids = new Set<ObjRef>();
-  for (const create of transcript.creates) {
-    ids.add(create.object);
-    if (create.parent) ids.add(create.parent);
-    if (create.location) ids.add(create.location);
-  }
-  for (const write of transcript.writes) {
-    if (write.cell.kind === "prop" || write.cell.kind === "location" || write.cell.kind === "contents" || write.cell.kind === "lifecycle") {
-      ids.add(write.cell.object);
-    }
-  }
-  return ids;
 }
 
 type V2EnvelopeReplyMetric = "none" | "accepted" | "live" | "missing_state" | "commit_rejected";

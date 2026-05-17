@@ -1097,6 +1097,41 @@ describe("McpHost", () => {
     });
   });
 
+  it("does not replay gateway-host writes after local v2 host write-through", () => {
+    const world = bootstrapWorld();
+    world.setProp("$system", "guest_initial_room", null);
+    const session = world.auth("guest:mcp-v2-host-skip");
+    const transcript: EffectTranscript = {
+      kind: "woo.effect_transcript.shadow.v1",
+      id: "mcp-v2-host-skip",
+      route: "sequenced",
+      scope: "the_chatroom",
+      seq: 4,
+      session: session.id,
+      call: { actor: session.actor, target: session.actor, verb: "host_skip_probe", args: [] },
+      reads: [],
+      writes: [
+        { cell: { kind: "prop", object: session.actor, name: "host_skip_probe" }, value: "updated", op: "set" }
+      ],
+      creates: [],
+      moves: [],
+      observations: [],
+      logicalInputs: [],
+      untrackedEffects: [],
+      result: true,
+      complete: true,
+      incompleteReasons: [],
+      hash: "mcp-v2-host-skip"
+    };
+
+    world.applyCommittedShadowTranscriptToHost("world", transcript, { gatewayHost: true });
+    world.applyCommittedShadowTranscript(transcript, { skipObjectHost: { hostKey: "world", gatewayHost: true } });
+
+    const actor = world.exportWorld().objects.find((obj) => obj.id === session.actor);
+    expect(actor?.properties.find(([name]) => name === "host_skip_probe")?.[1]).toBe("updated");
+    expect(actor?.propertyVersions.find(([name]) => name === "host_skip_probe")?.[1]).toBe(1);
+  });
+
   it("applies remote MCP shard commits in scope sequence order and dedups repeats", () => {
     const world = bootstrapWorld();
     world.setProp("the_chatroom", "next_seq", 5);

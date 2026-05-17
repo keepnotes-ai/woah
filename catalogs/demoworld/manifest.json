@@ -306,7 +306,7 @@
       "class": "$chatroom",
       "as": "the_deck",
       "name": "Deck",
-      "description": "A wooden deck behind the house, facing south across the pool toward the gardens. The living room is west through the glass door, and a large hot tub waits at the east end. A path leads south through the garden — locals say it ends at Santa's workshop.",
+      "description": "A wooden deck behind the house, facing south toward the gardens. The living room is west through the glass door, and a large hot tub waits at the east end. To the south, steps lead down into the garden.",
       "properties": {
         "next_seq": 1,
         "subscribers": [],
@@ -352,6 +352,31 @@
     {
       "kind": "attach_feature",
       "consumer": "the_hot_tub",
+      "feature": "$conversational"
+    },
+    {
+      "kind": "create_instance",
+      "class": "$chatroom",
+      "as": "the_garden",
+      "name": "Garden",
+      "description": "You are in a lush and tranquil garden, with gravelled paths between well-tended beds. To the south is a sign saying \"Santa's Workshop\" in small, neat lettering.",
+      "properties": {
+        "next_seq": 1,
+        "subscribers": [],
+        "last_snapshot_seq": 0,
+        "host_placement": "self",
+        "aliases": [
+          "garden"
+        ],
+        "exits": {
+          "north": "exit_garden_north",
+          "south": "exit_garden_south"
+        }
+      }
+    },
+    {
+      "kind": "attach_feature",
+      "consumer": "the_garden",
       "feature": "$conversational"
     },
     {
@@ -443,8 +468,54 @@
       "class": "$exit",
       "as": "exit_deck_south",
       "name": "south",
-      "description": "A garden path leading south, toward what locals call Santa's workshop.",
+      "description": "Stone steps leading down from the deck into the garden.",
       "anchor": "the_deck",
+      "properties": {
+        "aliases": [
+          "south",
+          "s",
+          "steps",
+          "down",
+          "garden"
+        ],
+        "source": "the_deck",
+        "dest": "the_garden",
+        "leave_msg": "You walk down the steps into the garden.",
+        "oleave_msg": "heads down the steps into the garden.",
+        "oarrive_msg": "comes down the steps into the garden."
+      }
+    },
+    {
+      "kind": "create_instance",
+      "class": "$exit",
+      "as": "exit_garden_north",
+      "name": "north",
+      "description": "The stone steps leading back up to the deck.",
+      "anchor": "the_garden",
+      "properties": {
+        "aliases": [
+          "north",
+          "n",
+          "up",
+          "steps",
+          "deck",
+          "out",
+          "back"
+        ],
+        "source": "the_garden",
+        "dest": "the_deck",
+        "leave_msg": "You walk up the steps onto the deck.",
+        "oleave_msg": "heads back up the steps to the deck.",
+        "oarrive_msg": "arrives back on the deck."
+      }
+    },
+    {
+      "kind": "create_instance",
+      "class": "$exit",
+      "as": "exit_garden_south",
+      "name": "south",
+      "description": "A magical doorway south, past the neat little sign for Santa's workshop.",
+      "anchor": "the_garden",
       "properties": {
         "aliases": [
           "south",
@@ -453,13 +524,12 @@
           "santa's",
           "santa's workshop",
           "workshop",
-          "garden",
-          "garden path"
+          "sign"
         ],
-        "source": "the_deck",
+        "source": "the_garden",
         "dest": "tasks:the_taskboard",
-        "leave_msg": "You follow the garden path south.",
-        "oleave_msg": "heads south down the garden path.",
+        "leave_msg": "You walk past the sign into the workshop.",
+        "oleave_msg": "heads south along the gravelled path.",
         "oarrive_msg": "arrives at the workshop."
       }
     },
@@ -468,7 +538,7 @@
       "class": "$exit",
       "as": "exit_taskboard_out",
       "name": "out",
-      "description": "The garden path heading north, back toward the deck.",
+      "description": "The doorway heading north, back into the garden.",
       "anchor": "tasks:the_taskboard",
       "properties": {
         "aliases": [
@@ -476,15 +546,14 @@
           "back",
           "north",
           "n",
-          "deck",
           "garden",
-          "garden path"
+          "door"
         ],
         "source": "tasks:the_taskboard",
-        "dest": "the_deck",
-        "leave_msg": "You walk back up the garden path.",
-        "oleave_msg": "heads back up the garden path.",
-        "oarrive_msg": "arrives back on the deck."
+        "dest": "the_garden",
+        "leave_msg": "You walk out into the garden.",
+        "oleave_msg": "heads out into the garden.",
+        "oarrive_msg": "arrives back in the garden."
       }
     },
     {

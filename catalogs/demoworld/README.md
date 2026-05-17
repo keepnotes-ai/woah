@@ -21,13 +21,15 @@ somewhere to land.
 
 What demoworld seeds:
 
-- Three `$chatroom` instances: `the_chatroom` (Living Room), `the_deck`,
-  `the_hot_tub`.
-- Five `$exit` instances wiring them together.
+- Four `$chatroom` instances: `the_chatroom` (Living Room), `the_deck`,
+  `the_hot_tub`, and `the_garden`.
+- `$exit` instances wiring them together, including the steps that lead
+  south from the deck into the garden and the gravelled path south from
+  the garden to `tasks:the_taskboard` ("Santa's workshop").
 - Four `$portable`/`$furniture` props: `the_couch`, `the_lamp`,
   `the_towel`, `the_mug`.
 - One `$cockatoo` instance (`the_cockatoo`) on the mantelpiece.
-- `$conversational` attached to each of the three rooms.
+- `$conversational` attached to each of the rooms.
 
 Other demo catalogs (`dubspace`, `pinboard`) mount their own seeded
 instances inside these rooms by referencing `demoworld:the_chatroom` /

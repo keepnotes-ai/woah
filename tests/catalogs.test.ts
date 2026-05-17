@@ -132,34 +132,51 @@ describe("local catalogs", () => {
     expect(world.ownVerb("$pinboard", "leave")?.kind).toBe("bytecode");
   });
 
-  it("seeds a south exit from the_deck to the_taskboard with a Santa's workshop hint", async () => {
+  it("seeds a south exit from the_deck into the_garden, then south again to the_taskboard", async () => {
     const world = createWorld({ catalogs: false });
     installLocalCatalogs(world, ["chat", "note", "tasks", "demoworld"]);
 
-    // The deck description hints at the destination so the user knows
-    // what's south before they walk there.
+    // The deck description tells the user the steps lead into the garden.
+    // Santa's workshop is no longer named on the deck — it's signposted from
+    // inside the garden instead.
     const deckDescription = world.getProp("the_deck", "description");
     expect(typeof deckDescription).toBe("string");
-    expect(String(deckDescription)).toMatch(/Santa's workshop/i);
+    expect(String(deckDescription)).toMatch(/steps lead.*into the garden/i);
     expect(String(deckDescription)).toMatch(/south/i);
 
     // The exits map gains a `south` slot pointing at the new exit object.
     const exits = world.getProp("the_deck", "exits");
     expect(exits).toMatchObject({ south: "exit_deck_south" });
 
-    // The exit object lives at the deck and routes to the_taskboard. The
-    // taskboard's name itself doesn't change — only the deck's flavour
-    // copy renames it as "Santa's workshop".
+    // The exit object lives at the deck and routes to the_garden, the new
+    // intermediate room between the deck and the taskboard.
     expect(world.object("exit_deck_south").parent).toBe("$exit");
     expect(world.getProp("exit_deck_south", "source")).toBe("the_deck");
-    expect(world.getProp("exit_deck_south", "dest")).toBe("the_taskboard");
-    const aliases = world.getProp("exit_deck_south", "aliases");
-    expect(Array.isArray(aliases)).toBe(true);
-    expect(aliases as string[]).toEqual(expect.arrayContaining(["south", "s", "santa's workshop", "workshop"]));
+    expect(world.getProp("exit_deck_south", "dest")).toBe("the_garden");
+    const deckSouthAliases = world.getProp("exit_deck_south", "aliases");
+    expect(Array.isArray(deckSouthAliases)).toBe(true);
+    expect(deckSouthAliases as string[]).toEqual(expect.arrayContaining(["south", "s", "garden", "steps"]));
+
+    // The garden's description carries the Santa's workshop signpost text.
+    const gardenDescription = world.getProp("the_garden", "description");
+    expect(typeof gardenDescription).toBe("string");
+    expect(String(gardenDescription)).toMatch(/Santa's Workshop/i);
+    expect(String(gardenDescription)).toMatch(/garden/i);
+
+    // From the garden, south continues on to the taskboard. The taskboard's
+    // name itself doesn't change — only the garden's flavour copy points at
+    // "Santa's workshop".
+    const gardenExits = world.getProp("the_garden", "exits");
+    expect(gardenExits).toMatchObject({ north: "exit_garden_north", south: "exit_garden_south" });
+    expect(world.getProp("exit_garden_south", "source")).toBe("the_garden");
+    expect(world.getProp("exit_garden_south", "dest")).toBe("the_taskboard");
+    const gardenSouthAliases = world.getProp("exit_garden_south", "aliases");
+    expect(Array.isArray(gardenSouthAliases)).toBe(true);
+    expect(gardenSouthAliases as string[]).toEqual(expect.arrayContaining(["south", "s", "santa's workshop", "workshop"]));
     expect(world.getProp("the_taskboard", "name")).toBe("Taskboard");
   });
 
-  it("wires the_taskboard back to the deck via an `out` exit on $room", async () => {
+  it("wires the_taskboard back to the garden, and the garden back to the deck", async () => {
     const world = createWorld({ catalogs: false });
     installLocalCatalogs(world, ["chat", "note", "tasks", "demoworld"]);
 
@@ -169,16 +186,24 @@ describe("local catalogs", () => {
     expect(world.isDescendantOf("the_taskboard", "$room")).toBe(true);
 
     // demoworld set the_taskboard.exits to point `out` at the new exit
-    // object back to the_deck.
+    // object back into the garden.
     const exits = world.getProp("the_taskboard", "exits");
     expect(exits).toMatchObject({ out: "exit_taskboard_out" });
 
     expect(world.object("exit_taskboard_out").parent).toBe("$exit");
     expect(world.getProp("exit_taskboard_out", "source")).toBe("the_taskboard");
-    expect(world.getProp("exit_taskboard_out", "dest")).toBe("the_deck");
-    const aliases = world.getProp("exit_taskboard_out", "aliases");
-    expect(Array.isArray(aliases)).toBe(true);
-    expect(aliases as string[]).toEqual(expect.arrayContaining(["out", "back", "north", "n"]));
+    expect(world.getProp("exit_taskboard_out", "dest")).toBe("the_garden");
+    const outAliases = world.getProp("exit_taskboard_out", "aliases");
+    expect(Array.isArray(outAliases)).toBe(true);
+    expect(outAliases as string[]).toEqual(expect.arrayContaining(["out", "back", "north", "n"]));
+
+    // The garden's north exit climbs back up to the deck.
+    expect(world.object("exit_garden_north").parent).toBe("$exit");
+    expect(world.getProp("exit_garden_north", "source")).toBe("the_garden");
+    expect(world.getProp("exit_garden_north", "dest")).toBe("the_deck");
+    const northAliases = world.getProp("exit_garden_north", "aliases");
+    expect(Array.isArray(northAliases)).toBe(true);
+    expect(northAliases as string[]).toEqual(expect.arrayContaining(["north", "n", "deck", "out"]));
 
     // `match_exit` is inherited from $room and must resolve `out` against
     // the taskboard's exits map. This is what `:out` (also inherited)
@@ -523,8 +548,9 @@ describe("local catalogs", () => {
       alias: "chat",
       allowImplementationHints: false
     });
-    // demoworld now depends on tasks (for the deck → Santa's workshop south
-    // exit); tasks itself depends on note. Install both before demoworld.
+    // demoworld now depends on tasks (for the deck → garden → Santa's
+    // workshop south exits); tasks itself depends on note. Install both
+    // before demoworld.
     installCatalogManifest(world, readManifest("note") as unknown as RuntimeCatalogManifest, {
       tap: "github:example/woo-test",
       alias: "note",
@@ -608,8 +634,8 @@ describe("local catalogs", () => {
       alias: "chat",
       allowImplementationHints: false
     });
-    // demoworld → tasks → note dependency chain (the deck has a Santa's
-    // workshop south exit pointing at the_taskboard).
+    // demoworld → tasks → note dependency chain (the deck has a south
+    // exit into the garden, which itself routes south to the_taskboard).
     installCatalogManifest(world, readManifest("note") as unknown as RuntimeCatalogManifest, {
       tap: "github:example/woo-test",
       alias: "note",

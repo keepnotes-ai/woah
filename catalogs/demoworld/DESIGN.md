@@ -32,6 +32,16 @@ already depends on every demo it references.
 +---------------+        +---------------+        +---------------+
        |                       |                          
        |                       +-- the_pinboard (pinboard catalog)
+       |                       |
+       |                       S (steps)
+       |                       v
+       |                  +---------------+
+       |                  |  the_garden   |
+       |                  +---------------+
+       |                       |
+       |                       S (gravelled path)
+       |                       v
+       |                  the_taskboard (tasks catalog — "Santa's workshop")
        |
        +-- the_dubspace (dubspace catalog)
        +-- the_couch ($furniture), the_lamp ($portable),

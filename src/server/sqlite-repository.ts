@@ -399,6 +399,22 @@ export class LocalSQLiteRepository implements WorldRepository, ObjectRepository 
       .run(stringifyValue(observations as unknown as WooValue), applied_ok ? 1 : 0, error ? stringifyValue(error as unknown as WooValue) : null, space, seq);
   }
 
+  saveCommittedLogEntry(space: ObjRef, entry: SpaceLogEntry): void {
+    this.ensureHostedObject(space);
+    this.db
+      .prepare("INSERT OR REPLACE INTO space_message(space_id, seq, ts, actor, message, observations, applied_ok, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(
+        space,
+        entry.seq,
+        entry.ts,
+        entry.actor,
+        stringifyValue(entry.message as unknown as WooValue),
+        stringifyValue((entry.observations ?? []) as unknown as WooValue),
+        entry.applied_ok ? 1 : 0,
+        entry.error ? stringifyValue(entry.error as unknown as WooValue) : null
+      );
+  }
+
   readLog(space: ObjRef, from: number, limit: number): LogReadResult {
     const rows = this.db.prepare("SELECT * FROM space_message WHERE space_id = ? AND seq >= ? ORDER BY seq LIMIT ?").all(space, from, limit + 1) as Row[];
     const page = rows.slice(0, limit);

@@ -392,6 +392,22 @@ export function transcriptSessionActiveScope(transcript: EffectTranscript): { se
   return { session: transcript.session, actor: transcript.call.actor, activeScope: actorMove.to };
 }
 
+export function transcriptTouchedObjectIds(transcript: EffectTranscript): Set<ObjRef> {
+  const ids = new Set<ObjRef>();
+  for (const create of transcript.creates) {
+    ids.add(create.object);
+    if (create.anchor) ids.add(create.anchor);
+    if (create.parent) ids.add(create.parent);
+    if (create.location) ids.add(create.location);
+  }
+  for (const write of transcript.writes) {
+    if (write.cell.kind === "prop" || write.cell.kind === "location" || write.cell.kind === "contents" || write.cell.kind === "lifecycle") {
+      ids.add(write.cell.object);
+    }
+  }
+  return ids;
+}
+
 function applyTranscriptSessionLocation(sessions: SerializedWorld["sessions"], transcript: EffectTranscript): SerializedWorld["sessions"] {
   const update = transcriptSessionActiveScope(transcript);
   if (!update) return sessions;

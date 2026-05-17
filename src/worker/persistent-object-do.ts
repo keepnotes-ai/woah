@@ -57,7 +57,7 @@ import { buildTransportErrorEnvelope, decodeEnvelope, encodeEnvelope, type Shado
 import type { ShadowTurnExecReply, ShadowTurnExecRequest } from "../core/shadow-turn-exec";
 import { runShadowTurnCall, type ShadowTurnCall } from "../core/shadow-turn-call";
 import { shadowTurnKeyFromTranscript } from "../core/turn-key";
-import { applyAcceptedShadowFrame, type ShadowCommitAccepted, type ShadowScopeHead } from "../core/shadow-commit-scope";
+import { applyAcceptedShadowFrame, transcriptTouchedObjectIds, type ShadowCommitAccepted, type ShadowScopeHead } from "../core/shadow-commit-scope";
 import { CFObjectRepository } from "./cf-repository";
 import { McpGateway, type McpV2EnvelopeResult, type McpV2OpenResult } from "../mcp/gateway";
 import { signInternalRequest, verifyInternalRequest } from "./internal-auth";
@@ -113,6 +113,15 @@ type RestV2RelayClient = {
   relay: ShadowBrowserRelayShim;
   openedAt: number;
   nextTurn: number;
+};
+
+type V2LocalHostMaterialization = {
+  hostKey: string;
+  gatewayHost: boolean;
+} | null;
+
+type V2FanoutDelivery = {
+  localHostMaterialized: V2LocalHostMaterialization;
 };
 
 const WORLD_HOST = "world";
@@ -671,8 +680,8 @@ export class PersistentObjectDO {
           envelope: async (scope, body): Promise<McpV2EnvelopeResult> => {
             world.touchSessionInput(body.session);
             const result = await this.v2CommitScopePost<CommitScopeEnvelopeResponse>(scope, "/v2/envelope", body as unknown as Record<string, unknown>);
-            await this.deliverV2Fanout(world, scope, result, body.session);
-            return result;
+            const delivery = await this.deliverV2Fanout(world, scope, result, body.session);
+            return { ...result, local_host_materialized: delivery.localHostMaterialized };
           }
         },
         broadcasts: {}
@@ -1889,6 +1898,19 @@ export class PersistentObjectDO {
         return jsonResponse({ ok: true });
       }
 
+      if (request.method === "POST" && pathname === "/__internal/apply-v2-commit") {
+        const scope = String(body.scope ?? "") as ObjRef;
+        if (!scope) throw wooError("E_INVARG", "apply-v2-commit requires scope");
+        if (!isShadowCommitAccepted(body.commit)) throw wooError("E_INVARG", "apply-v2-commit requires accepted commit");
+        if (!body.transcript || typeof body.transcript !== "object" || Array.isArray(body.transcript)) {
+          throw wooError("E_INVARG", "apply-v2-commit requires transcript");
+        }
+        const commit = body.commit as ShadowCommitAccepted;
+        const transcript = body.transcript as EffectTranscript;
+        if (commit.position.scope !== scope || transcript.scope !== scope) throw wooError("E_INVARG", "apply-v2-commit scope mismatch");
+        return jsonResponse(world.applyCommittedShadowTranscriptToHost(hostKey, transcript, { gatewayHost: hostKey === WORLD_HOST }));
+      }
+
       if (request.method === "POST" && pathname === "/__internal/host-seed") {
         const host = String(body.host ?? "") as ObjRef;
         if (!host) throw wooError("E_INVARG", "host-seed requires host");
@@ -2562,9 +2584,9 @@ export class PersistentObjectDO {
         actor: att.actor,
         envelope: encoded
       });
-      await this.applyV2CommittedTranscript(world, result.reply, att.sessionId);
+      const delivery = await this.deliverV2Fanout(world, att.scope, result, att.sessionId);
+      await this.applyV2CommittedTranscript(world, result.reply, att.sessionId, delivery.localHostMaterialized);
       if (result.reply) ws.send(result.reply);
-      await this.deliverV2Fanout(world, att.scope, result, att.sessionId);
     } catch (err) {
       ws.send(encodeEnvelope(buildTransportErrorEnvelope({
         id: `${this.durableHostKey()}:error:${Date.now()}`,
@@ -2709,11 +2731,11 @@ export class PersistentObjectDO {
           actor: input.actor,
           envelope
         });
-        await this.deliverV2Fanout(world, input.scope, result, input.session.id);
+        const delivery = await this.deliverV2Fanout(world, input.scope, result, input.session.id);
         if (!result.reply) throw wooError("E_INTERNAL", "v2 REST turn produced no reply");
         const reply = decodeEnvelope<ShadowTurnExecReply>(result.reply);
         if (attempt === 0 && this.restV2ReplyNeedsRelayRepair(reply.body)) continue;
-        await this.applyV2CommittedTranscript(world, result.reply, input.session.id);
+        await this.applyV2CommittedTranscript(world, result.reply, input.session.id, delivery.localHostMaterialized);
         return restFrameFromTurnReply(input.scope, reply.body);
       }
       throw wooError("E_INTERNAL", "v2 REST live turn retry exhausted");
@@ -2773,11 +2795,11 @@ export class PersistentObjectDO {
         actor: input.actor,
         envelope
       });
-      await this.deliverV2Fanout(world, commitScope, result, input.session.id);
+      const delivery = await this.deliverV2Fanout(world, commitScope, result, input.session.id);
       if (!result.reply) throw wooError("E_INTERNAL", "v2 REST turn produced no reply");
       const reply = decodeEnvelope<ShadowTurnExecReply>(result.reply);
       if (attempt === 0 && this.restV2ReplyNeedsRelayRepair(reply.body)) continue;
-      await this.applyV2CommittedTranscript(world, result.reply, input.session.id);
+      await this.applyV2CommittedTranscript(world, result.reply, input.session.id, delivery.localHostMaterialized);
       return restFrameFromTurnReply(input.scope, reply.body);
     }
     throw wooError("E_INTERNAL", "v2 REST durable turn retry exhausted");
@@ -2845,7 +2867,12 @@ export class PersistentObjectDO {
     return run.frame;
   }
 
-  private async applyV2CommittedTranscript(world: WooWorld, replyText: string | null, sessionId: string): Promise<void> {
+  private async applyV2CommittedTranscript(
+    world: WooWorld,
+    replyText: string | null,
+    sessionId: string,
+    localHostMaterialized: V2LocalHostMaterialization = null
+  ): Promise<void> {
     if (!replyText) return;
     const reply = decodeEnvelope<ShadowTurnExecReply>(replyText);
     if (reply.body.ok !== true || !reply.body.commit || !reply.body.transcript) return;
@@ -2859,7 +2886,9 @@ export class PersistentObjectDO {
       : null;
     if (callScope && callScope !== reply.body.commit.position.scope) this.restV2Relays.delete(callScope);
     const revokedBefore = this.revokedApiKeyIds(world);
-    world.applyCommittedShadowTranscript(reply.body.transcript);
+    world.applyCommittedShadowTranscript(reply.body.transcript, localHostMaterialized
+      ? { skipObjectHost: localHostMaterialized }
+      : {});
     await this.cleanupNewlyRevokedApiKeys(world, revokedBefore);
     const session = world.sessions.get(sessionId);
     if (session) {
@@ -2910,17 +2939,64 @@ export class PersistentObjectDO {
     scope: ObjRef,
     result: CommitScopeEnvelopeResponse,
     originSessionId?: string | null
-  ): Promise<void> {
+  ): Promise<V2FanoutDelivery> {
     const fanout = result.fanout ?? [];
-    this.sendV2Fanout(fanout);
-    if (!result.reply) return;
+    if (!result.reply) {
+      this.sendV2Fanout(fanout);
+      return { localHostMaterialized: null };
+    }
     const reply = decodeEnvelope<ShadowTurnExecReply>(result.reply).body;
-    if (reply.ok !== true || !reply.commit || !reply.transcript) return;
+    if (reply.ok !== true || !reply.commit || !reply.transcript) {
+      this.sendV2Fanout(fanout);
+      return { localHostMaterialized: null };
+    }
+    const revokedBefore = this.revokedApiKeyIds(world);
+    const localHostMaterialized = await this.writeThroughV2CommitToObjectHosts(world, reply.commit.position.scope, reply.commit, reply.transcript);
+    await this.cleanupNewlyRevokedApiKeys(world, revokedBefore);
+    this.sendV2Fanout(fanout);
     const frame = restFrameFromTurnReply(scope, reply);
     const observations = "observations" in frame && frame.observations.length > 0
       ? frame.observations
       : reply.commit.observations;
     await this.deliverMcpCommitFanout(world, scope, fanout, { ...reply.commit, observations }, reply.transcript, originSessionId ?? null);
+    return { localHostMaterialized };
+  }
+
+  private async writeThroughV2CommitToObjectHosts(
+    world: WooWorld,
+    scope: ObjRef,
+    commit: ShadowCommitAccepted,
+    transcript: EffectTranscript
+  ): Promise<V2LocalHostMaterialization> {
+    const startedAt = Date.now();
+    const touched = transcriptTouchedObjectIds(transcript);
+    touched.add(scope);
+    const localHost = this.durableHostKey();
+    const hosts = new Set<string>();
+    let localApplied = false;
+    try {
+      for (const id of touched) {
+        const host = await this.resolveObjectHostForWorld(world, id, localHost);
+        if (host) hosts.add(host);
+      }
+      if (hosts.has(localHost)) {
+        world.applyCommittedShadowTranscriptToHost(localHost, transcript, { gatewayHost: localHost === WORLD_HOST });
+        hosts.delete(localHost);
+        localApplied = true;
+      }
+      await Promise.all(Array.from(hosts, (host) => this.forwardInternalChecked<{ ok: true }>(host, "/__internal/apply-v2-commit", {
+        scope,
+        commit: commit as unknown as WooValue,
+        transcript: transcript as unknown as WooValue
+      }, { timeoutMs: this.hostWriteRpcTimeoutMs() })));
+      world.recordMetric({ kind: "v2_host_apply_fanout", scope, hosts: hosts.size + (localApplied ? 1 : 0), touched: touched.size, ms: Date.now() - startedAt, status: "ok" });
+      return localApplied ? { hostKey: localHost, gatewayHost: localHost === WORLD_HOST } : null;
+    } catch (err) {
+      const error = normalizeError(err);
+      world.recordMetric({ kind: "v2_host_apply_fanout", scope, hosts: hosts.size, touched: touched.size, ms: Date.now() - startedAt, status: "error", error: error.code });
+      console.warn("woo.v2_host_apply_fanout.failed", { scope, error });
+      throw wooError("E_RETRY", `v2 commit accepted but object-host write-through failed: ${error.message}`, { scope, error });
+    }
   }
 
   private async deliverMcpCommitFanout(

@@ -727,9 +727,16 @@ describe("CFObjectRepository production-shape coverage", () => {
         if (name !== "directory") throw new Error(`unexpected Directory DO ${name}`);
         return directory;
       }),
-      WOO: new FakeDurableObjectNamespace((name) => {
-        throw new Error(`unexpected Woo DO ${name}`);
-      }),
+      WOO: new FakeDurableObjectNamespace((name) => ({
+        fetch: async (request: Request): Promise<Response> => {
+          if (new URL(request.url).pathname === "/__internal/apply-v2-commit") {
+            return new Response(JSON.stringify({ ok: true, host: name, objects: 0, properties: 0, logs: 0, sessions: 0, creates: 0, writes: 0 }), {
+              headers: { "content-type": "application/json" }
+            });
+          }
+          throw new Error(`unexpected Woo DO ${name}`);
+        }
+      })),
       COMMIT_SCOPE: new FakeDurableObjectNamespace((name) => {
         let state = commitStates.get(name);
         if (!state) {
@@ -1633,6 +1640,186 @@ describe("CFObjectRepository production-shape coverage", () => {
       const rosterIds = (who.result.structuredContent.result as Array<{ id?: unknown }>).map((row) => row.id);
       expect(rosterIds, JSON.stringify(who.result.structuredContent)).toEqual(expect.arrayContaining([aliceActor, bobActor]));
     } finally {
+      logSpy.mockRestore();
+      directoryState.close();
+      for (const state of wooStates.values()) state.close();
+    }
+  });
+
+  it("persists v2 REST writes to the routed object host before reporting success", async () => {
+    const directoryState = new FakeDurableObjectState("directory");
+    const directory = new DirectoryDO(directoryState as unknown as DurableObjectState, { WOO_INTERNAL_SECRET: "cf-test-secret" });
+    const wooStates = new Map<string, FakeDurableObjectState>();
+    const wooObjects = new Map<string, PersistentObjectDO>();
+    const applyBodies: Record<string, unknown>[] = [];
+    let env: Env;
+    const wooNamespace = new FakeDurableObjectNamespace((name) => {
+      let object = wooObjects.get(name);
+      if (!object) {
+        const state = new FakeDurableObjectState(name);
+        wooStates.set(name, state);
+        object = new PersistentObjectDO(state as unknown as DurableObjectState, env);
+        wooObjects.set(name, object);
+      }
+      return {
+        fetch: async (request: Request): Promise<Response> => {
+          if (new URL(request.url).pathname === "/__internal/apply-v2-commit") {
+            applyBodies.push(await request.clone().json() as Record<string, unknown>);
+          }
+          return await object.fetch(request);
+        }
+      };
+    });
+    env = {
+      WOO_INITIAL_WIZARD_TOKEN: "cf-weather-write-through-token",
+      WOO_INTERNAL_SECRET: "cf-test-secret",
+      WOO_AUTO_INSTALL_CATALOGS: "chat,demoworld,block,weather,blocks-demo",
+      DIRECTORY: new FakeDurableObjectNamespace((name) => {
+        if (name !== "directory") throw new Error(`unexpected Directory DO ${name}`);
+        return directory;
+      }),
+      WOO: wooNamespace,
+      COMMIT_SCOPE: fakeCommitScopeNamespace()
+    } as unknown as Env;
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    async function post(path: string, body: Record<string, unknown>, session?: string): Promise<{ status: number; body: Record<string, any> }> {
+      const response = await worker.fetch(new Request(`https://woo.test${path}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(session ? { authorization: `Session ${session}` } : {})
+        },
+        body: JSON.stringify(body)
+      }), env, {});
+      return { status: response.status, body: await response.json() as Record<string, any> };
+    }
+
+    async function get(path: string, session: string): Promise<{ status: number; body: Record<string, any> }> {
+      const response = await worker.fetch(new Request(`https://woo.test${path}`, {
+        headers: { authorization: `Session ${session}` }
+      }), env, {});
+      return { status: response.status, body: await response.json() as Record<string, any> };
+    }
+
+    try {
+      const auth = await post("/api/auth", { token: "wizard:cf-weather-write-through-token" });
+      expect(auth.status).toBe(200);
+      const session = String(auth.body.session);
+
+      const single = await post("/api/objects/the_weather/calls/set_property", { args: ["last_error", "probe"] }, session);
+      expect(single.status, JSON.stringify(single.body)).toBe(200);
+      expect(single.body.result).toBe("probe");
+
+      const readSingle = await get("/api/objects/the_weather/properties/last_error", session);
+      expect(readSingle.status, JSON.stringify(readSingle.body)).toBe(200);
+      expect(readSingle.body).toMatchObject({ has_value: true, value: "probe" });
+
+      const bulk = await post("/api/objects/the_weather/calls/set_properties", {
+        args: [{ current: { temperature: 72 }, daily: [{ day: "today" }] }]
+      }, session);
+      expect(bulk.status, JSON.stringify(bulk.body)).toBe(200);
+
+      const readCurrent = await get("/api/objects/the_weather/properties/current", session);
+      expect(readCurrent.status, JSON.stringify(readCurrent.body)).toBe(200);
+      expect(readCurrent.body.value).toEqual({ temperature: 72 });
+      const readDaily = await get("/api/objects/the_weather/properties/daily", session);
+      expect(readDaily.status, JSON.stringify(readDaily.body)).toBe(200);
+      expect(readDaily.body.value).toEqual([{ day: "today" }]);
+
+      const lastApply = applyBodies.at(-1);
+      expect(lastApply).toBeTruthy();
+      for (let i = 0; i < 2; i += 1) {
+        const request = await signInternalRequest(env, new Request("https://woo.internal/__internal/apply-v2-commit", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+            "x-woo-host-key": "the_chatroom"
+          },
+          body: JSON.stringify(lastApply)
+        }));
+        const response = await env.WOO.get(env.WOO.idFromName("the_chatroom")).fetch(request);
+        expect(response.ok, await response.clone().text()).toBe(true);
+      }
+      const readAfterReplay = await get("/api/objects/the_weather/properties/current", session);
+      expect(readAfterReplay.status, JSON.stringify(readAfterReplay.body)).toBe(200);
+      expect(readAfterReplay.body.value).toEqual({ temperature: 72 });
+
+      // Simulate a cold object-host DO: the value must be in the host's
+      // repository, not just the warm gateway's in-memory v2 cache.
+      wooObjects.delete("the_chatroom");
+      const readAfterColdHost = await get("/api/objects/the_weather/properties/last_error", session);
+      expect(readAfterColdHost.status, JSON.stringify(readAfterColdHost.body)).toBe(200);
+      expect(readAfterColdHost.body).toMatchObject({ has_value: true, value: "probe" });
+    } finally {
+      logSpy.mockRestore();
+      directoryState.close();
+      for (const state of wooStates.values()) state.close();
+    }
+  });
+
+  it("returns a retryable error when accepted v2 REST writes cannot reach the object host", async () => {
+    const directoryState = new FakeDurableObjectState("directory");
+    const directory = new DirectoryDO(directoryState as unknown as DurableObjectState, { WOO_INTERNAL_SECRET: "cf-test-secret" });
+    const wooStates = new Map<string, FakeDurableObjectState>();
+    const wooObjects = new Map<string, PersistentObjectDO>();
+    let env: Env;
+    const wooNamespace = new FakeDurableObjectNamespace((name) => {
+      let object = wooObjects.get(name);
+      if (!object) {
+        const state = new FakeDurableObjectState(name);
+        wooStates.set(name, state);
+        object = new PersistentObjectDO(state as unknown as DurableObjectState, env);
+        wooObjects.set(name, object);
+      }
+      return {
+        fetch: async (request: Request): Promise<Response> => {
+          if (name === "the_chatroom" && new URL(request.url).pathname === "/__internal/apply-v2-commit") {
+            return new Response(JSON.stringify({ error: { code: "E_STORAGE", message: "forced host apply failure" } }), {
+              status: 500,
+              headers: { "content-type": "application/json" }
+            });
+          }
+          return await object.fetch(request);
+        }
+      };
+    });
+    env = {
+      WOO_INITIAL_WIZARD_TOKEN: "cf-weather-write-through-fail-token",
+      WOO_INTERNAL_SECRET: "cf-test-secret",
+      WOO_AUTO_INSTALL_CATALOGS: "chat,demoworld,block,weather,blocks-demo",
+      DIRECTORY: new FakeDurableObjectNamespace((name) => {
+        if (name !== "directory") throw new Error(`unexpected Directory DO ${name}`);
+        return directory;
+      }),
+      WOO: wooNamespace,
+      COMMIT_SCOPE: fakeCommitScopeNamespace()
+    } as unknown as Env;
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    async function post(path: string, body: Record<string, unknown>, session?: string): Promise<{ status: number; body: Record<string, any> }> {
+      const response = await worker.fetch(new Request(`https://woo.test${path}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(session ? { authorization: `Session ${session}` } : {})
+        },
+        body: JSON.stringify(body)
+      }), env, {});
+      return { status: response.status, body: await response.json() as Record<string, any> };
+    }
+
+    try {
+      const auth = await post("/api/auth", { token: "wizard:cf-weather-write-through-fail-token" });
+      expect(auth.status).toBe(200);
+      const session = String(auth.body.session);
+
+      const failed = await post("/api/objects/the_weather/calls/set_property", { args: ["last_error", "probe"] }, session);
+      expect(failed.status, JSON.stringify(failed.body)).toBe(503);
+      expect(failed.body.error).toMatchObject({ code: "E_RETRY" });
+    } finally {
+      warnSpy.mockRestore();
       logSpy.mockRestore();
       directoryState.close();
       for (const state of wooStates.values()) state.close();

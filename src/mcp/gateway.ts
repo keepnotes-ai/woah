@@ -82,6 +82,10 @@ export type McpV2EnvelopeResult = {
   ok: true;
   reply: string | null;
   head?: ShadowScopeHead;
+  local_host_materialized?: {
+    hostKey: string;
+    gatewayHost?: boolean;
+  } | null;
 };
 
 type V2ScopeClient = {
@@ -478,7 +482,7 @@ export class McpGateway {
       return { op: "error", id, error: { code: reply.reason, message: reply.reason, value: reply as unknown as WooValue } };
     }
     if (reply.commit) {
-      this.acceptV2Commit(client, reply, sessionId);
+      this.acceptV2Commit(client, reply, sessionId, result.local_host_materialized ?? null);
     }
     return mcpFrameFromTurnReply(scope, reply);
   }
@@ -519,10 +523,17 @@ export class McpGateway {
     return client;
   }
 
-  private acceptV2Commit(client: V2ScopeClient, reply: Extract<ShadowTurnExecReply, { ok: true }>, originSessionId: string): void {
+  private acceptV2Commit(
+    client: V2ScopeClient,
+    reply: Extract<ShadowTurnExecReply, { ok: true }>,
+    originSessionId: string,
+    localHostMaterialized: McpV2EnvelopeResult["local_host_materialized"] = null
+  ): void {
     if (!reply.commit || !reply.transcript) return;
     applyAcceptedShadowFrame(client.relay.commit_scope, reply.commit, reply.transcript);
-    this.world.applyCommittedShadowTranscript(reply.transcript);
+    this.world.applyCommittedShadowTranscript(reply.transcript, localHostMaterialized
+      ? { skipObjectHost: { hostKey: localHostMaterialized.hostKey, gatewayHost: localHostMaterialized.gatewayHost === true } }
+      : {});
     this.propagateTranscriptToOtherScopes(reply.commit.position.scope, reply.transcript);
     this.host.routeShadowAcceptedFrame(reply.commit, originSessionId, reply.transcript);
   }

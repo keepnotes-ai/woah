@@ -165,6 +165,9 @@ CREATE INDEX task_resume_at ON task(resume_at) WHERE state = 'suspended';
 -- recordLogOutcome updates applied_ok and error after the behavior savepoint.
 -- Both happen in one outer transaction, so committed rows should never retain
 -- applied_ok=NULL; a null committed row is storage corruption or migration debt.
+-- v2 write-through may also call saveCommittedLogEntry for an already accepted
+-- transcript; that path upserts the final row by (space_id, seq) and does not
+-- allocate a new seq or mutate next_seq.
 -- See semantics/space.md.
 CREATE TABLE space_message (
   space_id    TEXT NOT NULL,

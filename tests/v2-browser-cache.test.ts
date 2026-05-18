@@ -60,6 +60,52 @@ describe("v2 browser cache reducer", () => {
     ]);
   });
 
+  it("persists delta projection patches as patch mutations", () => {
+    const accepted = {
+      kind: "woo.commit.accepted.shadow.v1",
+      id: "turn-patch",
+      position: { kind: "woo.scope_head.shadow.v1", scope: "the_dubspace", epoch: 1, seq: 2, hash: "h2" },
+      receipt: { kind: "woo.commit_receipt.shadow.v1", id: "turn-patch", accepted: true },
+      transcript_hash: "tp",
+      post_state_hash: "p2",
+      observations: []
+    };
+    const transcript = {
+      kind: "woo.effect_transcript.shadow.v1",
+      id: "turn-patch",
+      scope: "the_dubspace",
+      seq: 2,
+      hash: "tp",
+      complete: true
+    };
+    const patch = {
+      kind: "woo.scope_projection_patch.shadow.v1",
+      scope: "the_dubspace",
+      base: { kind: "woo.scope_head.shadow.v1", scope: "the_dubspace", epoch: 1, seq: 1, hash: "h1" },
+      to: accepted.position,
+      fields: { seq: 2 },
+      objects: { order: ["the_dubspace"], upsert: [], remove: [] }
+    };
+    const envelope = envelopeFor("woo.state.transfer.shadow.v1", {
+      kind: "woo.state.transfer.shadow.v1",
+      mode: "delta",
+      scope: "the_dubspace",
+      to: accepted.position,
+      projection_patch: patch,
+      applied: [accepted],
+      transcript_tail: [transcript],
+      proof: { kind: "test" }
+    });
+
+    expect(v2BrowserCacheMutationsForEnvelope(envelope)).toEqual([
+      { kind: "projection_patch", scope: "the_dubspace", head: accepted.position, patch },
+      { kind: "meta", key: "head:the_dubspace", value: accepted.position },
+      { kind: "meta", key: "catchup_required", value: false },
+      { kind: "applied_frame", frame: accepted, transcript },
+      { kind: "transcript", transcript }
+    ]);
+  });
+
   it("marks reset errors as requiring catch-up and clears pending replies on replies", () => {
     expect(v2BrowserCacheMutationsForEnvelope(envelopeFor("woo.transport.error.v1", {
       kind: "woo.transport.error.v1",

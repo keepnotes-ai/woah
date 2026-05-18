@@ -1,7 +1,7 @@
 import { decodeEnvelope, encodeEnvelope, type ShadowEnvelope } from "../core/shadow-envelope";
 import type { EffectTranscript } from "../core/effect-transcript";
 import type { ShadowCommitAccepted, ShadowScopeHead } from "../core/shadow-commit-scope";
-import type { ShadowLiveEvent, ShadowTurnIntentRequest } from "../core/shadow-browser-node";
+import { applyShadowScopeProjectionPatch, type ShadowLiveEvent, type ShadowTurnIntentRequest } from "../core/shadow-browser-node";
 import type { ShadowTurnExecReply } from "../core/shadow-turn-exec";
 import type { WooValue } from "../core/types";
 import { isShadowScopeHead } from "../core/shadow-scope-head";
@@ -217,8 +217,9 @@ async function receiveFrame(encoded: string): Promise<void> {
   let installedExecutableState = false;
   const receivedStateTransfer = envelope.type === "woo.state.transfer.shadow.v1";
   for (const mutation of v2BrowserCacheMutationsForEnvelope(envelope)) {
-    await applyCacheMutation(mutation);
+    const applied = await applyCacheMutation(mutation);
     if (mutation.kind === "projection") postProjection(mutation.scope, mutation.head, mutation.projection);
+    if (applied?.kind === "projection") postProjection(applied.scope, applied.head, applied.projection);
     if (mutation.kind === "applied_frame") postAppliedFrame(mutation.frame, mutation.transcript);
     if (mutation.kind === "object_page" || mutation.kind === "state_page") installedExecutableState = true;
   }
@@ -367,7 +368,7 @@ async function allPending(): Promise<PendingEnvelope[]> {
   return pending.sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id));
 }
 
-async function applyCacheMutation(mutation: V2BrowserCacheMutation): Promise<void> {
+async function applyCacheMutation(mutation: V2BrowserCacheMutation): Promise<{ kind: "projection"; scope: string; head: ShadowScopeHead; projection: unknown } | void> {
   switch (mutation.kind) {
     case "meta":
       await putMeta(mutation.key, mutation.value);
@@ -378,6 +379,13 @@ async function applyCacheMutation(mutation: V2BrowserCacheMutation): Promise<voi
     case "projection":
       await putProjection(mutation.scope, mutation.head, mutation.projection);
       return;
+    case "projection_patch": {
+      const row = await getProjection(mutation.scope);
+      const baseHead = isProjectionRow(row) && isShadowScopeHead(row.head) ? row.head : undefined;
+      const projection = applyShadowScopeProjectionPatch(isProjectionRow(row) ? row.projection : undefined, mutation.patch, baseHead);
+      await putProjection(mutation.scope, mutation.head, projection);
+      return { kind: "projection", scope: mutation.scope, head: mutation.head, projection };
+    }
     case "applied_frame":
       await putAppliedFrame(mutation.frame);
       return;
@@ -400,6 +408,10 @@ async function putProjection(scope: string, head: unknown, projection: unknown):
 async function getProjection(scope: string): Promise<unknown | undefined> {
   if (!scope) return undefined;
   return await tx<unknown | undefined>(PROJECTION_STORE, "readonly", (store) => store.get(scope));
+}
+
+function isProjectionRow(value: unknown): value is { scope: string; head: unknown; projection: unknown } {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value) && typeof (value as { scope?: unknown }).scope === "string" && "projection" in value);
 }
 
 async function postCachedProjection(scope: string): Promise<void> {

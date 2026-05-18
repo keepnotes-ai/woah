@@ -20,6 +20,7 @@ import {
   receiveShadowBrowserEnvelope,
   receiveShadowBrowserEnvelopeReceipt,
   setShadowBrowserSessionToken,
+  SHADOW_SCOPE_PROJECTION_PATCH_FIELDS,
   shadowLiveEventsForTranscript,
   shadowBrowserEnvelope,
   shadowBrowserSessionBearer,
@@ -124,6 +125,15 @@ describe("shadow browser node shim", () => {
     expect(projection.objects.map((item: any) => item.id)).toContain(actor);
     expect(projection.objects.every((item: any) => Array.isArray(item.ancestors))).toBe(true);
     expect(projection.subject.props.private_projection_probe).toBeUndefined();
+  });
+
+  it("keeps the projection patch field list aligned with projection shape", async () => {
+    const { browser } = await browserForScope("the_dubspace", "guest:browser-projection-patch-fields");
+    const opened = await openShadowBrowserScope(browser);
+    const projection = opened.projection as Record<string, unknown>;
+    const nonPatchFields = ["kind", "scope", "objects", "inventory"];
+
+    expect(Object.keys(projection).sort()).toEqual([...nonPatchFields, ...SHADOW_SCOPE_PROJECTION_PATCH_FIELDS].sort());
   });
 
   it("drives pinboard create, edit, layout, take, and drop actions through the browser shim", async () => {
@@ -586,7 +596,16 @@ describe("shadow browser node shim", () => {
     expect(second.cache.applied_frames).toHaveLength(1);
     expect(first.cache.transcript_tail).toHaveLength(1);
     expect(second.cache.transcript_tail).toHaveLength(1);
-    expect(second.cache.transfers.some((transfer) => transfer.mode === "delta")).toBe(true);
+    const secondDelta = second.cache.transfers.find((transfer) => transfer.mode === "delta");
+    expect(secondDelta).toBeDefined();
+    if (!secondDelta || secondDelta.mode !== "delta") throw new Error("expected second browser delta");
+    expect(secondDelta.projection).toBeUndefined();
+    expect(secondDelta.projection_patch).toMatchObject({
+      kind: "woo.scope_projection_patch.shadow.v1",
+      scope: "the_dubspace",
+      base: { seq: 0 },
+      to: { seq: 1 }
+    });
     expect(third.cache.transfers.some((transfer) => transfer.mode === "delta")).toBe(false);
     expect(third.cache.applied_frames).toHaveLength(0);
     expect(second.cache.projections.get("the_dubspace")).toMatchObject({
@@ -635,7 +654,8 @@ describe("shadow browser node shim", () => {
     if (!delta || delta.mode !== "delta") throw new Error("expected delta transfer");
 
     const tamperedProjection = structuredClone(delta);
-    tamperedProjection.projection = { ...(delta.projection as any), seq: 999 };
+    if (tamperedProjection.projection_patch) tamperedProjection.projection_patch.fields.seq = 999;
+    else tamperedProjection.projection = { ...(delta.projection as any), seq: 999 };
     expect(() => applyShadowBrowserTransfer(browser, tamperedProjection)).toThrow(/proof root mismatch/);
 
     const tamperedTranscript = structuredClone(delta);
@@ -1414,7 +1434,8 @@ function browserStateRootForTest(transfer: Extract<ShadowBrowserStateTransfer, {
     scope: transfer.scope,
     recipient: transfer.proof.recipient,
     head: transfer.to,
-    projection: transfer.projection,
+    projection: transfer.projection ?? null,
+    projection_patch: transfer.mode === "delta" ? transfer.projection_patch ?? null : null,
     applied: transfer.mode === "delta" ? transfer.applied.map((frame) => ({
       id: frame.id,
       position: frame.position,

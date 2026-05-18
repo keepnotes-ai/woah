@@ -407,6 +407,29 @@ describe("bundled catalog UI components", () => {
     expect(calls.some((c) => c.target === "obj_t_ready" && c.verb === "claim")).toBe(true);
   });
 
+  it("does not crash when host data is projection-shaped before tasks refresh", async () => {
+    const { WooTasksKanbanElement } = await import("../catalogs/tasks/ui/kanban-board");
+    defineOnce("woo-tasks-kanban", WooTasksKanbanElement);
+    const element = document.createElement("woo-tasks-kanban") as HTMLElement & { data?: any };
+    document.body.appendChild(element);
+
+    expect(() => {
+      element.data = {
+        id: "the_taskboard",
+        name: "Taskboard",
+        props: {
+          policies: { task: ["do:it"] },
+          roles: { doer: { description: "Does the work", owners: ["guest_1"] } },
+          obligations: { "do:it": { role: "doer", criterion: "Done." } }
+        },
+        catalogState: {}
+      };
+    }).not.toThrow();
+
+    expect(element.querySelector("h1")?.textContent).toBe("Taskboard");
+    expect(element.querySelector("[data-tasks-card]")).toBeNull();
+  });
+
   it("prompts for required args and dispatches with collected values", async () => {
     const { WooTasksKanbanElement } = await import("../catalogs/tasks/ui/kanban-board");
     defineOnce("woo-tasks-kanban", WooTasksKanbanElement);

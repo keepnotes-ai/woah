@@ -102,6 +102,21 @@ export type KanbanData = {
   policiesMap: Record<string, string[]>;
 };
 
+function emptyKanbanData(): KanbanData {
+  return {
+    registryId: "",
+    registryName: "Tasks",
+    actor: null,
+    actorNames: {},
+    tasks: [],
+    policies: [],
+    isOwner: false,
+    roles: [],
+    obligations: [],
+    policiesMap: {}
+  };
+}
+
 type StateColumnId = "ready" | "waiting" | "in_flight" | "done" | "dropped";
 type CreateDraft = { kind: string; name: string; text: string; labels: string };
 type AdminPanelMode = "edit" | "new";
@@ -322,6 +337,87 @@ function errorMessage(err: unknown): string {
   return String(err);
 }
 
+function plainRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function stringRecord(value: unknown, fallback: Record<string, string>): Record<string, string> {
+  const record = plainRecord(value);
+  if (!record) return { ...fallback };
+  const out: Record<string, string> = {};
+  for (const [key, item] of Object.entries(record)) if (typeof item === "string") out[key] = item;
+  return out;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function policiesMapFrom(value: unknown): Record<string, string[]> | null {
+  const record = plainRecord(value);
+  if (!record) return null;
+  const out: Record<string, string[]> = {};
+  for (const [key, item] of Object.entries(record)) if (Array.isArray(item)) out[key] = stringArray(item);
+  return out;
+}
+
+function rolesFrom(value: unknown): RegistryRole[] | null {
+  const record = plainRecord(value);
+  if (!record) return null;
+  return Object.entries(record).map(([name, item]) => {
+    const info = plainRecord(item) ?? {};
+    return {
+      name,
+      description: typeof info.description === "string" ? info.description : "",
+      owners: stringArray(info.owners)
+    };
+  });
+}
+
+function obligationsFrom(value: unknown): RegistryObligation[] | null {
+  const record = plainRecord(value);
+  if (!record) return null;
+  return Object.entries(record).map(([key, item]) => {
+    const info = plainRecord(item) ?? {};
+    return {
+      key,
+      role: typeof info.role === "string" ? info.role : "",
+      criterion: typeof info.criterion === "string" ? info.criterion : ""
+    };
+  });
+}
+
+function normalizeKanbanData(previous: KanbanData, value: unknown): KanbanData {
+  const record = plainRecord(value) ?? {};
+  const props = plainRecord(record.props) ?? {};
+  const registryId = typeof record.registryId === "string"
+    ? record.registryId
+    : typeof record.id === "string" ? record.id : previous.registryId;
+  const registryChanged = registryId !== previous.registryId;
+  const policiesMap = policiesMapFrom(record.policiesMap) ?? policiesMapFrom(props.policies) ?? (registryChanged ? {} : previous.policiesMap);
+  const policies = Array.isArray(record.policies)
+    ? stringArray(record.policies)
+    : Object.keys(policiesMap);
+  // `data` is an external custom-element boundary. The SPA may briefly hand
+  // projection-shaped `{ id, name, props }` data to the element before its
+  // WooContext refresh lands; keep every model collection iterable so that
+  // the self-fetch path can recover instead of crashing render().
+  return {
+    registryId,
+    registryName: typeof record.registryName === "string"
+      ? record.registryName
+      : typeof record.name === "string" ? record.name : registryChanged ? "Tasks" : previous.registryName,
+    actor: typeof record.actor === "string" || record.actor === null ? record.actor : registryChanged ? null : previous.actor,
+    actorNames: stringRecord(record.actorNames, registryChanged ? {} : previous.actorNames),
+    tasks: Array.isArray(record.tasks) ? record.tasks as KanbanTask[] : registryChanged ? [] : previous.tasks,
+    policies,
+    isOwner: typeof record.isOwner === "boolean" ? record.isOwner : registryChanged ? false : previous.isOwner,
+    roles: Array.isArray(record.roles) ? record.roles as RegistryRole[] : rolesFrom(props.roles) ?? (registryChanged ? [] : previous.roles),
+    obligations: Array.isArray(record.obligations) ? record.obligations as RegistryObligation[] : obligationsFrom(props.obligations) ?? (registryChanged ? [] : previous.obligations),
+    policiesMap
+  };
+}
+
 function coerceArg(raw: string, type: string): unknown {
   const trimmed = raw.trim();
   if (trimmed === "") return type === "str" ? "" : null;
@@ -526,18 +622,7 @@ export class WooTasksKanbanElement extends HTMLElement {
     this._subject = value;
     if (this.isConnected && this._woo && value) this.scheduleRefresh();
   }
-  private model: KanbanData = {
-    registryId: "",
-    registryName: "Tasks",
-    actor: null,
-    actorNames: {},
-    tasks: [],
-    policies: [],
-    isOwner: false,
-    roles: [],
-    obligations: [],
-    policiesMap: {}
-  };
+  private model: KanbanData = emptyKanbanData();
   private boundClick = false;
   private boundSubmit = false;
   private refreshing = false;
@@ -570,14 +655,7 @@ export class WooTasksKanbanElement extends HTMLElement {
   private visibleStateColumns = new Set<StateColumnId>(DEFAULT_VISIBLE_STATE_COLUMNS);
 
   set data(value: Partial<KanbanData> & Pick<KanbanData, "registryId" | "registryName" | "actor" | "actorNames" | "tasks">) {
-    this.model = {
-      policies: [],
-      isOwner: false,
-      roles: [],
-      obligations: [],
-      policiesMap: {},
-      ...value
-    };
+    this.model = normalizeKanbanData(this.model, value);
     if (this.shouldDeferRenderForFocus()) {
       this.renderDeferredForFocus = true;
       return;

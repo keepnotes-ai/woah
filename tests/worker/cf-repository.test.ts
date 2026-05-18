@@ -36,6 +36,127 @@ describe("v2 Worker fan-out helpers", () => {
     expect(grouped.get("browser-a")).toEqual(["event-1", "event-3"]);
     expect(grouped.get("browser-b")).toEqual(["event-2"]);
   });
+
+  it("supplements live browser fan-out from gateway sockets when commit-scope memory lacks peer nodes", async () => {
+    class SocketState extends FakeDurableObjectState {
+      override getWebSockets(): WebSocket[] {
+        return this.acceptedWebSockets;
+      }
+    }
+    class FakeWebSocket {
+      readonly sent: string[] = [];
+      constructor(private readonly attachment: Record<string, unknown>) {}
+      send(data: string): void { this.sent.push(data); }
+      deserializeAttachment(): unknown { return this.attachment; }
+    }
+
+    const directoryState = new FakeDurableObjectState("directory");
+    const gatewayState = new SocketState("world");
+    const directory = new DirectoryDO(directoryState as unknown as DurableObjectState, { WOO_INTERNAL_SECRET: "cf-test-secret" });
+    let gateway: PersistentObjectDO;
+    const env = {
+      WOO_INTERNAL_SECRET: "cf-test-secret",
+      WOO_AUTO_INSTALL_CATALOGS: "",
+      DIRECTORY: new FakeDurableObjectNamespace((name) => {
+        if (name !== "directory") throw new Error(`unexpected Directory DO ${name}`);
+        return directory;
+      }),
+      WOO: new FakeDurableObjectNamespace((name) => {
+        if (name === "world") return gateway;
+        throw new Error(`unexpected Woo DO ${name}`);
+      })
+    } as unknown as Env;
+    gateway = new PersistentObjectDO(gatewayState as unknown as DurableObjectState, env);
+
+    try {
+      const world = createWorld();
+      const alice = world.auth("guest:v2-live-alice");
+      const bob = world.auth("guest:v2-live-bob");
+      const aliceWs = new FakeWebSocket({
+        protocol: "v2-turn-network",
+        sessionId: alice.id,
+        actor: alice.actor,
+        socketId: "socket-alice",
+        node: "browser:alice",
+        scope: "the_chatroom",
+        token: "guest:v2-live-alice"
+      });
+      const bobWs = new FakeWebSocket({
+        protocol: "v2-turn-network",
+        sessionId: bob.id,
+        actor: bob.actor,
+        socketId: "socket-bob",
+        node: "browser:bob",
+        scope: "the_chatroom",
+        token: "guest:v2-live-bob"
+      });
+      gatewayState.acceptedWebSockets.push(aliceWs as unknown as WebSocket, bobWs as unknown as WebSocket);
+
+      const transcript = {
+        kind: "woo.effect_transcript.shadow.v1",
+        route: "direct",
+        scope: "the_chatroom",
+        seq: -1,
+        session: alice.id,
+        call: { actor: alice.actor, target: "the_chatroom", verb: "say", args: ["hello bob"] },
+        reads: [],
+        writes: [],
+        creates: [],
+        moves: [],
+        observations: [{ type: "said", source: "the_chatroom", actor: alice.actor, text: "hello bob", ts: 1 }],
+        logicalInputs: [],
+        untrackedEffects: [],
+        result: true,
+        complete: true,
+        incompleteReasons: [],
+        hash: "live-chat-transcript"
+      };
+      const reply = encodeEnvelope({
+        v: 2,
+        type: "woo.turn.exec.reply.shadow.v1",
+        id: "reply-live-chat",
+        from: "node:commit-scope:the_chatroom",
+        to: "browser:alice",
+        actor: alice.actor,
+        session: alice.id,
+        auth: { mode: "session", token: "guest:v2-live-alice" },
+        body: {
+          kind: "woo.turn.exec.reply.shadow.v1",
+          ok: true,
+          id: "turn-live-chat",
+          outcome: { result: true },
+          transcript
+        }
+      } as any);
+
+      await (gateway as unknown as {
+        deliverV2Fanout(
+          world: WooWorld,
+          scope: ObjRef,
+          result: { reply: string | null; fanout: Array<{ node: string; envelope: string }> },
+          originSessionId?: string | null,
+          originNode?: string | null
+        ): Promise<unknown>;
+      }).deliverV2Fanout(world, "the_chatroom", { reply, fanout: [] }, alice.id, "browser:alice");
+
+      expect(aliceWs.sent).toHaveLength(0);
+      expect(bobWs.sent).toHaveLength(1);
+      const delivered = decodeEnvelope(bobWs.sent[0]);
+      expect(delivered).toMatchObject({
+        type: "woo.live.event.shadow.v1",
+        to: "browser:bob",
+        body: {
+          kind: "woo.live.event.shadow.v1",
+          source: "the_chatroom",
+          actor: alice.actor,
+          observation: { type: "said", text: "hello bob" }
+        }
+      });
+    } finally {
+      directoryState.close();
+      gatewayState.close();
+    }
+  });
 });
 
 function sqlRows<T>(cursor: { toArray(): Record<string, unknown>[] }): T[] {
@@ -1336,7 +1457,8 @@ describe("CFObjectRepository production-shape coverage", () => {
       }
       return {
         fetch: async (request: Request): Promise<Response> => {
-          if (new URL(request.url).pathname === "/__internal/mcp-commit-fanout") {
+          const pathname = new URL(request.url).pathname;
+          if (pathname === "/__internal/mcp-commit-fanout" || pathname === "/__internal/mcp-live-fanout") {
             fanoutHosts.push(name);
             fanoutRequests.push({ host: name, request: request.clone() });
           }

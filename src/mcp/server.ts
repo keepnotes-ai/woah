@@ -334,6 +334,7 @@ function actorControlTool(actor: ObjRef, verb: string): McpTool {
     description: `MCP control wrapper for ${actor}:${verb}(...)`,
     inputSchema: { type: "object", properties: {} },
     direct: true,
+    persistence: "durable",
     enclosingSpace: null
   };
 }

@@ -7,7 +7,7 @@ import { signInternalRequest } from "../src/worker/internal-auth";
 import { FakeDurableObjectState } from "./worker/fake-do";
 
 describe("v2 MCP e2e", () => {
-  it("routes MCP tool calls through CommitScopeDO and fans accepted observations to MCP waiters", async () => {
+  it("routes MCP live tool calls through CommitScopeDO and fans observations to MCP waiters", async () => {
     const world = createWorld();
     const scopeState = new FakeDurableObjectState("the_chatroom");
     const env = { WOO_INTERNAL_SECRET: "v2-mcp-secret" };
@@ -46,12 +46,7 @@ describe("v2 MCP e2e", () => {
       ]));
 
       const accepted = sqlRows<{ body: string }>(scopeState.storage.sql.exec("SELECT body FROM v2_commit_scope_accepted_frame"));
-      expect(accepted).toHaveLength(1);
-      expect(JSON.parse(accepted[0].body)).toMatchObject({
-        kind: "woo.commit.accepted.shadow.v1",
-        position: { scope: "the_chatroom", seq: 1 },
-        observations: expect.arrayContaining([expect.objectContaining({ type: "said" })])
-      });
+      expect(accepted).toHaveLength(0);
 
       const aliceActor = world.sessions.get(alice)?.actor;
       const bobActor = world.sessions.get(bob)?.actor;
@@ -286,7 +281,7 @@ describe("v2 MCP e2e", () => {
       const results = await Promise.all(sessions.map(async (session, index) =>
         await mcp(gateway, session, 200 + index, "tools/call", {
           name: "woo_call",
-          arguments: { object: "the_chatroom", verb: "say", args: [`concurrent MCP ${index}`] }
+          arguments: { object: "the_chatroom", verb: "enter", args: [] }
         })
       ));
 

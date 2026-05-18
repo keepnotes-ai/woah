@@ -606,6 +606,10 @@ export function emitShadowBrowserLiveEvent(browser: ShadowBrowserNode, input: Sh
 }
 
 export function shadowLiveEventsForTranscript(browser: ShadowBrowserNode, transcript: EffectTranscript): ShadowLiveEvent[] {
+  return shadowLiveEventsForTranscriptRelay(browser.relay.node, transcript);
+}
+
+export function shadowLiveEventsForTranscriptRelay(relayNode: string, transcript: EffectTranscript): ShadowLiveEvent[] {
   return transcript.observations.map((observation, index) => {
     const actor = typeof observation?.actor === "string" ? observation.actor : transcript.call.actor;
     const scope = transcript.scope;
@@ -613,7 +617,7 @@ export function shadowLiveEventsForTranscript(browser: ShadowBrowserNode, transc
     const coalesce = typeof observation?.coalesce_key === "string" ? observation.coalesce_key : undefined;
     return {
       kind: "woo.live.event.shadow.v1",
-      id: `${browser.relay.node}:live:${transcript.hash}:${index}`,
+      id: `${relayNode}:live:${transcript.hash}:${index}`,
       source,
       actor,
       scope,

@@ -45,6 +45,7 @@ import { createHostOperationMemo, normalizeError } from "../core/world";
 import { installGitHubTap, updateGitHubTap, type CatalogTapLogEvent } from "../core/catalog-taps";
 import {
   createShadowBrowserRelayShim,
+  shadowLiveEventsForTranscriptRelay,
   shadowBrowserSessionBearer,
   shadowBrowserSessionClaimsValue,
   type ShadowBrowserRelayShim,
@@ -694,7 +695,7 @@ export class PersistentObjectDO {
           envelope: async (scope, body): Promise<McpV2EnvelopeResult> => {
             world.touchSessionInput(body.session);
             const result = await this.v2CommitScopePost<CommitScopeEnvelopeResponse>(scope, "/v2/envelope", body as unknown as Record<string, unknown>);
-            const delivery = await this.deliverV2Fanout(world, scope, result, body.session);
+            const delivery = await this.deliverV2Fanout(world, scope, result, body.session, body.node, { localMcpLiveHandled: true });
             return { ...result, local_host_materialized: delivery.localHostMaterialized };
           }
         },
@@ -1887,6 +1888,17 @@ export class PersistentObjectDO {
         return jsonResponse({ ok: true });
       }
 
+      if (request.method === "POST" && pathname === "/__internal/mcp-live-fanout") {
+        const scope = String(body.scope ?? "") as ObjRef;
+        if (!scope) throw wooError("E_INVARG", "mcp-live-fanout requires scope");
+        if (!body.transcript || typeof body.transcript !== "object" || Array.isArray(body.transcript)) {
+          throw wooError("E_INVARG", "mcp-live-fanout requires transcript");
+        }
+        const originSession = typeof body.origin_session === "string" ? body.origin_session : null;
+        this.getMcpGateway(world).acceptRemoteV2Live(scope, body.transcript as EffectTranscript, originSession);
+        return jsonResponse({ ok: true });
+      }
+
       if (request.method === "POST" && pathname === "/__internal/apply-v2-commit") {
         const scope = String(body.scope ?? "") as ObjRef;
         if (!scope) throw wooError("E_INVARG", "apply-v2-commit requires scope");
@@ -2655,7 +2667,7 @@ export class PersistentObjectDO {
         actor: att.actor,
         envelope: encoded
       });
-      const delivery = await this.deliverV2Fanout(world, att.scope, result, att.sessionId);
+      const delivery = await this.deliverV2Fanout(world, att.scope, result, att.sessionId, att.node);
       await this.applyV2CommittedTranscript(world, result.reply, att.sessionId, delivery.localHostMaterialized);
       if (result.reply) ws.send(result.reply);
     } catch (err) {
@@ -2775,7 +2787,7 @@ export class PersistentObjectDO {
       onMetric: (event) => world.recordMetric(event)
     });
     if (submitted.kind === "local_frame") return submitted.frame;
-    const delivery = await this.deliverV2Fanout(world, submitted.commitScope, submitted.result, input.session.id);
+    const delivery = await this.deliverV2Fanout(world, submitted.commitScope, submitted.result, input.session.id, submitted.client.node);
     if (!submitted.result.reply || !submitted.reply) throw wooError("E_INTERNAL", "v2 REST turn produced no reply");
     await this.applyV2CommittedTranscript(world, submitted.result.reply, input.session.id, delivery.localHostMaterialized);
     return restFrameFromTurnReply(input.scope, submitted.reply);
@@ -2897,38 +2909,50 @@ export class PersistentObjectDO {
     }
   }
 
-  private sendV2Fanout(fanout: Array<{ node: string; envelope: string }>): void {
-    if (fanout.length === 0) return;
+  private sendV2Fanout(fanout: Array<{ node: string; envelope: string }>): Set<string> {
+    const deliveredNodes = new Set<string>();
+    if (fanout.length === 0) return deliveredNodes;
     const byNode = v2FanoutEnvelopesByNode(fanout);
     for (const ws of this.state.getWebSockets()) {
       const att = this.attachment(ws);
       const envelopes = att?.node ? byNode.get(att.node) : undefined;
       if (!envelopes) continue;
+      let delivered = false;
       for (const envelope of envelopes) {
         try {
           ws.send(envelope);
+          delivered = true;
         } catch {
           // Socket cleanup is driven by webSocketClose/webSocketError; fan-out
           // should not fail the originator's already-accepted commit.
         }
       }
+      if (delivered && att?.node) deliveredNodes.add(att.node);
     }
+    return deliveredNodes;
   }
 
   private async deliverV2Fanout(
     world: WooWorld,
     scope: ObjRef,
     result: CommitScopeEnvelopeResponse,
-    originSessionId?: string | null
+    originSessionId?: string | null,
+    originNode?: string | null,
+    options: { localMcpLiveHandled?: boolean } = {}
   ): Promise<V2FanoutDelivery> {
     const fanout = result.fanout ?? [];
     if (!result.reply) {
       this.sendV2Fanout(fanout);
       return { localHostMaterialized: null };
     }
-    const reply = decodeEnvelope<ShadowTurnExecReply>(result.reply).body;
+    const replyEnvelope = decodeEnvelope<ShadowTurnExecReply>(result.reply);
+    const reply = replyEnvelope.body;
     if (reply.ok !== true || !reply.commit || !reply.transcript) {
-      this.sendV2Fanout(fanout);
+      const deliveredNodes = this.sendV2Fanout(fanout);
+      if (reply.ok === true && reply.transcript && !reply.commit) {
+        this.sendV2LiveTranscriptFanout(replyEnvelope, deliveredNodes, originNode ?? null);
+        await this.deliverMcpLiveFanout(world, scope, reply.transcript, originSessionId ?? null, options.localMcpLiveHandled === true);
+      }
       return { localHostMaterialized: null };
     }
     const revokedBefore = this.revokedApiKeyIds(world);
@@ -2941,6 +2965,88 @@ export class PersistentObjectDO {
       : reply.commit.observations;
     await this.deliverMcpCommitFanout(world, scope, fanout, { ...reply.commit, observations }, reply.transcript, originSessionId ?? null);
     return { localHostMaterialized };
+  }
+
+  private sendV2LiveTranscriptFanout(
+    replyEnvelope: ShadowEnvelope<ShadowTurnExecReply>,
+    alreadyDeliveredNodes: ReadonlySet<string>,
+    originNode: string | null
+  ): void {
+    const reply = replyEnvelope.body;
+    if (reply.ok !== true || !reply.transcript || reply.commit) return;
+    const from = replyEnvelope.from || this.durableHostKey();
+    const events = shadowLiveEventsForTranscriptRelay(from, reply.transcript);
+    if (events.length === 0) return;
+    for (const ws of this.state.getWebSockets()) {
+      const att = this.attachment(ws);
+      if (!att?.node || att.protocol !== "v2-turn-network") continue;
+      if (att.node === originNode || alreadyDeliveredNodes.has(att.node)) continue;
+      const matching = events.filter((event) => (event.audience?.scope ?? event.scope) === att.scope);
+      for (const event of matching) {
+        try {
+          ws.send(encodeEnvelope({
+            v: 2,
+            type: event.kind,
+            id: `${event.id}:${att.node}`,
+            from,
+            to: att.node,
+            actor: att.actor,
+            session: att.sessionId,
+            auth: { mode: "session", token: att.token ?? "" },
+            body: event
+          } satisfies ShadowEnvelope<typeof event>));
+        } catch {
+          // Socket cleanup is driven by webSocketClose/webSocketError.
+        }
+      }
+    }
+  }
+
+  private async deliverMcpLiveFanout(
+    world: WooWorld,
+    scope: ObjRef,
+    transcript: EffectTranscript,
+    originSessionId: string | null,
+    localAlreadyHandled: boolean
+  ): Promise<void> {
+    // Live transcripts have no accepted commit to replay later. Route their
+    // observations to MCP wait queues at the gateway layer, using the same
+    // Directory shard discovery as durable commit fanout.
+    if (!localAlreadyHandled) this.mcpGateway?.acceptRemoteV2Live(scope, transcript, originSessionId);
+    const affectedScopes = affectedMcpFanoutScopes(scope, transcript);
+    const cachedHosts = await this.activeMcpShardHosts();
+    const hosts = new Set(cachedHosts);
+    const scopedHosts = await this.mcpShardHostsForScopes(affectedScopes);
+    const localHost = this.durableHostKey();
+    let scopedAdded = 0;
+    for (const host of scopedHosts) {
+      if (host !== localHost && !hosts.has(host)) scopedAdded += 1;
+      hosts.add(host);
+    }
+    hosts.delete(localHost);
+    if (hosts.size === 0) return;
+    const body = {
+      scope,
+      origin_session: originSessionId,
+      transcript: transcript as unknown as WooValue
+    };
+    await Promise.all(Array.from(hosts, async (host) => {
+      try {
+        await this.forwardInternalChecked<{ ok: true }>(host, "/__internal/mcp-live-fanout", body, { timeoutMs: this.hostReadRpcTimeoutMs() });
+      } catch (err) {
+        console.warn("woo.mcp_live_fanout.failed", { host, scope, error: normalizeError(err) });
+      }
+    }));
+    world.recordMetric({
+      kind: "mcp_fanout",
+      scope,
+      shards: hosts.size,
+      observations: transcript.observations.length,
+      affected_scopes: affectedScopes.length,
+      cached_shards: cachedHosts.length,
+      scoped_shards: scopedHosts.length,
+      scoped_added: scopedAdded
+    });
   }
 
   private async writeThroughV2CommitToObjectHosts(

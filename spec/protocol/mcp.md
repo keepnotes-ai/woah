@@ -234,6 +234,7 @@ Queue retention is bounded by both depth (default cap 4096 observations) and age
 The queue receives:
 
 - **Applied frames** for spaces this MCP session is present in — same session-audience fan-out as WS clients.
+- **Live direct events** for spaces this MCP session is present in — same live-observation fan-out as WS clients.
 - **Direct events** addressed to the actor per the audience model ([events.md §12.7](../semantics/events.md#127-observation-audience-and-direct-message-routing)): `told`, `looked` to the actor, etc.
 - **Self-observations** the actor's own calls emit are returned in the **call's own response**, not queued. The verb's body emits to `ctx.observations`; that array travels with the result.
 
@@ -318,7 +319,7 @@ MCP is an agent-oriented deployment surface. The MCP gateway is separate from th
 
 A second-implementation conformance suite for MCP follows the broader conformance plan ([tooling/conformance.md](../tooling/conformance.md)) and is deferred until at least one alternative MCP gateway exists.
 
-The MCP gateway is the first consumer of the v2 turn-network protocol ([v2-turn-network.md](v2-turn-network.md)). On a separate Cloudflare namespace that does not maintain v1 compatibility, the gateway is a pure v2 client for world/object verb invocation: it forwards calls as `woo.turn.intent.request.shadow.v1` envelopes through `CommitScopeDO`, so the authority plans each turn against the live commit head, and routes v2 accepted-frame observations to MCP queues rather than consuming v1 applied-frames. MCP queue/focus controls remain gateway-local protocol controls because they manage session attention and observation drainage, not durable world commits. The MCP wire contract above (tools, notifications, queues) is unchanged; only the gateway's internal observation source and call path are rerouted. The legacy production namespace continues to drive MCP through the v1 path described in §M3–§M6. See [notes/2026-05-13-mcp-first-v2.md](../../notes/2026-05-13-mcp-first-v2.md) for the migration plan and implementation status.
+The MCP gateway is the first consumer of the v2 turn-network protocol ([v2-turn-network.md](v2-turn-network.md)). On a separate Cloudflare namespace that does not maintain v1 compatibility, the gateway is a pure v2 client for world/object verb invocation: it forwards calls as `woo.turn.intent.request.shadow.v1` envelopes through `CommitScopeDO`, so the authority plans each turn against the live commit head, and routes v2 accepted-frame and live observations to MCP queues rather than consuming v1 applied-frames. MCP queue/focus controls remain gateway-local protocol controls because they manage session attention and observation drainage, not durable world commits. The MCP wire contract above (tools, notifications, queues) is unchanged; only the gateway's internal observation source and call path are rerouted. The legacy production namespace continues to drive MCP through the v1 path described in §M3–§M6. See [notes/2026-05-13-mcp-first-v2.md](../../notes/2026-05-13-mcp-first-v2.md) for the migration plan and implementation status.
 
 ---
 

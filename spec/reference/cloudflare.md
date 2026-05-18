@@ -728,6 +728,12 @@ non-persistent snapshot and route the accepted observations into their own MCP
 wait queues. This keeps co-present MCP sessions observable across shard
 boundaries without making any shard authoritative for durable world state.
 
+Live no-commit v2 transcripts follow the same MCP shard discovery and are sent
+through signed `POST /__internal/mcp-live-fanout` with `{scope,
+origin_session, transcript}`. Remote shards do not apply these transcripts as
+durable state; they route the observations into MCP wait queues and deduplicate
+by transcript hash so internal retries do not double-deliver chat.
+
 Remote shards deduplicate accepted fanout by `(scope, seq)` using a bounded LRU.
 For scopes the shard has opened through its v2 relay, accepted commits are
 applied in relay-head order only: a commit with `seq == head.seq + 1` applies,

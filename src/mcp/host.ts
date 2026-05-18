@@ -50,6 +50,7 @@ export type McpTool = {
   description: string;
   inputSchema: Record<string, unknown>;
   direct: boolean;
+  persistence: "durable" | "live";
   enclosingSpace: ObjRef | null;
 };
 
@@ -81,7 +82,7 @@ export type McpInvocationResult = {
 };
 
 export type McpDispatchHooks = {
-  direct?: (sessionId: string, actor: ObjRef, target: ObjRef, verb: string, args: WooValue[], scope?: ObjRef | null) => McpDirectDispatchFrame | ErrorFrame | Promise<McpDirectDispatchFrame | ErrorFrame>;
+  direct?: (sessionId: string, actor: ObjRef, target: ObjRef, verb: string, args: WooValue[], scope?: ObjRef | null, persistence?: "durable" | "live") => McpDirectDispatchFrame | ErrorFrame | Promise<McpDirectDispatchFrame | ErrorFrame>;
   call?: (sessionId: string, actor: ObjRef, space: ObjRef, message: Message) => McpAppliedDispatchFrame | ErrorFrame | Promise<McpAppliedDispatchFrame | ErrorFrame>;
 };
 
@@ -186,13 +187,26 @@ export class McpHost {
         }
         continue;
       }
-      const audience = result.observationAudiences?.[i] ?? result.audienceActors ?? this.implicitAudience(observation, result.audience ?? null);
-      if (!audience) continue;
-      const audienceSet = new Set(audience);
+      const audience = result.observationAudiences?.[i] ?? result.audienceActors ?? null;
+      const audienceSet = audience ? new Set(audience) : null;
+      const directed = directedRecipients(observation);
+      const directedActors = new Set<ObjRef>();
+      if (directed.to) directedActors.add(directed.to);
+      if (directed.from) directedActors.add(directed.from);
+      const sourceScope = typeof observation.source === "string" ? observation.source : null;
       for (const [sessionId, queue] of this.queues) {
         if (originSessionId && sessionId === originSessionId) continue;
-        if (!audienceSet.has(queue.actor)) continue;
-        this.enqueueFor(sessionId, observation);
+        const sessionLocation = this.world.activeScopeForSession(sessionId);
+        const shouldDeliver = audienceSet
+          ? audienceSet.has(queue.actor)
+          : directedActors.size > 0
+            ? directedActors.has(queue.actor)
+            : !!result.audience && (
+              this.actorSubscribes(queue.actor, result.audience) ||
+              sessionLocation === result.audience ||
+              (sourceScope !== null && (this.actorSubscribes(queue.actor, sourceScope) || sessionLocation === sourceScope))
+            );
+        if (shouldDeliver) this.enqueueFor(sessionId, observation);
       }
     }
   }
@@ -236,14 +250,6 @@ export class McpHost {
       const queue = this.queues.get(sessionId);
       if (queue) void this.refreshToolList(sessionId, queue.actor).catch(() => {});
     }
-  }
-
-  private implicitAudience(observation: Observation, fallback: ObjRef | null): ObjRef[] | null {
-    const directed = directedRecipients(observation);
-    if (directed.to) return directed.from ? [directed.to, directed.from] : [directed.to];
-    if (typeof observation.to === "string") return [observation.to];
-    if (!fallback) return null;
-    return this.subscriberList(fallback);
   }
 
   private actorSubscribes(actor: ObjRef, space: ObjRef): boolean {
@@ -563,6 +569,7 @@ export class McpHost {
       description: this.toolDescription(object, { name: spec.verb, aliases: spec.aliases, source: spec.source }),
       inputSchema: argSpecToJsonSchema(spec.arg_spec),
       direct: spec.direct,
+      persistence: mcpToolPersistence(spec.arg_spec),
       enclosingSpace: spec.enclosingSpace
     };
   }
@@ -754,7 +761,7 @@ export class McpHost {
           return { result: await this.drainWait(sessionId, args), observations: [] };
         }
         const result = this.dispatchHooks.direct
-          ? await this.dispatchHooks.direct(sessionId, actor, tool.object, tool.verb, args, liveEnclosing)
+          ? await this.dispatchHooks.direct(sessionId, actor, tool.object, tool.verb, args, liveEnclosing, tool.persistence)
           : await this.world.directCall(undefined, actor, tool.object, tool.verb, args, { sessionId });
         if (result.op === "error") throw fromError(result.error);
         // Self observations are returned in the call result; do NOT route them
@@ -993,6 +1000,18 @@ function argSpecToJsonSchema(spec: Record<string, WooValue>): Record<string, unk
   const schema: Record<string, unknown> = { type: "object", properties };
   if (required.length > 0) schema.required = required;
   return schema;
+}
+
+function mcpToolPersistence(spec: Record<string, WooValue>): "durable" | "live" {
+  // The catalog command contract is transport-neutral. MCP exposes the same
+  // verbs as REST and the browser, so command persistence must follow
+  // arg_spec.command.persistence instead of being chosen by the MCP adapter.
+  const command = spec.command;
+  if (command && typeof command === "object" && !Array.isArray(command)) {
+    const persistence = (command as Record<string, WooValue>).persistence;
+    if (persistence === "live" || persistence === "durable") return persistence;
+  }
+  return "durable";
 }
 
 function jsonSchemaForHint(hint: string): Record<string, unknown> {

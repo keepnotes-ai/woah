@@ -538,6 +538,7 @@ describe("McpHost", () => {
       description: "",
       inputSchema: {},
       direct: true,
+      persistence: "durable",
       enclosingSpace: null
     };
     const direct = await host.invokeTool(session.actor, session.id, directTool, ["x"]);
@@ -551,6 +552,7 @@ describe("McpHost", () => {
       description: "",
       inputSchema: {},
       direct: false,
+      persistence: "durable",
       enclosingSpace: "remote_space"
     };
     const sequenced = await host.invokeTool(session.actor, session.id, sequencedTool, [1, 2]);
@@ -600,6 +602,7 @@ describe("McpHost", () => {
       description: "",
       inputSchema: {},
       direct: true,
+      persistence: "durable",
       enclosingSpace: "host_test_room_a"
     };
     await host.invokeTool(session.actor, session.id, directTool, []);
@@ -718,6 +721,7 @@ describe("McpHost", () => {
       description: "",
       inputSchema: {},
       direct: true,
+      persistence: "live",
       enclosingSpace: "the_chatroom"
     };
 
@@ -767,6 +771,7 @@ describe("McpHost", () => {
       description: "",
       inputSchema: {},
       direct: true,
+      persistence: "durable",
       enclosingSpace: "the_chatroom"
     };
 
@@ -830,6 +835,7 @@ describe("McpHost", () => {
       description: "",
       inputSchema: {},
       direct: true,
+      persistence: "durable",
       enclosingSpace: "the_chatroom"
     };
 
@@ -891,6 +897,7 @@ describe("McpHost", () => {
       description: "",
       inputSchema: {},
       direct: true,
+      persistence: "durable",
       enclosingSpace: "the_chatroom"
     };
     const drained = await host.invokeTool(bob.actor, bob.id, waitTool, [0, 10]);
@@ -925,12 +932,13 @@ describe("McpHost", () => {
       description: "",
       inputSchema: {},
       direct: true,
+      persistence: "durable",
       enclosingSpace: "the_chatroom"
     };
 
     await host.invokeTool(session.actor, session.id, tool, []);
 
-    expect(direct).toHaveBeenCalledWith(session.id, session.actor, session.actor, "focus_list", [], "the_chatroom");
+    expect(direct).toHaveBeenCalledWith(session.id, session.actor, session.actor, "focus_list", [], "the_chatroom", "durable");
     expect(refreshSpy).toHaveBeenCalledTimes(1);
     expect(metrics).toContainEqual(expect.objectContaining({
       kind: "mcp_tool_refresh_taken",

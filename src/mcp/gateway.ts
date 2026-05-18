@@ -123,8 +123,8 @@ export class McpGateway {
 
   constructor(private world: WooWorld, private options: McpGatewayOptions = {}) {
     const dispatch = options.v2 ? {
-      direct: async (sessionId: string, actor: ObjRef, target: ObjRef, verb: string, args: WooValue[], scope?: ObjRef | null) =>
-        await this.invokeV2Direct(sessionId, actor, target, verb, args, scope),
+      direct: async (sessionId: string, actor: ObjRef, target: ObjRef, verb: string, args: WooValue[], scope?: ObjRef | null, persistence?: "durable" | "live") =>
+        await this.invokeV2Direct(sessionId, actor, target, verb, args, scope, persistence),
       call: async (sessionId: string, actor: ObjRef, space: ObjRef, message: Message) =>
         await this.invokeV2Call(sessionId, actor, space, message)
     } satisfies McpDispatchHooks : options.dispatch;
@@ -262,6 +262,13 @@ export class McpGateway {
     }
     this.applyRemoteAccepted(scope, entry);
     this.drainRemoteAccepted(scope, commitScope);
+  }
+
+  acceptRemoteV2Live(scope: ObjRef, transcript: EffectTranscript, originSessionId?: string | null): void {
+    const key = remoteLiveAcceptedKey(scope, transcript);
+    if (this.remoteAccepted.has(key)) return;
+    this.rememberRemoteAccepted(key);
+    this.host.routeLiveEvents(liveFrameFromTranscript(scope, transcript), originSessionId ?? null);
   }
 
   private applyRemoteAccepted(scope: ObjRef, entry: RemoteAcceptedCommit): void {
@@ -407,12 +414,13 @@ export class McpGateway {
     target: ObjRef,
     verb: string,
     args: WooValue[],
-    scope?: ObjRef | null
+    scope?: ObjRef | null,
+    persistence: "durable" | "live" = "durable"
   ): Promise<DirectResultFrame | ErrorFrame> {
     // Direct calls record under their live audience when there is one, and
     // under the shadow direct-call scope (`#-1`) otherwise. McpHost passes the
     // tool's enclosing scope so the CommitScopeDO route matches the transcript.
-    const frame = await this.invokeV2(sessionId, actor, "direct", target, verb, args, scope ?? "#-1");
+    const frame = await this.invokeV2(sessionId, actor, "direct", target, verb, args, scope ?? "#-1", persistence);
     if (frame.op === "applied") throw new Error(`v2 direct call returned applied frame: ${target}:${verb}`);
     return frame;
   }
@@ -435,7 +443,8 @@ export class McpGateway {
     target: ObjRef,
     verb: string,
     args: WooValue[],
-    explicitScope?: ObjRef | null
+    explicitScope?: ObjRef | null,
+    persistence: "durable" | "live" = "durable"
   ): Promise<AppliedFrame | DirectResultFrame | ErrorFrame> {
     const hooks = this.options.v2;
     if (!hooks) throw new Error("MCP v2 client hooks are not configured");
@@ -453,7 +462,7 @@ export class McpGateway {
         target,
         verb,
         args,
-        persistence: "durable",
+        persistence,
         token: entry.v2Token
       },
       strategy: "intent",
@@ -487,7 +496,9 @@ export class McpGateway {
     if (reply.commit) {
       this.acceptV2Commit(client, reply, sessionId, result.local_host_materialized ?? null);
     }
-    return mcpFrameFromTurnReply(scope, reply);
+    const frame = mcpFrameFromTurnReply(scope, reply);
+    if (!reply.commit && frame.op === "result") this.host.routeLiveEvents(frame, sessionId);
+    return frame;
   }
 
   private async ensureV2ScopeClient(entry: SessionEntry, scope: ObjRef): Promise<V2ScopeClient> {
@@ -582,7 +593,11 @@ function mcpV2Token(woo: Session): string {
 }
 
 function remoteAcceptedKey(commit: ShadowCommitAccepted): string {
-  return `${commit.position.scope}:${commit.position.seq}`;
+  return `commit:${commit.position.scope}:${commit.position.seq}`;
+}
+
+function remoteLiveAcceptedKey(scope: ObjRef, transcript: EffectTranscript): string {
+  return `live:${scope}:${transcript.hash}`;
 }
 
 function mcpFrameFromTurnReply(scope: ObjRef, reply: Extract<ShadowTurnExecReply, { ok: true }>): AppliedFrame | DirectResultFrame | ErrorFrame {
@@ -625,6 +640,17 @@ function mcpFrameFromTurnReply(scope: ObjRef, reply: Extract<ShadowTurnExecReply
     // null, and omit undefined so JSON output matches normal applied frames.
     ...(reply.transcript.result !== undefined ? { result: reply.transcript.result } : {})
   }, reply.transcript);
+}
+
+function liveFrameFromTranscript(scope: ObjRef, transcript: EffectTranscript): DirectResultFrame {
+  return attachTranscript({
+    op: "result",
+    id: transcript.id,
+    command: transcript.call,
+    result: transcript.result ?? null,
+    observations: transcript.observations,
+    audience: scope
+  }, transcript);
 }
 
 function attachTranscript<T extends AppliedFrame | DirectResultFrame | ErrorFrame>(frame: T, transcript: EffectTranscript): T {

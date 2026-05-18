@@ -152,7 +152,7 @@ Work descriptions in `notes/` must be named by their origin date,
 e.g. "2026-05-03-perf-hotspots.md".  Reference material in `notes/`
 has undated filenames.
 
-Use Git worktrees for isolation.
+Use Git worktrees for isolation.  Every subagent must work in .claude/worktrees/<task>/
 
 **DO NOT commit to main, or deploy** without explicit instruction.
 

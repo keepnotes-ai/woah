@@ -2044,6 +2044,21 @@ describe("local catalogs", () => {
       expect(lookMugPlan.result).toMatchObject({ ok: true, route: "direct", target: "the_chatroom", verb: "look_at", args: ["the_mug"] });
     }
 
+    const lookOutlinePlan = await world.directCall("plan-look-outline", first.actor, "the_chatroom", "command_plan", ["look outline"]);
+    expect(lookOutlinePlan.op).toBe("result");
+    if (lookOutlinePlan.op === "result") {
+      expect(lookOutlinePlan.result).toMatchObject({ ok: true, route: "direct", target: "the_chatroom", verb: "look_at", args: ["the_outline"] });
+      const looked = await world.directCall("look-outline-command", first.actor, "the_chatroom", "look_at", ["the_outline"]);
+      expect(looked.op).toBe("result");
+      if (looked.op === "result") {
+        expect(looked.observations.find((obs) => obs.type === "looked")).toMatchObject({
+          room: "the_chatroom",
+          target: "the_outline"
+        });
+        expect(looked.result).toMatchObject({ id: "the_outline", summary: "Outline has 0 items." });
+      }
+    }
+
     world.createObject({ id: "custom_look_probe", name: "custom look probe", parent: "$thing", owner: "$wiz", location: "the_chatroom" });
     const customLook = installVerb(world, "custom_look_probe", "look", `verb :look() rxd {
   return { id: this, custom: true };

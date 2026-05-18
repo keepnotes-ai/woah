@@ -5996,20 +5996,36 @@ export class WooWorld {
     // V2 commit scopes plan against durable, long-lived snapshots. On every
     // open/envelope the gateway sends the authoritative live cells needed to
     // validate and plan the next turn: session rows, session actor objects,
-    // the rooms those sessions currently occupy, and each item the actor
-    // carries. Room rows carry contents/session_subscribers indexes, so
-    // cross-scope moves do not leave another CommitScopeDO planning against
-    // stale presence. Inventory items must travel too — verbs like `drop`
-    // assert `location(item) == actor`, which would fail on the destination
-    // scope if the item's location field were still anchored at the room
-    // where the actor first picked it up.
-    const ids: ObjRef[] = Array.from(extraObjectIds);
+    // the rooms those sessions currently occupy, each room/object's immediate
+    // contents, and each item's class/feature support rows. Refreshing a room
+    // without its visible contents creates a half-fresh snapshot: contents()
+    // returns a current content id, but dispatch/isa then fails
+    // because the object row or its catalog class is absent. Keep the expansion
+    // one-hop from explicit/session roots; callers that need deeper state must
+    // name the deeper object as an explicit row.
+    const ids: ObjRef[] = [];
+    const seen = new Set<ObjRef>();
+    const contentsExpanded = new Set<ObjRef>();
+    const push = (id: ObjRef | null | undefined, includeContents = false): void => {
+      if (!id) return;
+      const obj = this.objects.get(id);
+      if (!obj) return;
+      if (!seen.has(id)) {
+        seen.add(id);
+        ids.push(id);
+        if (obj.parent) push(obj.parent);
+        for (const feature of this.safeFeatureList(id)) push(feature);
+      }
+      if (!includeContents || contentsExpanded.has(id)) return;
+      contentsExpanded.add(id);
+      for (const item of obj.contents) push(item);
+    };
+    for (const id of extraObjectIds) push(id, true);
     for (const session of sessions) {
-      ids.push(session.actor);
-      if (session.activeScope) ids.push(session.activeScope);
+      push(session.actor, true);
+      if (session.activeScope) push(session.activeScope, true);
       const actor = this.objects.get(session.actor);
-      if (actor?.location) ids.push(actor.location);
-      if (actor) for (const item of actor.contents) ids.push(item);
+      if (actor?.location) push(actor.location, true);
     }
     return {
       kind: "woo.authority_slice.shadow.v1",
@@ -9624,6 +9640,7 @@ export class WooWorld {
     for (const candidate of candidates) {
       const pattern = commandPattern(candidate.arg_spec);
       if (!pattern) continue;
+      if (this.commandPatternTreatsTargetAsArgument(pattern, cmd, target)) continue;
       if (!await this.commandPatternMatches(ctx, pattern, cmd, target)) continue;
       return {
         target,
@@ -9634,6 +9651,22 @@ export class WooWorld {
       };
     }
     return null;
+  }
+
+  private commandPatternTreatsTargetAsArgument(pattern: CommandPattern, cmd: CommandMap, target: ObjRef): boolean {
+    // If the direct object is the target currently being searched, a pattern
+    // that passes that same object as an argument would make a containing-space
+    // dispatcher look like a target-owned command. For example, a mounted
+    // space that carries `$transparent` inherits `$conversational:look_at(obj)`;
+    // `look outline` must continue searching so the command room's look_at
+    // handles the object. Real target-owned object commands either use
+    // `dobj: "this"` or consume another slot, e.g. `@describe me as ...`
+    // targets `me` but passes only the iobj text to set_description.
+    const directObject = cmd.dobj_prefix ?? cmd.dobj;
+    if (!directObject || directObject !== target) return false;
+    if (pattern.dobj !== "object") return false;
+    const argsFrom = Array.isArray(pattern.args_from) ? pattern.args_from.map((item) => String(item)) : [];
+    return argsFrom.includes("dobj") || argsFrom.includes("dobj_prefix");
   }
 
   private async commandVerbCandidates(ctx: CallContext, target: ObjRef, name: string): Promise<CommandVerbSummary[]> {

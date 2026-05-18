@@ -4,10 +4,12 @@ import type { EffectTranscript } from "../src/core/effect-transcript";
 import type { SerializedWorld } from "../src/core/repository";
 import { decodeEnvelope, encodeEnvelope, type ShadowEnvelope } from "../src/core/shadow-envelope";
 import type { ShadowScopeHead } from "../src/core/shadow-commit-scope";
+import { runShadowTurnCall } from "../src/core/shadow-turn-call";
 import type { ShadowTurnExecReply, ShadowTurnExecRequest } from "../src/core/shadow-turn-exec";
 import {
   mergeV2TurnGatewayAuthority,
   submitTurnIntent,
+  v2TurnGatewayAuthorityPayload,
   v2TurnGatewayEnvelopeId,
   v2TurnGatewayReplyNeedsRepair,
   type V2TurnGatewayEnvelopeBody
@@ -15,6 +17,58 @@ import {
 import type { ObjRef } from "../src/core/types";
 
 describe("v2 turn gateway", () => {
+  it("refreshes room contents and support classes in authority slices for stale direct-look scopes", async () => {
+    const world = createWorld();
+    const session = world.auth("guest:v2-authority-room-contents");
+    await world.directCall("authority-look-enter", session.actor, "the_chatroom", "enter", [], { sessionId: session.id });
+
+    const serialized = world.exportWorld();
+    serialized.objects = serialized.objects.filter((obj) => !["the_outline", "$outliner"].includes(obj.id));
+    mergeV2TurnGatewayAuthority(
+      serialized,
+      v2TurnGatewayAuthorityPayload(world, ["the_chatroom", session.actor]).authority,
+      { clone: true }
+    );
+
+    const ids = new Set(serialized.objects.map((obj) => obj.id));
+    for (const id of ["the_chatroom", "$room", "$conversational", "the_outline", "$outliner"]) {
+      expect(ids.has(id)).toBe(true);
+    }
+
+    const look = await runShadowTurnCall(serialized, {
+      kind: "woo.turn_call.shadow.v1",
+      id: "authority-look-room",
+      route: "direct",
+      scope: "the_chatroom",
+      session: session.id,
+      actor: session.actor,
+      target: "the_chatroom",
+      verb: "look",
+      args: []
+    });
+    expect(look.frame.op).toBe("result");
+    if (look.frame.op !== "result") return;
+    expect(look.frame.result).toMatchObject({
+      id: "the_chatroom",
+      contents: expect.arrayContaining([expect.objectContaining({ id: "the_outline" })])
+    });
+
+    const lookOutline = await runShadowTurnCall(serialized, {
+      kind: "woo.turn_call.shadow.v1",
+      id: "authority-look-outline",
+      route: "direct",
+      scope: "the_chatroom",
+      session: session.id,
+      actor: session.actor,
+      target: "the_chatroom",
+      verb: "look_at",
+      args: ["the_outline"]
+    });
+    expect(lookOutline.frame.op).toBe("result");
+    if (lookOutline.frame.op !== "result") return;
+    expect(lookOutline.frame.result).toMatchObject({ id: "the_outline", summary: "Outline has 0 items." });
+  });
+
   it("classifies only state-repair replies as retryable", () => {
     expect(v2TurnGatewayReplyNeedsRepair({
       kind: "woo.turn.exec.reply.shadow.v1",

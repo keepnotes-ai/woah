@@ -1,5 +1,5 @@
 import type { EffectTranscript } from "../core/effect-transcript";
-import type { ShadowBrowserStateTransfer } from "../core/shadow-browser-node";
+import type { ShadowBrowserStateTransfer, ShadowScopeProjectionPatch } from "../core/shadow-browser-node";
 import type { ShadowCommitAccepted, ShadowScopeHead } from "../core/shadow-commit-scope";
 import type { ShadowEnvelope } from "../core/shadow-envelope";
 import type { ShadowTurnExecReply } from "../core/shadow-turn-exec";
@@ -11,6 +11,7 @@ export type V2BrowserCacheMutation =
   | { kind: "meta"; key: string; value: unknown }
   | { kind: "pending_delete"; id: string }
   | { kind: "projection"; scope: string; head: ShadowScopeHead; projection: WooValue }
+  | { kind: "projection_patch"; scope: string; head: ShadowScopeHead; patch: ShadowScopeProjectionPatch }
   | { kind: "applied_frame"; frame: ShadowCommitAccepted; transcript?: EffectTranscript }
   | { kind: "transcript"; transcript: EffectTranscript }
   | { kind: "object_page"; hash: string; object: SerializedObject }
@@ -71,8 +72,14 @@ function stateTransferMutations(transfer: ShadowBrowserStateTransfer): V2Browser
       .filter((item): item is Extract<V2BrowserCacheMutation, { kind: "state_page" }> => item !== null);
   }
   if (transfer.mode !== "projection" && transfer.mode !== "delta") return [];
+  const projectionMutation: V2BrowserCacheMutation | null = transfer.mode === "delta" && transfer.projection_patch
+    ? { kind: "projection_patch", scope: transfer.scope, head: transfer.to, patch: transfer.projection_patch }
+    : transfer.projection
+      ? { kind: "projection", scope: transfer.scope, head: transfer.to, projection: transfer.projection }
+      : null;
+  if (!projectionMutation) return [];
   const common: V2BrowserCacheMutation[] = [
-    { kind: "projection", scope: transfer.scope, head: transfer.to, projection: transfer.projection },
+    projectionMutation,
     { kind: "meta", key: `head:${transfer.scope}`, value: transfer.to },
     { kind: "meta", key: "catchup_required", value: false }
   ];

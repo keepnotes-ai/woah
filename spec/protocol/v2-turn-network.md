@@ -917,7 +917,24 @@ type StateTransfer = {
   transcript_tail?: EffectTranscript[];
   applied?: AppliedFrame[];
   projection?: WooValue;
+  projection_patch?: ProjectionPatch;
   proof?: StateProof;
+};
+
+type ProjectionPatch = {
+  kind: "woo.scope_projection_patch.shadow.v1";
+  scope: ScopeRef;
+  base: ScopeHead;
+  to: ScopeHead;
+  fields: Record<string, WooValue>;
+  objects: ProjectionListPatch;
+  inventory?: ProjectionListPatch;
+};
+
+type ProjectionListPatch = {
+  order: ObjRef[];
+  upsert: WooValue[];
+  remove: ObjRef[];
 };
 
 type StatePageRef = {
@@ -976,7 +993,15 @@ projection transfer instead of directly mutating the browser projection cache.
 After an accepted commit, the relay sends delta transfers only to browser nodes
 subscribed to that commit scope; other browser nodes learn the new head through
 later state transfer. A shadow delta transfer carries the accepted frame, a
-transcript tail, and a refreshed projection.
+transcript tail, and exactly one display-state update: either a full refreshed
+projection or a projection patch against the receiver's previous projection
+head. Relays SHOULD send a projection patch for hot subscribed fan-out when they
+know the receiver's cached base projection, and MUST fall back to a full
+projection when the base is unknown, the patch would be larger than replacement,
+or the receiver reports a missing/mismatched base. The first shadow patch shape
+updates scalar projection fields plus ordered object-summary lists. Patch base
+comparison MUST match scope, epoch, and sequence; when both sides have a non-empty
+head hash, it MUST match too.
 
 The M4 shadow projection body is `kind: "woo.scope_projection.shadow.v1"`.
 It is catalog-neutral display/cache state, not executable authority. It MUST
@@ -994,11 +1019,13 @@ observation schemas; the browser worker stores the projection opaquely.
 
 Browser projection/delta transfers use proof scheme `shadow.relay_mac.v1`.
 The proof root is a canonical hash over mode, scope, recipient, target head,
-projection, accepted-frame ids/positions/transcript hashes/post-state hashes,
-and transcript-tail hashes. The proof also carries authority, key id,
-recipient, and a MAC signature over the root. Receivers MUST verify the
-recipient binding, trusted relay authority, MAC signature, and transcript
-body-to-hash equality before installing projection/delta cache. This scheme is
+projection or projection patch, accepted-frame ids/positions/transcript
+hashes/post-state hashes, and transcript-tail hashes. The proof also carries
+authority, key id, recipient, and a MAC signature over the root. Receivers MUST verify the
+recipient binding, trusted relay authority, MAC signature, transcript
+body-to-hash equality, and projection-patch base before installing
+projection/delta cache. A receiver that cannot apply a projection patch MUST
+request or await a full projection transfer instead of guessing. This scheme is
 shadow-local relay authority, distinct from the execution-plane
 `shadow.anchor_mac.v1` object-record proof.
 
@@ -1138,9 +1165,9 @@ browser-shaped node/relay shim with an object-page cache, scope projection
 cache, pending-turn table, accepted/conflict frame queues, and transfer
 tracking. Scope open uses a shadow projection transfer, accepted commits fan
 out to subscribed browser nodes as shadow delta transfers carrying the accepted
-frame, transcript tail, and refreshed projection, and relay MAC proofs are
-verified before cache install. The shim also includes scope subscriptions and
-best-effort live-event fan-out with coalescing, without advancing the
+frame, transcript tail, and either a refreshed projection or a projection patch,
+and relay MAC proofs are verified before cache install. The shim also includes
+scope subscriptions and best-effort live-event fan-out with coalescing, without advancing the
 commit-scope head. Relay and browser diagnostic tails are bounded in the shadow
 implementation; if a browser reconnects from a head older than the retained
 tail, it receives a projection fallback rather than an unbounded replay. The

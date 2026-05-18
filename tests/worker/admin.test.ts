@@ -230,8 +230,11 @@ describe("/admin/footprint", () => {
     expect(sql).toContain("SUM(_sample_interval * double2) AS samples");
     expect(sql).toContain("quantileWeighted(0.5)(double1, toUInt32(_sample_interval * double2)) AS p50");
     expect(sql).toContain("quantileWeighted(0.95)(double1, toUInt32(_sample_interval * double2)) AS p95");
-    // toUInt8 cast guards against AE refusing Double*Boolean.
-    expect(sql).toContain("toUInt8(blob8 = 'error')");
+    // SUMIf with a Boolean predicate dodges AE's refusal to multiply
+    // Double × Boolean. The numerator and denominator share the same
+    // sample-weight expression so the ratio is well-defined under
+    // sampling.
+    expect(sql).toContain("SUMIf(_sample_interval * double2, blob8 = 'error')");
     // Default groupBy is class → blob3.
     expect(sql).toContain("blob3 AS k");
     expect(sql).toContain("LIMIT 50");

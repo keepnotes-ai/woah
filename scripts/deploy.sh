@@ -40,6 +40,43 @@ ok()     { echo "  ${GREEN}ok${NC}    $*"; }
 warn()   { echo "  ${YELLOW}warn${NC}  $*"; }
 fail()   { echo "  ${RED}FAIL${NC}  $*" >&2; exit 1; }
 
+# Postflight retry helper. Curl-only probe + status-code accept-set, retried
+# with linear backoff. Worker rollout to Cloudflare's edge isn't instantaneous,
+# so a single-shot postflight check can race a stale-version response (e.g.
+# /mcp POST returning 405 from a still-cached SPA-fallback view, or
+# /api/auth wizard claim returning a propagation-quirk 405 instead of 401).
+# The check waits up to ~12s for the new version to be reachable from the
+# probing edge before declaring failure. Each attempt obeys POSTFLIGHT_TIMEOUT
+# individually; total wall-time = attempts * POSTFLIGHT_TIMEOUT in the worst
+# case, but typically completes on the first attempt.
+#
+# Usage:
+#   retry_status_until <expected_status> <method> <url> [curl-args...]
+#   echo "$RETRY_BODY"  # last response body
+# Returns 0 if a probe matched the expected status, 1 otherwise.
+retry_status_until() {
+  local expected="$1"; shift
+  local method="$1"; shift
+  local url="$1"; shift
+  local attempts=6
+  local sleep_seconds=2
+  local body status
+  for ((i = 1; i <= attempts; i++)); do
+    body=$(curl -sS --max-time "$POSTFLIGHT_TIMEOUT" -X "$method" -w '\n%{http_code}' "$url" "$@" 2>/dev/null) || body=""
+    status="${body##*$'\n'}"
+    RETRY_BODY="${body%$'\n'*}"
+    if [[ "$status" == "$expected" ]]; then
+      RETRY_STATUS="$status"
+      RETRY_ATTEMPTS="$i"
+      return 0
+    fi
+    [[ $i -lt $attempts ]] && sleep "$sleep_seconds"
+  done
+  RETRY_STATUS="$status"
+  RETRY_ATTEMPTS="$attempts"
+  return 1
+}
+
 POSTFLIGHT_SESSIONS=()
 cleanup_postflight_sessions() {
   local sid status
@@ -314,14 +351,36 @@ ok "ws handshake (/v2/turn-network/ws): hello + state-transfer"
 # Wizard claim with a decoy token. On a claimed world this returns
 # E_TOKEN_CONSUMED; on a fresh world it returns a token-rejected error.
 # Either way the real WOO_INITIAL_WIZARD_TOKEN is not consumed and the
-# response is 401 — proves the bootstrap-claim path is wired.
-wiz_status=$(curl -sS --max-time "$POSTFLIGHT_TIMEOUT" -o /dev/null -w '%{http_code}' \
-  -X POST "$WORKER_URL/api/auth" \
-  -H 'content-type: application/json' \
-  -d '{"token":"wizard:woo-postflight-decoy"}')
-[[ "$wiz_status" == "401" ]] \
-  || fail "wizard decoy claim returned $wiz_status (expected 401; if 200, the real token was consumed!)"
-ok "wizard claim path: 401 (decoy rejected, real token untouched)"
+# response is 401 — proves the bootstrap-claim path is wired. Retried
+# via retry_status_until because CF edge rollout can momentarily serve
+# a stale view (we hit a 405 here once on 2026-05-18 during the
+# run_worker_first=true deploy propagation).
+if retry_status_until 401 POST "$WORKER_URL/api/auth" \
+    -H 'content-type: application/json' \
+    -d '{"token":"wizard:woo-postflight-decoy"}'; then
+  ok "wizard claim path: 401 (decoy rejected, real token untouched) [attempts=$RETRY_ATTEMPTS]"
+else
+  fail "wizard decoy claim returned $RETRY_STATUS after $RETRY_ATTEMPTS attempts (expected 401; if 200, the real token was consumed!)"
+fi
+
+# Lock-in for the Worker-first routing invariant. /mcp must not be
+# served by the SPA static-asset fallback — that would return 405 on
+# POST. Cheap insurance against a future wrangler.toml change quietly
+# undoing `run_worker_first = true`. A bare initialize request with no
+# session yields a 200 JSON-RPC response; 4xx is acceptable (probe
+# without protocol negotiation) as long as it is NOT 405.
+if retry_status_until 200 POST "$WORKER_URL/mcp" \
+    -H 'mcp-token: guest:postflight' \
+    -H 'content-type: application/json' \
+    -H 'accept: application/json, text/event-stream' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"postflight","version":"1"},"capabilities":{}}}'; then
+  ok "mcp routing: 200 (worker-first invariant intact) [attempts=$RETRY_ATTEMPTS]"
+else
+  # 405 specifically means the SPA static-asset fallback caught the
+  # request — the worker never ran. Other non-200 statuses indicate a
+  # different issue (auth, etc.) and would surface a clearer error.
+  fail "POST /mcp returned $RETRY_STATUS after $RETRY_ATTEMPTS attempts (expected 200; 405 means the SPA fallback intercepted — check wrangler.toml run_worker_first)"
+fi
 
 echo
 echo "${GREEN}${BOLD}deploy ok${NC} version=$version_id url=$WORKER_URL"
